@@ -9,6 +9,8 @@ type ChatWelcomeProps = {
   assistantAvatar: string | null;
   assistantAvatarUrl?: string | null;
   basePath?: string;
+  /** Optional per-agent quick-start phrases (shown instead of the default list). */
+  quickStart?: string[];
   onDraftChange: (next: string) => void;
   onSend: () => void;
 };
@@ -37,11 +39,29 @@ export function resolveAssistantDisplayAvatar(
   return resolveAssistantAvatarUrl(props) ?? resolveAssistantTextAvatar(props.assistantAvatar);
 }
 
+function resolveSuggestionTexts(props: ChatWelcomeProps): string[] {
+  // Custom per-agent quickStart wins over the default i18n list.
+  const custom = props.quickStart;
+  if (Array.isArray(custom) && custom.length > 0) {
+    const texts: string[] = [];
+    for (const entry of custom) {
+      if (typeof entry === "string" && entry.trim()) {
+        texts.push(entry.trim());
+      }
+    }
+    if (texts.length > 0) {
+      return texts;
+    }
+  }
+  return WELCOME_SUGGESTION_KEYS.map((key) => t(key));
+}
+
 export function renderWelcomeState(props: ChatWelcomeProps) {
   const name = props.assistantName || "Assistant";
   const avatar = resolveAssistantAvatarUrl(props);
   const avatarText = avatar ? null : resolveAssistantTextAvatar(props.assistantAvatar);
   const fallbackAvatarUrl = assistantAvatarFallbackUrl(props.basePath ?? "");
+  const suggestions = resolveSuggestionTexts(props);
 
   return html`
     <div class="agent-chat__welcome" style="--agent-color: var(--accent)">
@@ -68,8 +88,7 @@ export function renderWelcomeState(props: ChatWelcomeProps) {
         ${t("chat.welcome.hintAfterShortcut")}
       </p>
       <div class="agent-chat__suggestions">
-        ${WELCOME_SUGGESTION_KEYS.map((key) => {
-          const text = t(key);
+        ${suggestions.map((text) => {
           return html`
             <button
               type="button"

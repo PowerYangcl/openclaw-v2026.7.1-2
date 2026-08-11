@@ -32,6 +32,11 @@ import { formatRelativeTimestamp } from "../lib/format.ts";
 import { startHoverMarquee, stopHoverMarquee } from "../lib/hover-marquee.ts";
 import { resolveSessionDisplayName } from "../lib/session-display.ts";
 import {
+  assistantAvatarFallbackUrl,
+  normalizeAgentLabel,
+} from "../lib/agents/display.ts";
+import { resolveAgentAvatarUrl, resolveAssistantTextAvatar } from "../lib/avatar.ts";
+import {
   dissolveSessionGroup,
   loadStoredSessionCustomGroups,
   renameSessionGroup,
@@ -57,7 +62,6 @@ import {
 } from "../lib/sessions/session-key.ts";
 import {
   resolvePreferredSessionForAgent,
-  resolveSessionAgentFilterOptions,
 } from "../lib/sessions/session-options.ts";
 import { normalizeOptionalString } from "../lib/string-coerce.ts";
 import { getSafeLocalStorage } from "../local-storage.ts";
@@ -1358,211 +1362,94 @@ class AppSidebar extends LitElement {
 
   private renderSessions() {
     const context = this.context;
-    const {
-      routeSessionKey,
-      selectedAgentId,
-      recentSessions,
-      newSessionDisabled,
-      newSessionTitle,
-    } = this.getSessionNavigationState();
-    const workspaceGit =
-      context?.agents.state.agentsList?.agents.find(
-        (agent) => normalizeAgentId(agent.id) === normalizeAgentId(selectedAgentId),
-      )?.workspaceGit === true;
-    const newSessionButton = html`
-      <button
-        type="button"
-        class="sidebar-new-session"
-        aria-label=${t("chat.runControls.newSession")}
-        ?disabled=${newSessionDisabled}
-        @click=${() => void this.createSession()}
-      >
-        <span class="sidebar-new-session__icon" aria-hidden="true">${icons.plus}</span>
-        ${this.collapsed
-          ? nothing
-          : html`<span class="sidebar-new-session__label"
-              >${t("chat.runControls.newSession")}</span
-            >`}
-      </button>
-    `;
-    const newSessionControl = workspaceGit
-      ? html`
-          <div class="sidebar-new-session-group">
-            ${newSessionButton}
-            <button
-              type="button"
-              class="sidebar-new-session sidebar-new-session--worktree"
-              title=${t("chat.runControls.newSessionWorktree")}
-              aria-label=${t("chat.runControls.newSessionWorktree")}
-              ?disabled=${newSessionDisabled}
-              @click=${() => void this.createSession(true)}
-            >
-              <span class="sidebar-new-session__icon" aria-hidden="true">${icons.gitBranch}</span>
-            </button>
-          </div>
-        `
-      : newSessionButton;
-    // Stable navigation ordering carries through each pinned/category bucket;
-    // selecting a visible row only moves the active highlight.
-    const sections = groupSidebarSessionRows(recentSessions, {
-      grouping: this.sessionsGrouping,
-      // Stored-but-empty groups stay visible as sections so a freshly created
-      // group is usable as a move target before its first session arrives.
-      knownGroups: this.sessionsGrouping === "category" ? this.knownSessionGroups() : undefined,
-    });
-    const hasCategorySections = sections.some((section) => section.category !== undefined);
+    const { selectedAgentId } = this.getSessionNavigationState();
+    // Ensure the full runtime config (with agent descriptions) is loaded so the
+    // agent list can render each agent's description line.
+    void context?.runtimeConfig.ensureLoaded();
+    const agents = context?.agents.state.agentsList?.agents ?? [];
+    const defaultId = context?.agents.state.agentsList?.defaultId ?? null;
     return html`
-      <section class="sidebar-sessions ${this.collapsed ? "sidebar-sessions--collapsed" : ""}">
-        ${this.collapsed
-          ? html`<openclaw-tooltip .content=${newSessionTitle}
-              >${newSessionControl}</openclaw-tooltip
-            >`
-          : newSessionControl}
+      <section class="sidebar-sessions sidebar-agents ${this.collapsed
+        ? "sidebar-sessions--collapsed"
+        : ""}">
         ${this.collapsed
           ? nothing
           : html`
-              <div class="sidebar-recent-sessions" aria-label=${titleForRoute("sessions")}>
-                ${sections.map((section) => {
-                  if (section.id === "pinned" || section.category !== undefined) {
-                    const group = section.category;
-                    return html`
-                      <div class="sidebar-recent-sessions__group">
-                        <div
-                          class="sidebar-recent-sessions__head"
-                          @contextmenu=${group
-                            ? (event: MouseEvent) => {
-                                event.preventDefault();
-                                this.openSessionGroupMenu(
-                                  group,
-                                  event.clientX,
-                                  event.clientY,
-                                  null,
-                                );
-                              }
-                            : nothing}
-                        >
-                          <span class="sidebar-recent-sessions__label-text"
-                            >${section.id === "pinned"
-                              ? t("sessionsView.pinned")
-                              : section.category}</span
-                          >
-                          ${group
-                            ? html`
-                                <button
-                                  type="button"
-                                  class="sidebar-session-group-actions"
-                                  title=${t("sessionsView.groupMenu", { group })}
-                                  aria-label=${t("sessionsView.groupMenu", { group })}
-                                  aria-haspopup="menu"
-                                  aria-expanded=${String(this.sessionGroupMenu?.group === group)}
-                                  @click=${(event: MouseEvent) => {
-                                    event.stopPropagation();
-                                    const trigger = event.currentTarget as HTMLElement;
-                                    const rect = trigger.getBoundingClientRect();
-                                    this.openSessionGroupMenu(
-                                      group,
-                                      rect.right,
-                                      rect.bottom + 4,
-                                      trigger,
-                                    );
-                                  }}
-                                >
-                                  ${icons.moreHorizontal}
-                                </button>
-                              `
-                            : nothing}
-                        </div>
-                        <div class="sidebar-recent-sessions__list">
-                          ${section.rows.map((session) => this.renderRecentSession(session))}
-                        </div>
-                      </div>
-                    `;
-                  }
-                  return html`
-                    <div class="sidebar-recent-sessions__group">
-                      <div class="sidebar-recent-sessions__head">
-                        <span class="sidebar-recent-sessions__label-text"
-                          >${hasCategorySections && section.rows.length > 0
-                            ? t("sessionsView.ungrouped")
-                            : t("sessionsView.title")}</span
-                        >
-                        ${this.renderAgentScope(routeSessionKey, selectedAgentId)}
-                        <button
-                          type="button"
-                          class="sidebar-session-sort"
-                          title=${t("chat.sidebar.sortSessions")}
-                          aria-label=${t("chat.sidebar.sortSessions")}
-                          aria-haspopup="menu"
-                          aria-expanded=${String(this.sessionSortMenuPosition !== null)}
-                          @click=${(event: MouseEvent) => {
-                            const trigger = event.currentTarget as HTMLElement;
-                            const rect = trigger.getBoundingClientRect();
-                            this.openSessionSortMenu(rect.right, rect.bottom + 4, trigger);
-                          }}
-                        >
-                          ${icons.listFilter}
-                        </button>
-                      </div>
-                      <div class="sidebar-recent-sessions__list">
-                        ${recentSessions.length === 0
-                          ? this.renderChatFallback()
-                          : section.rows.map((session) => this.renderRecentSession(session))}
-                      </div>
-                      <a
-                        href=${pathForRoute("sessions", this.basePath)}
-                        class="sidebar-recent-sessions__all"
-                        @click=${(event: MouseEvent) => {
-                          if (!shouldHandleNavigationClick(event)) {
-                            return;
-                          }
-                          event.preventDefault();
-                          this.onNavigate?.("sessions");
-                        }}
-                      >
-                        <span>${t("chat.sidebar.allSessions")}</span>
-                        <span class="sidebar-recent-sessions__all-icon" aria-hidden="true"
-                          >${icons.chevronRight}</span
-                        >
-                      </a>
-                    </div>
-                  `;
-                })}
+              <div class="sidebar-agent-list" aria-label=${titleForRoute("sessions")}>
+                <div class="sidebar-agent-list__head">
+                  <span class="sidebar-agent-list__label-text">${t("sessionsView.title")}</span>
+                </div>
+                <div class="sidebar-agent-list__items">
+                  ${agents.length === 0
+                    ? this.renderChatFallback()
+                    : agents.map((agent) => this.renderAgentRow(agent, selectedAgentId, defaultId))}
+                </div>
               </div>
             `}
       </section>
     `;
   }
 
-  /** Compact agent scope switcher for the ungrouped session header. */
-  private renderAgentScope(sessionKey: string, selectedAgentId: string) {
-    const options = resolveSessionAgentFilterOptions({
-      agentsList: this.context?.agents.state.agentsList,
-      sessionsResult: this.sessionsResult,
-      sessionKey,
-    });
-    if (options.length <= 1) {
-      return nothing;
-    }
-    const selectedLabel =
-      options.find((option) => option.id === selectedAgentId)?.label ?? selectedAgentId;
+  /** Resolve an agent description from the full runtime config (not exposed on the agent row). */
+  private resolveAgentDescription(agentId: string): string {
+    const configForm = this.context?.runtimeConfig.state.configForm as
+      | { agents?: { list?: Array<{ id?: string; description?: string }> } }
+      | null
+      | undefined;
+    const list = configForm?.agents?.list ?? [];
+    const entry = list.find((item) => normalizeAgentId(item?.id ?? "") === normalizeAgentId(agentId));
+    return normalizeOptionalString(entry?.description) ?? "";
+  }
+
+  /** One agent row: avatar + name + description; click activates the agent's main session. */
+  private renderAgentRow(
+    agent: { id: string; name?: string; identity?: { emoji?: string; avatar?: string; avatarUrl?: string; name?: string } },
+    selectedAgentId: string,
+    defaultId: string | null,
+  ) {
+    const active = normalizeAgentId(agent.id) === normalizeAgentId(selectedAgentId);
+    const label = normalizeAgentLabel(agent);
+    const description = this.resolveAgentDescription(agent.id);
+    const avatarUrl = resolveAgentAvatarUrl(agent);
+    const textAvatar =
+      resolveAssistantTextAvatar(normalizeOptionalString(agent.identity?.emoji)) ??
+      resolveAssistantTextAvatar(normalizeOptionalString(agent.identity?.avatar)) ??
+      label.slice(0, 1).toUpperCase();
+    const rowClass = [
+      "sidebar-agent-row",
+      active ? "sidebar-agent-row--active" : "",
+    ]
+      .filter(Boolean)
+      .join(" ");
     return html`
-      <label class="sidebar-agent-scope" title=${selectedLabel}>
-        <select
-          data-chat-agent-filter="true"
-          aria-label=${t("chat.selectors.agentFilter")}
-          .value=${selectedAgentId}
-          ?disabled=${!this.connected}
-          @change=${(event: Event) => this.selectAgent((event.target as HTMLSelectElement).value)}
-        >
-          ${options.map(
-            (option) =>
-              html`<option value=${option.id} ?selected=${option.id === selectedAgentId}>
-                ${option.label}
-              </option>`,
-          )}
-        </select>
-        <span class="sidebar-agent-scope__chevron" aria-hidden="true">${icons.chevronDown}</span>
-      </label>
+      <button
+        type="button"
+        class=${rowClass}
+        data-agent-id=${agent.id}
+        title=${label}
+        ?disabled=${!this.connected}
+        @click=${() => this.selectAgent(agent.id)}
+      >
+        <span class="sidebar-agent-row__avatar" aria-hidden="true">
+          ${avatarUrl
+            ? html`<img
+                class="sidebar-agent-row__avatar-img"
+                src=${avatarUrl}
+                alt=""
+                @error=${(event: Event) => {
+                  const img = event.currentTarget as HTMLImageElement;
+                  img.src = assistantAvatarFallbackUrl(this.basePath);
+                }}
+              />`
+            : html`<span class="sidebar-agent-row__avatar-text">${textAvatar}</span>`}
+        </span>
+        <span class="sidebar-agent-row__body">
+          <span class="sidebar-agent-row__name">${label}</span>
+          ${description
+            ? html`<span class="sidebar-agent-row__desc">${description}</span>`
+            : nothing}
+        </span>
+      </button>
     `;
   }
 

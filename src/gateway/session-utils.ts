@@ -1345,6 +1345,7 @@ export function listAgentsForGateway(
         workspace,
         workspaceGit,
         agentRuntime,
+        quickStart: readAgentQuickStart(workspace),
         thinkingLevels,
         thinkingOptions: thinkingLevels.map((level) => level.label),
         thinkingDefault: resolveGatewaySessionThinkingDefault({
@@ -1360,6 +1361,34 @@ export function listAgentsForGateway(
     );
   });
   return { defaultId, mainKey, scope, agents };
+}
+
+/**
+ * Reads the optional quickStart phrases from an agent's workspace agent-config.json.
+ * Returns undefined (or empty) when the file/field is absent so callers fall back to defaults.
+ */
+function readAgentQuickStart(workspaceDir: string | undefined): string[] | undefined {
+  if (!workspaceDir) {
+    return undefined;
+  }
+  const configPath = path.join(workspaceDir, "agent-config.json");
+  let raw: string;
+  try {
+    raw = fs.readFileSync(configPath, "utf8");
+  } catch {
+    return undefined;
+  }
+  try {
+    const parsed = JSON.parse(raw) as { quickStart?: unknown };
+    const qs = parsed.quickStart;
+    if (!Array.isArray(qs)) {
+      return undefined;
+    }
+    const texts = qs.filter((x): x is string => typeof x === "string" && Boolean(x.trim()));
+    return texts.length > 0 ? texts : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function buildGatewaySessionStoreScanTargets(params: {

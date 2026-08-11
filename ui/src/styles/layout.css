@@ -1954,3 +1954,141 @@
   color: var(--muted);
   background: var(--bg);
 }
+
+/* ===== Agent list sidebar (custom: replaces session list) ===== */
+.sidebar-agents {
+  gap: 6px;
+}
+
+.sidebar-agent-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0 -8px;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.sidebar-agent-list__head {
+  display: flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 10px;
+  color: color-mix(in srgb, var(--muted) 72%, var(--text) 28%);
+}
+
+.sidebar-agent-list__label-text {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.sidebar-agent-list__items {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 0;
+}
+
+.sidebar-agent-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: none;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  transition:
+    background var(--duration-fast) ease,
+    color var(--duration-fast) ease;
+}
+
+.sidebar-agent-row:hover:not(:disabled) {
+  background: var(--accent-subtle);
+}
+
+.sidebar-agent-row--active {
+  background: var(--accent-subtle);
+}
+
+.sidebar-agent-row:disabled {
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+
+.sidebar-agent-row__avatar {
+  flex: 0 0 auto;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  overflow: hidden;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--accent-subtle);
+  color: var(--accent);
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.sidebar-agent-row__avatar-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.sidebar-agent-row__avatar-text {
+  line-height: 1;
+}
+
+.sidebar-agent-row__body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.sidebar-agent-row__name {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.25;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sidebar-agent-row--active .sidebar-agent-row__name {
+  color: var(--accent-hover);
+}
+
+.sidebar-agent-row__desc {
+  font-size: 11.5px;
+  line-height: 1.3;
+  color: color-mix(in srgb, var(--muted) 78%, var(--text) 22%);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* Collapsed sidebar: show only avatars, centered. */
+.sidebar--collapsed .sidebar-agent-list {
+  display: none;
+}
+
+/* ===== Enforce single main session per agent: hide residual create/fork entry points ===== */
+/* Chat composer new-session button (kept as belt-and-suspenders in case of stale bundles). */
+.agent-chat__toolbar-right [aria-label="新会话"],
+.agent-chat__toolbar-right [aria-label="New session"],
+.agent-chat__toolbar-right [aria-label="New Session"] {
+  display: none !important;
+}

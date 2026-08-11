@@ -5,6 +5,8 @@ export type GatewayAgentIdentity = {
   emoji?: string;
   avatar?: string;
   avatarUrl?: string;
+  /** Optional per-agent quick-start phrases surfaced to control UI. */
+  quickStart?: string[];
 };
 
 /** Model summary returned for an agent/session row. */
@@ -38,6 +40,8 @@ export type GatewayAgentRow = {
   thinkingLevels?: GatewayThinkingLevelOption[];
   thinkingOptions?: string[];
   thinkingDefault?: string;
+  /** Optional per-agent quick-start phrases (welcome panel). */
+  quickStart?: string[];
 };
 
 /** Generic base for paged session-list responses. */

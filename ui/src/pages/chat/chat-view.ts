@@ -91,6 +91,7 @@ export type ChatProps = {
   assistantName: string;
   sendShortcut?: ChatSendShortcut;
   assistantAvatar: string | null;
+  quickStart?: string[];
   userName?: string | null;
   userAvatar?: string | null;
   localMediaPreviewRoots?: string[];
@@ -173,6 +174,7 @@ export function renderChat(props: ChatProps) {
     assistantName: props.assistantName,
     assistantAvatar: props.assistantAvatar,
     assistantAvatarUrl: props.assistantAvatarUrl,
+    quickStart: props.quickStart,
     userName: props.userName,
     userAvatar: props.userAvatar,
     basePath: props.basePath,

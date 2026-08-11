@@ -82,6 +82,7 @@ type ChatThreadProps = {
   assistantName: string;
   assistantAvatar: string | null;
   assistantAvatarUrl?: string | null;
+  quickStart?: string[];
   userName?: string | null;
   userAvatar?: string | null;
   basePath?: string;
@@ -699,7 +700,7 @@ export function renderChatThread(props: ChatThreadProps) {
     >
       <div class="chat-thread-inner">
         ${showLoadingSkeleton ? renderLoadingSkeleton() : nothing}
-        ${isEmpty && !state.searchOpen ? renderWelcomeState(props) : nothing}
+        ${isEmpty && !state.searchOpen ? renderWelcomeState({ ...props, quickStart: props.quickStart }) : nothing}
         ${isEmpty && state.searchOpen
           ? html` <div class="agent-chat__empty">No matching messages</div> `
           : nothing}

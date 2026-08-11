@@ -801,6 +801,8 @@ class ChatPane extends LitElement {
     `;
   }
 
+
+
   override render() {
     const state = this.state;
     if (!state) {
@@ -989,6 +991,7 @@ class ChatPane extends LitElement {
       onClearHistory: () => void clearChatHistory(state),
       agentsList: state.agentsList,
       currentAgentId,
+      quickStart: resolveSameAgentQuickStart(state.agentsList, currentAgentId),
       fullMessageAgentId: scopedAgentParamsForSession(state, state.sessionKey).agentId,
       onAgentChange: (agentId) => {
         const nextSessionKey = buildAgentMainSessionKey({ agentId });
@@ -1041,4 +1044,19 @@ declare global {
   interface HTMLElementTagNameMap {
     "openclaw-chat-pane": ChatPane;
   }
+}
+
+function resolveSameAgentQuickStart(
+  agentsList: { agents: Array<{ id: string; quickStart?: string[] }> } | null,
+  agentId: string,
+): string[] | undefined {
+  if (!agentsList || !agentId) {
+    return undefined;
+  }
+  const agent = agentsList.agents?.find((a) => a?.id === agentId);
+  const qs = agent?.quickStart;
+  if (Array.isArray(qs) && qs.length > 0) {
+    return qs.filter((x): x is string => typeof x === "string" && Boolean(x.trim()));
+  }
+  return undefined;
 }

@@ -1221,18 +1221,7 @@ function renderRows(row: GatewaySessionRow, props: SessionsProps) {
           >
             ${row.unread ? icons.eye : icons.circle}
           </button>
-          <button
-            class="icon-btn"
-            title=${t("sessionsView.forkSession")}
-            aria-label=${t("sessionsView.forkSession")}
-            ?disabled=${props.loading}
-            @click=${(event: MouseEvent) => {
-              event.stopPropagation();
-              void props.onFork(row.key);
-            }}
-          >
-            ${icons.copy}
-          </button>
+          ${nothing /* fork button removed: single main session per agent */}
           <button
             class="icon-btn"
             title=${row.pinned ? t("sessionsView.unpinSession") : t("sessionsView.pinSession")}

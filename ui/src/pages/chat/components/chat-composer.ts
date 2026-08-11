@@ -1856,20 +1856,7 @@ export function renderChatRunControls(props: ChatRunControlsProps) {
 
   return html`
     <div class="agent-chat__toolbar-right">
-      ${showSecondary && !props.canAbort
-        ? html`
-            <openclaw-tooltip .content=${t("chat.runControls.newSession")}>
-              <button
-                class="btn btn--ghost"
-                @click=${props.onNewSession}
-                aria-label=${t("chat.runControls.newSession")}
-              >
-                ${icons.plus}
-                <span class="agent-chat__control-label">${t("chat.runControls.newSession")}</span>
-              </button>
-            </openclaw-tooltip>
-          `
-        : nothing}
+      ${nothing /* new-session button removed: single main session per agent */}
       ${showSecondary
         ? html`
             <openclaw-tooltip .content=${t("chat.runControls.export")}>
