@@ -92,13 +92,6 @@ export function renderChatAvatar(
 
   if (assistantAvatar && normalized === "assistant") {
     if (isAvatarUrl(assistantAvatar)) {
-      if (authToken?.trim() && assistantAvatar.startsWith("/")) {
-        return html`<img
-          class="chat-avatar ${className} chat-avatar--logo"
-          src="${assistantFallbackAvatar}"
-          alt="${assistantName}"
-        />`;
-      }
       return html`<img
         class="chat-avatar ${className}"
         src="${assistantAvatar}"
