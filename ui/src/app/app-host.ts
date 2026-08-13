@@ -670,8 +670,10 @@ class OpenClawShell extends LitElement {
       this.agentsListClient = null;
       return;
     }
-    const routeId = this.routeState.routeId;
-    if (!routeId || routeId === "chat" || this.context?.agents.state.agentsList) {
+    // GCS customization: always load agent list, even on chat route,
+    // so the sidebar shows all agents immediately after token login.
+    // 解决携带token登录的问题：http://116.198.29.26:18790/?token=b4ba18c3418e0361bb457d7f982a0b3c4c9b0c3b5b63ada7
+    if (this.context?.agents.state.agentsList) {
       return;
     }
     if (this.agentsListClient === snapshot.client) {
