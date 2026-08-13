@@ -476,23 +476,18 @@ details.msg-meta:not([open]) .msg-meta__details {
   display: none;
 }
 
+/* 常驻显示：details 默认 open，details 样式改为内联 */
+details.msg-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .msg-meta__details {
   display: inline-flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
-  position: absolute;
-  right: auto;
-  bottom: 100%;
-  left: 0;
-  z-index: 30;
-  width: max-content;
-  max-width: min(28rem, calc(100vw - 32px));
-  padding: 3px 7px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-full);
-  background: var(--card);
-  box-shadow: 0 8px 24px color-mix(in srgb, #000 30%, transparent);
 }
 
 .chat-group.user .msg-meta__details {

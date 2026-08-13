@@ -852,6 +852,8 @@ type GroupMeta = {
   cacheWrite: number;
   cost: number;
   model: string | null;
+  provider: string | null;
+  hasUsage: boolean;
   contextPercent: number | null;
 };
 
@@ -862,6 +864,7 @@ function extractGroupMeta(group: MessageGroup, contextWindow: number | null): Gr
   let cacheWrite = 0;
   let cost = 0;
   let model: string | null = null;
+  let provider: string | null = null;
   let hasUsage = false;
   let maxPromptTokens = 0;
 
@@ -883,12 +886,17 @@ function extractGroupMeta(group: MessageGroup, contextWindow: number | null): Gr
       cacheWrite += callCacheWrite;
       maxPromptTokens = Math.max(maxPromptTokens, callInput + callCacheRead + callCacheWrite);
     }
-    const c = m.cost as Record<string, number> | undefined;
+    const c = (m.cost ?? (m.usage as Record<string, unknown> | undefined)?.cost) as
+      | Record<string, number>
+      | undefined;
     if (c?.total) {
       cost += c.total;
     }
     if (typeof m.model === "string" && m.model !== "gateway-injected") {
       model = m.model;
+    }
+    if (typeof m.provider === "string") {
+      provider = m.provider;
     }
   }
 
@@ -901,7 +909,7 @@ function extractGroupMeta(group: MessageGroup, contextWindow: number | null): Gr
       ? Math.min(Math.round((maxPromptTokens / contextWindow) * 100), 100)
       : null;
 
-  return { input, output, cacheRead, cacheWrite, cost, model, contextPercent };
+  return { input, output, cacheRead, cacheWrite, cost, model, provider, hasUsage, contextPercent };
 }
 
 function renderMessageMeta(timestamp: number, meta: GroupMeta | null) {
@@ -934,7 +942,10 @@ function renderMessageMeta(timestamp: number, meta: GroupMeta | null) {
   }
 
   // Cost
-  if (meta.cost > 0) {
+  const isJdLlm = meta.provider === "jd-llm";
+  if (isJdLlm && meta.hasUsage) {
+    parts.push(html`<span class="msg-meta__cost">${Math.round(meta.cost)}积分</span>`);
+  } else if (!isJdLlm && meta.cost > 0) {
     parts.push(html`<span class="msg-meta__cost">$${meta.cost.toFixed(4)}</span>`);
   }
 
@@ -966,6 +977,7 @@ function renderMessageMeta(timestamp: number, meta: GroupMeta | null) {
   return html`
     <details
       class="msg-meta"
+      open
       @pointerenter=${previewMessageMeta}
       @pointerleave=${closeMessageMetaPreview}
       @focusin=${previewMessageMeta}
