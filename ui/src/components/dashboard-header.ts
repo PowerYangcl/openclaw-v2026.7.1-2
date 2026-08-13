@@ -46,10 +46,10 @@ class DashboardHeader extends LitElement {
                   href=${this.overviewHref}
                   @click=${this.handleOverviewClick}
                 >
-                  OpenClaw
+                  GCS
                 </a>
               `
-            : html`<span class="dashboard-header__breadcrumb-link">OpenClaw</span>`}
+            : html`<span class="dashboard-header__breadcrumb-link">GCS</span>`}
           ${agentLabel
             ? html`
                 <span class="dashboard-header__breadcrumb-segment">

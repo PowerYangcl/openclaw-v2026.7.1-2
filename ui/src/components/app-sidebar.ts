@@ -27,15 +27,12 @@ import "./theme-mode-toggle.ts";
 import "./tooltip.ts";
 import type { ThemeMode } from "../app/theme.ts";
 import { t } from "../i18n/index.ts";
+import { assistantAvatarFallbackUrl, normalizeAgentLabel } from "../lib/agents/display.ts";
+import { resolveAgentAvatarUrl, resolveAssistantTextAvatar } from "../lib/avatar.ts";
 import { buildExternalLinkRel, EXTERNAL_LINK_TARGET } from "../lib/external-link.ts";
 import { formatRelativeTimestamp } from "../lib/format.ts";
 import { startHoverMarquee, stopHoverMarquee } from "../lib/hover-marquee.ts";
 import { resolveSessionDisplayName } from "../lib/session-display.ts";
-import {
-  assistantAvatarFallbackUrl,
-  normalizeAgentLabel,
-} from "../lib/agents/display.ts";
-import { resolveAgentAvatarUrl, resolveAssistantTextAvatar } from "../lib/avatar.ts";
 import {
   dissolveSessionGroup,
   loadStoredSessionCustomGroups,
@@ -60,9 +57,7 @@ import {
   parseAgentSessionKey,
   resolveUiConfiguredMainKey,
 } from "../lib/sessions/session-key.ts";
-import {
-  resolvePreferredSessionForAgent,
-} from "../lib/sessions/session-options.ts";
+import { resolvePreferredSessionForAgent } from "../lib/sessions/session-options.ts";
 import { normalizeOptionalString } from "../lib/string-coerce.ts";
 import { getSafeLocalStorage } from "../local-storage.ts";
 import { pluginTabKey, pluginTabSearch } from "../pages/plugin/route.ts";
@@ -302,8 +297,9 @@ class AppSidebar extends LitElement {
             src=${controlUiPublicAssetPath("apple-touch-icon.png", this.basePath)}
             alt=""
             aria-hidden="true"
+            style="display:none"
           />
-          ${this.collapsed ? nothing : html`<span class="sidebar-brand__title">OpenClaw</span>`}
+          ${this.collapsed ? nothing : html`<span class="sidebar-brand__title">对话</span>`}
         </div>
         <div class="sidebar-brand__actions">
           ${this.renderSearch()}
@@ -1369,9 +1365,11 @@ class AppSidebar extends LitElement {
     const agents = context?.agents.state.agentsList?.agents ?? [];
     const defaultId = context?.agents.state.agentsList?.defaultId ?? null;
     return html`
-      <section class="sidebar-sessions sidebar-agents ${this.collapsed
-        ? "sidebar-sessions--collapsed"
-        : ""}">
+      <section
+        class="sidebar-sessions sidebar-agents ${this.collapsed
+          ? "sidebar-sessions--collapsed"
+          : ""}"
+      >
         ${this.collapsed
           ? nothing
           : html`
@@ -1397,13 +1395,19 @@ class AppSidebar extends LitElement {
       | null
       | undefined;
     const list = configForm?.agents?.list ?? [];
-    const entry = list.find((item) => normalizeAgentId(item?.id ?? "") === normalizeAgentId(agentId));
+    const entry = list.find(
+      (item) => normalizeAgentId(item?.id ?? "") === normalizeAgentId(agentId),
+    );
     return normalizeOptionalString(entry?.description) ?? "";
   }
 
   /** One agent row: avatar + name + description; click activates the agent's main session. */
   private renderAgentRow(
-    agent: { id: string; name?: string; identity?: { emoji?: string; avatar?: string; avatarUrl?: string; name?: string } },
+    agent: {
+      id: string;
+      name?: string;
+      identity?: { emoji?: string; avatar?: string; avatarUrl?: string; name?: string };
+    },
     selectedAgentId: string,
     defaultId: string | null,
   ) {
@@ -1415,10 +1419,7 @@ class AppSidebar extends LitElement {
       resolveAssistantTextAvatar(normalizeOptionalString(agent.identity?.emoji)) ??
       resolveAssistantTextAvatar(normalizeOptionalString(agent.identity?.avatar)) ??
       label.slice(0, 1).toUpperCase();
-    const rowClass = [
-      "sidebar-agent-row",
-      active ? "sidebar-agent-row--active" : "",
-    ]
+    const rowClass = ["sidebar-agent-row", active ? "sidebar-agent-row--active" : ""]
       .filter(Boolean)
       .join(" ");
     return html`
@@ -1591,34 +1592,7 @@ class AppSidebar extends LitElement {
                   ${icons.settings}
                 </a>
               </openclaw-tooltip>
-              <openclaw-tooltip
-                .content=${t("chat.docsOpensInNewTab", { label: t("common.docs") })}
-              >
-                <a
-                  class="sidebar-footer-icon"
-                  href="https://docs.openclaw.ai"
-                  target=${EXTERNAL_LINK_TARGET}
-                  rel=${buildExternalLinkRel()}
-                  aria-label=${t("common.docs")}
-                >
-                  ${icons.book}
-                </a>
-              </openclaw-tooltip>
-              <openclaw-tooltip
-                .content=${this.canPairDevice
-                  ? t("nodes.pairing.button")
-                  : t("nodes.pairing.adminRequired")}
-              >
-                <button
-                  class="sidebar-footer-icon sidebar-pair-mobile"
-                  type="button"
-                  aria-label=${t("nodes.pairing.button")}
-                  ?disabled=${!this.canPairDevice}
-                  @click=${() => this.onPairMobile?.()}
-                >
-                  ${icons.smartphone}
-                </button>
-              </openclaw-tooltip>
+
               <span class="sidebar-mode-switch">
                 <openclaw-theme-mode-toggle .mode=${this.themeMode}></openclaw-theme-mode-toggle>
               </span>
