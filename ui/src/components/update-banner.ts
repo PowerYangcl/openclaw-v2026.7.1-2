@@ -91,34 +91,7 @@ class UpdateBanner extends LitElement {
             ${props.statusBanner.text}
           </div>`
         : nothing}
-      ${updateAvailable &&
-      updateAvailable.latestVersion !== updateAvailable.currentVersion &&
-      !isDismissed(updateAvailable)
-        ? html`<div class="update-banner callout danger" role="alert">
-            <strong>${t("chat.updateAvailable")}</strong> v${updateAvailable.latestVersion}
-            (${t("chat.runningVersion", { version: updateAvailable.currentVersion })}).
-            <button
-              class="btn btn--sm update-banner__btn"
-              ?disabled=${props.updateRunning || !props.connected}
-              @click=${() => props.onUpdate()}
-            >
-              ${props.updateRunning ? t("chat.updating") : t("chat.updateNow")}
-            </button>
-            <openclaw-tooltip .content=${t("common.dismiss")}>
-              <button
-                class="update-banner__close"
-                type="button"
-                aria-label=${t("chat.dismissUpdateBanner")}
-                @click=${() => {
-                  dismiss(updateAvailable);
-                  props.onDismiss();
-                }}
-              >
-                ${icons.x}
-              </button>
-            </openclaw-tooltip>
-          </div>`
-        : nothing}
+      ${nothing /* GCS: 隐藏更新提示横幅 */}
     `;
   }
 }

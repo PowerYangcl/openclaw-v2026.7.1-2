@@ -8,6 +8,18 @@
     />
     <title>Gcs Agent</title>
     <meta name="color-scheme" content="dark light" />
+    <script>
+      (function () {
+        // GCS: 每次新开标签页强制刷新一次，确保 Gateway 下发最新 agentsList(quickStart) 和模型配置
+        var SESSION_KEY = 'gcs.reloaded';
+        try {
+          if (!sessionStorage.getItem(SESSION_KEY)) {
+            sessionStorage.setItem(SESSION_KEY, '1');
+            window.location.reload(true);
+          }
+        } catch (e) {}
+      })();
+    </script>
     <link rel="manifest" href="/manifest.webmanifest" />
     <script>
       (function () {
