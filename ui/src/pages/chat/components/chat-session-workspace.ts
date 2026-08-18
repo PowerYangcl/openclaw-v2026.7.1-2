@@ -543,6 +543,8 @@ function renderWorkspaceRailSection(
 export function renderSessionWorkspaceRail(
   sessionWorkspace: SessionWorkspaceProps | undefined,
 ): TemplateResult | typeof nothing {
+  // GCS: 隐藏工作区 Rail 区块；恢复时删掉此行
+  return nothing;
   if (!sessionWorkspace) {
     return nothing;
   }

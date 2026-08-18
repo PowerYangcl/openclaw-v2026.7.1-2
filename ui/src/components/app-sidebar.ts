@@ -415,9 +415,10 @@ class AppSidebar extends LitElement {
     }
     const { routeSessionKey, selectedAgentId } = this.getSessionNavigationState();
     const nextAgentId = normalizeAgentId(agentId);
-    if (nextAgentId === normalizeAgentId(selectedAgentId)) {
-      return;
-    }
+    // GCS: 移除「已选中则跳过」的保护，点击已选中的 agent 也强制导航到聊天页
+    // if (nextAgentId === normalizeAgentId(selectedAgentId)) {
+    //   return;
+    // }
     const nextSessionKey = resolvePreferredSessionForAgent(
       {
         agentsList: context.agents.state.agentsList,
@@ -1473,6 +1474,7 @@ class AppSidebar extends LitElement {
   }
 
   private renderMoreSection() {
+    return nothing; // GCS: 隐藏 More 区块
     if (this.collapsed) {
       return nothing;
     }
@@ -1550,9 +1552,12 @@ class AppSidebar extends LitElement {
           <div class="sidebar-shell__body">
             <nav class="sidebar-nav" @contextmenu=${this.openCustomizeMenuFromContext}>
               ${this.collapsed ? this.renderRoute("chat") : nothing}
-              <div class="nav-section__items">
+              ${/* GCS: 隐藏 nav-section__items 区块；恢复时删掉此行，恢复下方注释块 */ nothing}
+              ${
+                /* <div class="nav-section__items">
                 ${this.sidebarPinnedRoutes.map((routeId) => this.renderRoute(routeId))}
-              </div>
+              </div> */ nothing
+              }
               ${this.renderMoreSection()}
             </nav>
             ${this.renderSessions()}

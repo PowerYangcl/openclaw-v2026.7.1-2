@@ -12,12 +12,18 @@
       (function () {
         // GCS: 每次新开标签页强制刷新一次，确保 Gateway 下发最新 agentsList(quickStart) 和模型配置
         var SESSION_KEY = 'gcs.reloaded';
+		console.log('[Agent]index.hmtl开始渲染，SESSION_KEY=' + SESSION_KEY);
         try {
           if (!sessionStorage.getItem(SESSION_KEY)) {
             sessionStorage.setItem(SESSION_KEY, '1');
+            console.log('[Agent] 首次加载，触发强制刷新以获取最新配置... sessionStorage 设置完成');
             window.location.reload(true);
+          } else {
+            console.log('[Agent] 已完成刷新，正常加载。 sessionStorage 存在值');
           }
-        } catch (e) {}
+        } catch (e) {
+          console.log('[Agent] sessionStorage 操作异常，跳过强制刷新逻辑。', e);
+        }
       })();
     </script>
     <link rel="manifest" href="/manifest.webmanifest" />

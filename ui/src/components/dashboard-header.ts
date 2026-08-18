@@ -39,7 +39,9 @@ class DashboardHeader extends LitElement {
     return html`
       <div class="dashboard-header">
         <div class="dashboard-header__breadcrumb">
-          ${this.overviewHref
+          ${/* GCS: 隐藏首层面包屑（GCS 链接/文本）；恢复时删掉此行，恢复下方注释块 */ nothing}
+          ${
+            /* this.overviewHref
             ? html`
                 <a
                   class="dashboard-header__breadcrumb-link"
@@ -49,7 +51,9 @@ class DashboardHeader extends LitElement {
                   GCS
                 </a>
               `
-            : html`<span class="dashboard-header__breadcrumb-link">GCS</span>`}
+            : html`<span class="dashboard-header__breadcrumb-link">GCS</span>` */
+            nothing
+          }
           ${agentLabel
             ? html`
                 <span class="dashboard-header__breadcrumb-segment">
