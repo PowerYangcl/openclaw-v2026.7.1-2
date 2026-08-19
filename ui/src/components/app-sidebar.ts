@@ -1457,6 +1457,7 @@ class AppSidebar extends LitElement {
 
   /** Command palette entry point; the palette itself is owned by the shell. */
   private renderSearch() {
+    return nothing; // GCS: 隐藏搜索按钮
     const tooltip = `${t("chat.openCommandPalette")} (${PALETTE_SHORTCUT})`;
     return html`
       <openclaw-tooltip .content=${tooltip}>
