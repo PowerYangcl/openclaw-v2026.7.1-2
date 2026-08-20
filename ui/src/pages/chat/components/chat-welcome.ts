@@ -83,10 +83,14 @@ export function renderWelcomeState(props: ChatWelcomeProps) {
       <div class="agent-chat__badges">
         <span class="agent-chat__badge">${t("chat.welcome.ready")}</span>
       </div>
+      ${
+        /* GCS: 隐藏「在下方输入消息 · 输入 / 查看命令」提示文字
       <p class="agent-chat__hint">
         ${t("chat.welcome.hintBeforeShortcut")} <kbd>/</kbd>
         ${t("chat.welcome.hintAfterShortcut")}
       </p>
+      */ ""
+      }
       <div class="agent-chat__suggestions">
         ${suggestions.map((text) => {
           return html`

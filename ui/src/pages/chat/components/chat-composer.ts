@@ -765,9 +765,13 @@ function renderSlashMenu(
 ): TemplateResult | typeof nothing {
   const state = getChatComposerState(props.paneId);
   const listboxId = paneDomId(props.paneId, "slash-menu-listbox");
+  // GCS: 隐藏 / 命令菜单面板
+  return nothing;
+  /* GCS_HIDDEN_START
   if (!state.slashMenuOpen) {
     return nothing;
   }
+  GCS_HIDDEN_END */
 
   if (
     state.slashMenuMode === "args" &&

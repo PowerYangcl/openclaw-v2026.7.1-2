@@ -944,7 +944,8 @@ function renderMessageMeta(timestamp: number, meta: GroupMeta | null) {
   // Cost
   const isJdLlm = meta.provider === "jd-llm";
   if (isJdLlm && meta.hasUsage) {
-    parts.push(html`<span class="msg-meta__cost">${Math.round(meta.cost)}积分</span>`);
+    // 由于积分是0，产品决定默认不展示。
+    // parts.push(html`<span class="msg-meta__cost">${Math.round(meta.cost)}积分</span>`);
   } else if (!isJdLlm && meta.cost > 0) {
     parts.push(html`<span class="msg-meta__cost">$${meta.cost.toFixed(4)}</span>`);
   }
