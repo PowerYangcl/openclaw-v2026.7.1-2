@@ -123,7 +123,12 @@ export function createApplicationGateway(
         }
         settings = loadSettings();
         const sessionDefaults = readSessionDefaults(hello);
-        const sessionKey = resolveSessionKey(snapshot.sessionKey, hello);
+        // GCS: token 登录初跳时，URL 里的裸 "main" 别名保持原样，不升级成
+        // 规范 key（agent:<默认agent>:main），确保地址栏稳定显示 ?session=main。
+        const bareMainLogin = snapshot.sessionKey === "main" && !snapshot.hello;
+        const sessionKey = bareMainLogin
+          ? snapshot.sessionKey
+          : resolveSessionKey(snapshot.sessionKey, hello);
         const lastActiveSessionKey = resolveSessionKey(settings.lastActiveSessionKey, hello);
         if (
           sessionKey !== settings.sessionKey ||
