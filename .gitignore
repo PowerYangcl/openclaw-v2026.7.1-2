@@ -21,9 +21,7 @@ extensions/*/dist/
 *.log
 
 
-.agents/
 .artifacts/
-.vscode/
 
 
 
