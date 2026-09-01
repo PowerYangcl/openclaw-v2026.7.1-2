@@ -134,11 +134,32 @@ export function isToolErrorOutput(outputText: string | undefined): boolean {
   return hasToolErrorStatus(obj.status);
 }
 
-export function isToolCardError(card: ToolCard): boolean {
-  if (card.isError !== undefined) {
-    return card.isError;
-  }
-  return isToolErrorOutput(card.outputText);
+/* =============================================================================
+ * 2026-09-01 需求变更：Chat 工具卡片错误状态——「一律不标记为 error」
+ * -----------------------------------------------------------------------------
+ * 背景：与 Activity 面板同样的产品决策（见 ui/src/pages/activity/tool-activity.ts
+ *   顶部注释）。Chat 消息里内联显示的工具卡片（chat-tool-card--error /
+ *   chat-tool-msg-summary--error / "Tool error" 标签）原先会根据 isError 标志或
+ *   输出文本内容（isToolErrorOutput：status=error/failed/timeout、error 字段非空等）
+ *   标红。无论底层因何原因，产品侧统一不再把工具卡片标记为 error（不标红、不显示
+ *   "Tool error" 标签）。
+ * 决策（Yangcl, 2026-09-01）：isToolCardError 一律返回 false；保留输出正文，便于排查。
+ * 备注：旧逻辑注释保留于下方，如需恢复原判定可直接换回。
+ * ========================================================================== */
+
+// ◀━━ 旧逻辑（已注释保留，2026-09-01 起停用）━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// export function isToolCardError(card: ToolCard): boolean {
+//   if (card.isError !== undefined) {
+//     return card.isError;
+//   }
+//   return isToolErrorOutput(card.outputText);
+// }
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━▲ 旧逻辑结束 ━━━━
+
+export function isToolCardError(_card: ToolCard): boolean {
+  // 2026-09-01 起：一律不标记为 error（Chat 工具卡片不标红、不显示 "Tool error"），
+  // 工具输出正文仍正常展示，便于排查。
+  return false;
 }
 
 export function extractToolPreview(
