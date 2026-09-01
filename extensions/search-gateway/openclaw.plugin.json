@@ -1,0 +1,39 @@
+{
+  "id": "search-gateway",
+  "icon": "https://cdn.simpleicons.org/microsoftbing",
+  "activation": {
+    "onStartup": false
+  },
+  "uiHints": {
+    "webSearch.baseUrl": {
+      "label": "Search Gateway Base URL",
+      "help": "Base URL of the internal Bing search gateway (default http://127.0.0.1:8080)."
+    },
+    "webSearch.timeoutSeconds": {
+      "label": "Search Gateway Timeout (seconds)",
+      "help": "Request timeout for gateway calls."
+    }
+  },
+  "contracts": {
+    "webSearchProviders": ["search-gateway"]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "webSearch": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "baseUrl": {
+            "type": "string"
+          },
+          "timeoutSeconds": {
+            "type": "number",
+            "minimum": 1
+          }
+        }
+      }
+    }
+  }
+}
