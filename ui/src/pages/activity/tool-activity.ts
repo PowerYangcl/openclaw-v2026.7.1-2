@@ -169,27 +169,51 @@ function countArgumentFields(value: unknown): number {
   return 1;
 }
 
-function hasExplicitErrorFlag(value: Record<string, unknown> | null): boolean {
-  return value?.isError === true || value?.is_error === true;
-}
+/* =============================================================================
+ * 2026-09-01 需求变更：Activity 工具调用状态——「只要触发 error 一律降级为 done」
+ * -----------------------------------------------------------------------------
+ * 背景：Control UI Activity 面板原先会根据底层原因把工具调用标为 error（红框
+ *   Tool error），如 web_fetch 抓站反爬(403/404)、重定向超限、isError 标志、
+ *   status=failed、exitCode!=0 等，导致产品端一长串红框刷屏。
+ * 决策（Yangcl, 2026-09-01）：无需区分原因，只要进入 result 阶段即视为 done；
+ *   仅保留运行中的 running 状态。全局生效（所有会话/所有工具）。
+ * 备注：旧逻辑注释保留于下方，如需恢复原报错展示可直接换回。
+ * ========================================================================== */
+
+// ◀━━ 旧逻辑（已注释保留，2026-09-01 起停用）━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+// function hasExplicitErrorFlag(value: Record<string, unknown> | null): boolean {
+//   return value?.isError === true || value?.is_error === true;
+// }
+//
+// function resolveStatus(data: Record<string, unknown>): ActivityStatus {
+//   const phase = toTrimmedString(data.phase);
+//   if (phase !== "result") {
+//     return "running";
+//   }
+//   const result = readRecord(data.result);
+//   if (hasExplicitErrorFlag(data) || hasExplicitErrorFlag(result)) {
+//     return "error";
+//   }
+//   const status = toTrimmedString(data.status) ?? toTrimmedString(result?.status);
+//   if (status && /error|fail|failed|failure/i.test(status)) {
+//     return "error";
+//   }
+//   const exitCode = Number(result?.exitCode ?? data.exitCode);
+//   if (Number.isFinite(exitCode) && exitCode !== 0) {
+//     return "error";
+//   }
+//   return "done";
+// }
+// ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━▲ 旧逻辑结束 ━━━━
 
 function resolveStatus(data: Record<string, unknown>): ActivityStatus {
   const phase = toTrimmedString(data.phase);
+  // 工具调用仍在进行中 → 显示 running
   if (phase !== "result") {
     return "running";
   }
-  const result = readRecord(data.result);
-  if (hasExplicitErrorFlag(data) || hasExplicitErrorFlag(result)) {
-    return "error";
-  }
-  const status = toTrimmedString(data.status) ?? toTrimmedString(result?.status);
-  if (status && /error|fail|failed|failure/i.test(status)) {
-    return "error";
-  }
-  const exitCode = Number(result?.exitCode ?? data.exitCode);
-  if (Number.isFinite(exitCode) && exitCode !== 0) {
-    return "error";
-  }
+  // 进入 result 阶段一律视为 done：无论底层因何报错（isError / status=failed /
+  // exitCode!=0 / HTTP 403/404 / 反爬拦截等），统一降级为 done，不再显示 Tool error。
   return "done";
 }
 
