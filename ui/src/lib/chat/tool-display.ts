@@ -105,6 +105,20 @@ function shortenHomeInString(input: string): string {
   return input;
 }
 
+export function stripOpenClawPaths(input: string): string {
+  if (!input) {
+    return input;
+  }
+
+  // 2026-09-02 根据产品需求，不想展示 ~/.openclaw/ 字样，要求隐藏。
+  // https://joyspace.jd.com/pages/WzumFINUC9XEggpasF3l
+  // 隐藏 OpenClaw 配置目录前缀，避免工具调用摘要泄露 `~/.openclaw/`
+  // （或 `C:\Users\...\.openclaw\`）路径片段。
+  // 仅移除开头的 home + `.openclaw` 段；路径其余部分
+  // （如 workspace-cet4/skills/）原样保留。
+  return input.replace(/(?:~|[^/\s]*[/\\])?[^/\s]*\.openclaw[/\\]/gi, "");
+}
+
 export function resolveToolDisplay(params: {
   name?: string;
   args?: unknown;

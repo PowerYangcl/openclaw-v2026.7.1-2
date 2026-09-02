@@ -36,7 +36,7 @@ import {
   isToolCardError,
 } from "../../../lib/chat/tool-cards.ts";
 import type { EmbedSandboxMode } from "../../../lib/chat/tool-display.ts";
-import { resolveToolDisplay } from "../../../lib/chat/tool-display.ts";
+import { resolveToolDisplay, stripOpenClawPaths } from "../../../lib/chat/tool-display.ts";
 import { resolveUiHourCycleOptions } from "../../../lib/format.ts";
 import { formatCompactTokenCount } from "../../../lib/format.ts";
 import "../../../components/tooltip.ts";
@@ -2162,7 +2162,9 @@ function renderGroupedMessage(
                 <span class="chat-tool-msg-summary__icon">${toolMessageIcon}</span>
                 <span class="chat-tool-msg-summary__label">${toolMessageLabel}</span>
                 ${toolSummaryLabel
-                  ? html`<span class="chat-tool-msg-summary__names">${toolSummaryLabel}</span>`
+                  ? html`<span class="chat-tool-msg-summary__names"
+                      >${stripOpenClawPaths(toolSummaryLabel)}</span
+                    >`
                   : toolPreview
                     ? html`<span class="chat-tool-msg-summary__preview">${toolPreview}</span>`
                     : nothing}

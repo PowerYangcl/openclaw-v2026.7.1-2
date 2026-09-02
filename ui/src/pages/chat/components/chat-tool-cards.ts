@@ -18,6 +18,7 @@ import {
   resolveCanvasIframeUrl,
   resolveEmbedSandbox,
   resolveToolDisplay,
+  stripOpenClawPaths,
   type EmbedSandboxMode,
 } from "../../../lib/chat/tool-display.ts";
 import type { SidebarContent } from "./chat-sidebar.ts";
@@ -260,7 +261,9 @@ function renderToolDataBlock(params: { label: string; text: string }) {
         <span class="chat-tool-card__block-icon">${icons.zap}</span>
         <span class="chat-tool-card__block-label">${label}</span>
       </div>
-      <pre class="chat-tool-card__block-content"><code class=${codeClass}>${text}</code></pre>
+      <pre class="chat-tool-card__block-content"><code class=${codeClass}>${stripOpenClawPaths(
+        text,
+      )}</code></pre>
     </div>
   `;
 }
@@ -290,7 +293,7 @@ function renderCollapsedToolSummary(params: {
       <span class="chat-tool-msg-summary__icon">${icon}</span>
       <span class="chat-tool-msg-summary__label">${displayLabel}</span>
       ${displayName
-        ? html`<span class="chat-tool-msg-summary__names">${displayName}</span>`
+        ? html`<span class="chat-tool-msg-summary__names">${stripOpenClawPaths(displayName)}</span>`
         : nothing}
     </button>
   `;
@@ -426,7 +429,9 @@ export function renderExpandedToolCardContent(
       ${detail || canOpenSidebar
         ? html`
             <div class="chat-tool-card__header">
-              ${detail ? html`<div class="chat-tool-card__detail">${detail}</div>` : nothing}
+              ${detail
+                ? html`<div class="chat-tool-card__detail">${stripOpenClawPaths(detail)}</div>`
+                : nothing}
               ${canOpenSidebar
                 ? html`
                     <div class="chat-tool-card__actions">
