@@ -59,7 +59,10 @@ type RenderChatItem = ReturnType<typeof buildChatItems>[number];
 type StreamRunRenderItem = {
   kind: "stream-run";
   key: string;
-  parts: Array<Extract<ChatItem, { kind: "stream" } | { kind: "reading-indicator" }>>;
+  parts: Array<
+    | Extract<ChatItem, { kind: "stream" } | { kind: "reading-indicator" }>
+    | Extract<RenderChatItem, { kind: "group" }>
+  >;
 };
 
 const chatItemsBySession = new Map<string, CachedChatItems>();
@@ -257,7 +260,7 @@ function groupMessages(items: ChatItem[]): Array<ChatItem | MessageGroup> {
 
     if (
       !currentGroup ||
-      currentGroup.role !== role ||
+      (currentGroup.role !== role && !(role === "tool" && currentGroup.role === "assistant")) ||
       (shouldSplitBySender && currentGroup.senderLabel !== senderLabel)
     ) {
       if (currentGroup) {
@@ -1141,8 +1144,6 @@ export function coalesceStreamRuns(
 ): Array<RenderChatItem | StreamRunRenderItem> {
   const result: Array<RenderChatItem | StreamRunRenderItem> = [];
   let run: StreamRunRenderItem["parts"] = [];
-  // Contiguous in-flight stream and reading-indicator items render under one
-  // assistant avatar; messages, groups, and dividers intentionally break the run.
   const flush = () => {
     const [first] = run;
     if (first) {
@@ -1150,10 +1151,25 @@ export function coalesceStreamRuns(
       run = [];
     }
   };
-  for (const item of items) {
+
+  // 一个回合在出现第一个 stream/reading 片段时即视为"正在流式"。
+  // 该回合内（即到下一个 user 边界为止）的任何 tool group 都会被并入流式
+  // assistant 气泡，而不是作为独立的 tool group 渲染。已完成的回合不再有
+  // stream 片段，因此它们的 tool group 仍独立渲染。
+  let streamingTurn = false;
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
     if (item.kind === "stream" || item.kind === "reading-indicator") {
+      streamingTurn = true;
       run.push(item);
       continue;
+    }
+    if (item.kind === "group" && item.role === "tool" && streamingTurn) {
+      run.push(item);
+      continue;
+    }
+    if (item.kind === "group" && item.role === "user") {
+      streamingTurn = false;
     }
     flush();
     result.push(item);

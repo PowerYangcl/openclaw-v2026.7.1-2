@@ -267,6 +267,15 @@ img.chat-avatar {
   box-shadow: none;
 }
 
+/* 合并单气泡回合：将同一回合内的所有消息（文本段落、
+   tool 折叠块）堆叠在一个气泡下，块间间距均匀。 */
+.chat-bubble--turn-merged > * + * {
+  margin-top: 12px;
+}
+.chat-bubble--turn-merged .chat-tool-msg-collapse {
+  margin-top: 12px;
+}
+
 .chat-duplicate-count {
   display: inline-flex;
   align-items: center;
