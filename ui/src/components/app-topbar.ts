@@ -54,14 +54,16 @@ class AppTopbar extends LitElement {
             </button>
           </openclaw-tooltip>
           <div class="topnav-shell__content">
-            <div class="topbar-brand" aria-label="OpenClaw">
+            <div class="topbar-brand" aria-label="Gcs Agent">
+              <!-- 产品需求：隐藏 topbar 品牌 logo 图片（留存代码便于回退）
               <img
                 class="topbar-brand__logo"
                 src=${controlUiPublicAssetPath("apple-touch-icon.png", this.basePath)}
                 alt=""
                 aria-hidden="true"
               />
-              <span class="topbar-brand__title">OpenClaw</span>
+              -->
+              <span class="topbar-brand__title">Gcs Agent</span>
             </div>
             <dashboard-header
               .routeId=${this.routeId}
