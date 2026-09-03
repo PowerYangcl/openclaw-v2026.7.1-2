@@ -1772,89 +1772,97 @@ function renderChatPrimaryActions(props: ChatRunControlsProps) {
     : nothing;
 
   return html`
-    ${props.voiceActive && props.onToggleVoice
-      ? html`
-          <openclaw-tooltip .content=${t("chat.composer.stopVoiceInput")}>
-            <button
-              class="chat-send-btn chat-send-btn--stop"
-              @click=${props.onToggleVoice}
-              aria-label=${t("chat.composer.stopVoiceInput")}
-            >
-              ${icons.stop}
-              <span class="agent-chat__control-label">${t("chat.composer.stopVoiceInput")}</span>
-            </button>
-          </openclaw-tooltip>
-          ${abortAction}
-        `
-      : props.canAbort
+    ${
+      props.voiceActive && props.onToggleVoice
         ? html`
-            ${hasComposedContent
-              ? html`
-                  <openclaw-tooltip .content=${t("chat.runControls.queue")}>
-                    <button
-                      class="chat-send-btn"
-                      @click=${storeDraftAndSend}
-                      ?disabled=${!props.connected || props.sending}
-                      aria-label=${t("chat.runControls.queueMessage")}
-                    >
-                      ${icons.send}
-                      <span class="agent-chat__control-label">${t("chat.runControls.queue")}</span>
-                    </button>
-                  </openclaw-tooltip>
-                `
-              : nothing}
-            <openclaw-tooltip .content=${t("chat.runControls.stop")}>
+            <openclaw-tooltip .content=${t("chat.composer.stopVoiceInput")}>
               <button
                 class="chat-send-btn chat-send-btn--stop"
-                @click=${props.onAbort}
-                aria-label=${t("chat.runControls.stopGenerating")}
+                @click=${props.onToggleVoice}
+                aria-label=${t("chat.composer.stopVoiceInput")}
               >
                 ${icons.stop}
-                <span class="agent-chat__control-label">${t("chat.runControls.stop")}</span>
+                <span class="agent-chat__control-label">${t("chat.composer.stopVoiceInput")}</span>
               </button>
             </openclaw-tooltip>
+            ${abortAction}
           `
-        : hasComposedContent || !props.onToggleVoice
+        : props.canAbort
           ? html`
-              <openclaw-tooltip
-                .content=${props.isBusy ? t("chat.runControls.queue") : t("chat.runControls.send")}
-              >
+              ${hasComposedContent
+                ? html`
+                    <openclaw-tooltip .content=${t("chat.runControls.queue")}>
+                      <button
+                        class="chat-send-btn"
+                        @click=${storeDraftAndSend}
+                        ?disabled=${!props.connected || props.sending}
+                        aria-label=${t("chat.runControls.queueMessage")}
+                      >
+                        ${icons.send}
+                        <span class="agent-chat__control-label"
+                          >${t("chat.runControls.queue")}</span
+                        >
+                      </button>
+                    </openclaw-tooltip>
+                  `
+                : nothing}
+              <openclaw-tooltip .content=${t("chat.runControls.stop")}>
                 <button
-                  class="chat-send-btn"
-                  @click=${storeDraftAndSend}
-                  ?disabled=${!props.connected || props.sending}
-                  aria-label=${props.isBusy
-                    ? t("chat.runControls.queueMessage")
-                    : t("chat.runControls.sendMessage")}
+                  class="chat-send-btn chat-send-btn--stop"
+                  @click=${props.onAbort}
+                  aria-label=${t("chat.runControls.stopGenerating")}
                 >
-                  ${icons.send}
-                  <span class="agent-chat__control-label"
-                    >${props.isBusy
-                      ? t("chat.runControls.queue")
-                      : t("chat.runControls.send")}</span
-                  >
+                  ${icons.stop}
+                  <span class="agent-chat__control-label">${t("chat.runControls.stop")}</span>
                 </button>
               </openclaw-tooltip>
             `
-          : html`
-              <openclaw-tooltip .content=${t("chat.composer.startVoiceInput")}>
-                <button
-                  class="chat-send-btn chat-send-btn--voice"
-                  @click=${props.onToggleVoice}
-                  ?disabled=${!props.connected || props.sending || props.isBusy}
-                  aria-label=${t("chat.composer.startVoiceInput")}
+          : true /* 产品需求：默认总是展示发送按钮（语音能力已移除，隐藏语音按钮后此处恒为 true，直接展示发送） */
+            ? html`
+                <openclaw-tooltip
+                  .content=${props.isBusy
+                    ? t("chat.runControls.queue")
+                    : t("chat.runControls.send")}
                 >
-                  ${icons.mic}
-                  <span class="agent-chat__control-label"
-                    >${t("chat.composer.startVoiceInput")}</span
+                  <button
+                    class="chat-send-btn"
+                    @click=${storeDraftAndSend}
+                    ?disabled=${!props.connected || props.sending}
+                    aria-label=${props.isBusy
+                      ? t("chat.runControls.queueMessage")
+                      : t("chat.runControls.sendMessage")}
                   >
-                </button>
-              </openclaw-tooltip>
-            `}
+                    ${icons.send}
+                    <span class="agent-chat__control-label"
+                      >${props.isBusy
+                        ? t("chat.runControls.queue")
+                        : t("chat.runControls.send")}</span
+                    >
+                  </button>
+                </openclaw-tooltip>
+              `
+            : nothing /* 产品需求：隐藏语音输入按钮（无语音能力）。原代码以注释形式保留，便于回退：
+                     <openclaw-tooltip .content=${t("chat.composer.startVoiceInput")}>
+                        <button
+                          class="chat-send-btn chat-send-btn--voice"
+                          @click=${props.onToggleVoice}
+                          ?disabled=${!props.connected || props.sending || props.isBusy}
+                          aria-label=${t("chat.composer.startVoiceInput")}
+                        >
+                          ${icons.mic}
+                          <span class="agent-chat__control-label"
+                            >${t("chat.composer.startVoiceInput")}</span
+                          >
+                        </button>
+                      </openclaw-tooltip>
+                   */
+    }
   `;
 }
 
 export function renderChatRunControls(props: ChatRunControlsProps) {
+  // 产品需求：隐藏语音输入按钮（无语音能力）。语音输入按钮块下方已用恒
+  // false 条件保留但不渲染（代码未删除，便于回退）。
   const showPrimary = props.showPrimary ?? true;
   const showSecondary = props.showSecondary ?? true;
 
