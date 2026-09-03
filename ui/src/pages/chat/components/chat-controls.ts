@@ -339,7 +339,9 @@ export function renderChatControls(props: ChatControlsProps) {
           </div>
           ${renderChatSendShortcutPreference(props)}
         </div>
-        ${props.realtimeTalkOptions && props.onRealtimeTalkOptionsChange
+        ${false /* 产品需求：隐藏聊天设置中的语音区块（无语音能力）。下方语音设置
+             section 代码保留但不渲染，便于回退。原条件为 realtimeTalkOptions &&
+             onRealtimeTalkOptionsChange，现恒为 false。 */
           ? html`
               <div class="chat-settings-popover__section">
                 <span class="chat-settings-popover__label">${t("chat.voiceSettings")}</span>
