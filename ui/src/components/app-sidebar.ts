@@ -1576,28 +1576,39 @@ class AppSidebar extends LitElement {
                 ></span>
               </openclaw-tooltip>
               <span class="sidebar-footer-bar__spacer"></span>
-              <openclaw-tooltip .content=${titleForRoute("config")}>
-                <a
-                  href=${pathForRoute("config", this.basePath)}
-                  class="sidebar-footer-icon ${settingsActive ? "sidebar-footer-icon--active" : ""}"
-                  aria-label=${titleForRoute("config")}
-                  aria-current=${settingsActive ? "page" : nothing}
-                  @focus=${(event: Event) => this.preloadRoute("config", event)}
-                  @blur=${this.cancelPreload}
-                  @pointerenter=${(event: Event) => this.preloadRoute("config", event)}
-                  @pointerleave=${this.cancelPreload}
-                  @touchstart=${(event: TouchEvent) => this.preloadRoute("config", event, true)}
-                  @click=${(event: MouseEvent) => {
-                    if (!shouldHandleNavigationClick(event)) {
-                      return;
-                    }
-                    event.preventDefault();
-                    this.onNavigate?.("config");
-                  }}
-                >
-                  ${icons.settings}
-                </a>
-              </openclaw-tooltip>
+              ${
+                /* 产品需求：隐藏侧边栏「设置」入口。下方整块代码保留，
+                结果恒为 false 不渲染，便于回退。 */ null
+              }
+              ${false
+                ? html`
+                    <openclaw-tooltip .content=${titleForRoute("config")}>
+                      <a
+                        href=${pathForRoute("config", this.basePath)}
+                        class="sidebar-footer-icon ${settingsActive
+                          ? "sidebar-footer-icon--active"
+                          : ""}"
+                        aria-label=${titleForRoute("config")}
+                        aria-current=${settingsActive ? "page" : nothing}
+                        @focus=${(event: Event) => this.preloadRoute("config", event)}
+                        @blur=${this.cancelPreload}
+                        @pointerenter=${(event: Event) => this.preloadRoute("config", event)}
+                        @pointerleave=${this.cancelPreload}
+                        @touchstart=${(event: TouchEvent) =>
+                          this.preloadRoute("config", event, true)}
+                        @click=${(event: MouseEvent) => {
+                          if (!shouldHandleNavigationClick(event)) {
+                            return;
+                          }
+                          event.preventDefault();
+                          this.onNavigate?.("config");
+                        }}
+                      >
+                        ${icons.settings}
+                      </a>
+                    </openclaw-tooltip>
+                  `
+                : nothing}
 
               <span class="sidebar-mode-switch">
                 <openclaw-theme-mode-toggle .mode=${this.themeMode}></openclaw-theme-mode-toggle>
