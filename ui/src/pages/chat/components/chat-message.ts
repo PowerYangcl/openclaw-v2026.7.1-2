@@ -75,10 +75,64 @@ type PairingQrExpiryRefreshTimer = {
 
 const assistantAttachmentAvailabilityCache = new Map<string, AssistantAttachmentAvailability>();
 const assistantAttachmentRefreshTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+// ── JD spend cache ──
+type JdSpendState = { status: "pending" } | { status: "done"; spend: number } | { status: "error" };
+
+const jdSpendCache = new Map<string, JdSpendState>();
+
+async function fetchJdSpend(completionId: string): Promise<number | null> {
+  const url = `/api/v1/jd/spend/${encodeURIComponent(completionId)}`;
+  const maxRetries = 5;
+  const retryIntervalMs = 3000;
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    if (attempt > 0) {
+      await new Promise((resolve) => setTimeout(resolve, retryIntervalMs));
+    }
+    let res: Response;
+    try {
+      res = await fetch(url);
+    } catch {
+      continue;
+    }
+    if (res.status === 202) {
+      continue;
+    }
+    if (!res.ok) {
+      return null;
+    }
+    try {
+      const data = (await res.json()) as Record<string, unknown>;
+      const rawSpend = data?.spend;
+      if (typeof rawSpend === "number") {
+        return rawSpend;
+      }
+    } catch {
+      // ignore parse error
+    }
+    // spend not ready yet (upstream async), keep polling
+    continue;
+  }
+  return null;
+}
+
+function triggerJdSpendFetch(completionId: string, onRequestUpdate?: () => void): void {
+  if (jdSpendCache.has(completionId)) return;
+  jdSpendCache.set(completionId, { status: "pending" });
+  fetchJdSpend(completionId).then((spend) => {
+    jdSpendCache.set(
+      completionId,
+      spend !== null ? { status: "done", spend } : { status: "error" },
+    );
+    bumpJdSpendRenderVersion();
+    onRequestUpdate?.();
+  });
+}
 const pairingQrExpiryRefreshTimers = new Map<string, PairingQrExpiryRefreshTimer>();
 const ASSISTANT_ATTACHMENT_UNAVAILABLE_RETRY_MS = 5_000;
 const ASSISTANT_ATTACHMENT_MEDIA_TICKET_REFRESH_SKEW_MS = 30_000;
 let assistantAttachmentAvailabilityRenderVersion = 0;
+let jdSpendRenderVersion = 0;
 
 type ChatTimestampDisplay = {
   label: string;
@@ -196,6 +250,14 @@ export function getAssistantAttachmentAvailabilityRenderVersion(): number {
 function bumpAssistantAttachmentAvailabilityRenderVersion() {
   assistantAttachmentAvailabilityRenderVersion =
     (assistantAttachmentAvailabilityRenderVersion + 1) % Number.MAX_SAFE_INTEGER;
+}
+
+export function getJdSpendRenderVersion(): number {
+  return jdSpendRenderVersion;
+}
+
+function bumpJdSpendRenderVersion() {
+  jdSpendRenderVersion = (jdSpendRenderVersion + 1) % Number.MAX_SAFE_INTEGER;
 }
 
 function setAssistantAttachmentAvailability(
@@ -860,7 +922,12 @@ export function renderMessageGroup(group: MessageGroup, opts: RenderMessageGroup
               ? renderDeleteButton(opts.onDelete, "left")
               : nothing}
             <span class="chat-sender-name">${who}</span>
-            ${renderMessageMeta(group.timestamp, meta)}
+            ${renderMessageMeta(
+              group.timestamp,
+              meta,
+              opts.assistantAttachmentAuthToken,
+              opts.onRequestUpdate,
+            )}
           </div>
           ${footerActionDetails || (opts.onDelete && normalizedRole !== "user")
             ? html`
@@ -892,6 +959,7 @@ type GroupMeta = {
   provider: string | null;
   hasUsage: boolean;
   contextPercent: number | null;
+  completionId: string | null;
 };
 
 function extractGroupMeta(group: MessageGroup, contextWindow: number | null): GroupMeta | null {
@@ -904,6 +972,7 @@ function extractGroupMeta(group: MessageGroup, contextWindow: number | null): Gr
   let provider: string | null = null;
   let hasUsage = false;
   let maxPromptTokens = 0;
+  let completionId: string | null = null;
 
   for (const { message } of group.messages) {
     const m = message as Record<string, unknown>;
@@ -935,6 +1004,12 @@ function extractGroupMeta(group: MessageGroup, contextWindow: number | null): Gr
     if (typeof m.provider === "string") {
       provider = m.provider;
     }
+    console.log(m, 7777777);
+    if (typeof m.responseId === "string" && m.responseId) {
+      completionId = m.responseId;
+    } else if (!completionId && typeof m.id === "string" && m.id) {
+      completionId = m.id;
+    }
   }
 
   if (!hasUsage && !model) {
@@ -946,10 +1021,26 @@ function extractGroupMeta(group: MessageGroup, contextWindow: number | null): Gr
       ? Math.min(Math.round((maxPromptTokens / contextWindow) * 100), 100)
       : null;
 
-  return { input, output, cacheRead, cacheWrite, cost, model, provider, hasUsage, contextPercent };
+  return {
+    input,
+    output,
+    cacheRead,
+    cacheWrite,
+    cost,
+    model,
+    provider,
+    hasUsage,
+    contextPercent,
+    completionId,
+  };
 }
 
-function renderMessageMeta(timestamp: number, meta: GroupMeta | null) {
+function renderMessageMeta(
+  timestamp: number,
+  meta: GroupMeta | null,
+  authToken?: string | null,
+  onRequestUpdate?: () => void,
+) {
   if (!meta) {
     return renderChatTimestamp(timestamp);
   }
@@ -980,11 +1071,18 @@ function renderMessageMeta(timestamp: number, meta: GroupMeta | null) {
 
   // Cost
   const isJdLlm = meta.provider === "jd-llm";
-  if (isJdLlm && meta.hasUsage) {
-    // 由于积分是0，产品决定默认不展示。
-    // parts.push(html`<span class="msg-meta__cost">${Math.round(meta.cost)}积分</span>`);
+  if (isJdLlm && meta.completionId) {
+    const cached = jdSpendCache.get(meta.completionId);
+    if (!cached) {
+      triggerJdSpendFetch(meta.completionId, onRequestUpdate);
+      parts.push(html`<span class="msg-meta__cost">共消耗计算中...</span>`);
+    } else if (cached.status === "pending") {
+      parts.push(html`<span class="msg-meta__cost">共消耗计算中...</span>`);
+    } else if (cached.status === "done") {
+      parts.push(html`<span class="msg-meta__cost">共消耗 ${cached.spend} </span>`);
+    }
   } else if (!isJdLlm && meta.cost > 0) {
-    parts.push(html`<span class="msg-meta__cost">$${meta.cost.toFixed(4)}</span>`);
+    parts.push(html`<span class="msg-meta__cost">$${meta.cost}</span>`);
   }
 
   // Context %

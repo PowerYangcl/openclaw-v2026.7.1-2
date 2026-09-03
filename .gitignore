@@ -5,6 +5,7 @@
 # 后端 core/gateway/cli 产物（根 dist，tsdown 打包）
 dist/
 /dist/
+dist-runtime/
 
 # 前端 Web UI 产物（vite build 输出）
 ui/dist

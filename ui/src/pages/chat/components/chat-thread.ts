@@ -30,6 +30,7 @@ import type { RealtimeTalkConversationEntry } from "../realtime-talk-conversatio
 import { getOrCreateSessionCacheValue } from "../session-cache.ts";
 import {
   getAssistantAttachmentAvailabilityRenderVersion,
+  getJdSpendRenderVersion,
   renderMessageGroup,
   renderStreamGroup,
 } from "./chat-message.ts";
@@ -700,7 +701,9 @@ export function renderChatThread(props: ChatThreadProps) {
     >
       <div class="chat-thread-inner">
         ${showLoadingSkeleton ? renderLoadingSkeleton() : nothing}
-        ${isEmpty && !state.searchOpen ? renderWelcomeState({ ...props, quickStart: props.quickStart }) : nothing}
+        ${isEmpty && !state.searchOpen
+          ? renderWelcomeState({ ...props, quickStart: props.quickStart })
+          : nothing}
         ${isEmpty && state.searchOpen
           ? html` <div class="agent-chat__empty">No matching messages</div> `
           : nothing}
@@ -710,6 +713,7 @@ export function renderChatThread(props: ChatThreadProps) {
             deletedChatItemsSignature(deleted, chatItems),
             stableBooleanMapSignature(expandedToolCards),
             getAssistantAttachmentAvailabilityRenderVersion(),
+            getJdSpendRenderVersion(),
             props.sessionKey,
             props.fullMessageAgentId,
             showReasoning,

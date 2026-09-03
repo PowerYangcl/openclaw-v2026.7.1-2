@@ -1,0 +1,18 @@
+{
+  "id": "jd-spend-proxy",
+  "activation": {
+    "onStartup": false,
+    "onConfigPaths": ["plugins.entries.jd-spend-proxy"]
+  },
+  "contracts": {},
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "spendBaseUrl": {
+        "type": "string",
+        "description": "Base URL for the JD spend API (e.g. https://gcsapi-pre.jdcloud.com)"
+      }
+    }
+  }
+}

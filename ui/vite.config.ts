@@ -161,6 +161,44 @@ export function resolveSourcePackageAliasesForVite(): ControlUiViteAlias[] {
   ];
 }
 
+// Map @openclaw/fs-safe subpath exports to their real node_modules dist files so
+// the tsconfig wildcard alias (@openclaw/* -> extensions/*) does not hijack them.
+function fsSafeDistAlias(subpath: string, distFile: string): ControlUiViteAlias {
+  return {
+    find: `@openclaw/fs-safe${subpath ? `/${subpath}` : ""}`,
+    replacement: path.join(repoRoot, "node_modules", "@openclaw", "fs-safe", "dist", distFile),
+  };
+}
+
+function resolveFsSafeAliasesForVite(): ControlUiViteAlias[] {
+  // subpath -> dist file (relative to dist/), matching package.json "exports".
+  const entries: Array<[string, string]> = [
+    ["root", "root.js"],
+    ["config", "config.js"],
+    ["path", "path.js"],
+    ["output", "output.js"],
+    ["advanced", "advanced.js"],
+    ["json", "json.js"],
+    ["store", "store.js"],
+    ["secret", "secret.js"],
+    ["permissions", "permissions-public.js"],
+    ["secure-file", "secure-file.js"],
+    ["file-lock", "file-lock.js"],
+    ["walk", "walk.js"],
+    ["temp", "temp.js"],
+    ["atomic", "atomic.js"],
+    ["archive", "archive.js"],
+    ["errors", "errors.js"],
+    ["types", "types.js"],
+    ["test-hooks", "test-hooks.js"],
+  ];
+  // Subpath aliases must come before the bare "." alias so more specific finds win.
+  return [
+    ...entries.map(([subpath, distFile]) => fsSafeDistAlias(subpath, distFile)),
+    fsSafeDistAlias("", "index.js"),
+  ];
+}
+
 export function resolveExternalPackageAliasesForVite(): ControlUiViteAlias[] {
   return [
     {
@@ -178,6 +216,7 @@ export function resolveExternalPackageAliasesForVite(): ControlUiViteAlias[] {
       find: "@openclaw/uirouter",
       replacement: path.join(repoRoot, "node_modules", "@openclaw", "uirouter", "dist", "index.js"),
     },
+    ...resolveFsSafeAliasesForVite(),
   ];
 }
 
@@ -206,6 +245,7 @@ function normalizeViteImporterPath(importer: string): string {
 
 export function controlUiBrowserOnlySharedModuleAliases(): Plugin {
   const browserRedactPath = path.join(here, "src/lib/browser-redact.ts");
+  const browserConfigPathsPath = path.join(here, "src/lib/config-paths-browser.ts");
   const sharedRedactImporters = new Set([
     path.join(repoRoot, "src/agents/tool-display-common.ts"),
     path.join(repoRoot, "src/agents/tool-display-exec.ts"),
@@ -221,6 +261,13 @@ export function controlUiBrowserOnlySharedModuleAliases(): Plugin {
         sharedRedactImporters.has(normalizeViteImporterPath(importer))
       ) {
         return browserRedactPath;
+      }
+      // The CLI module graph transitively imports node-only config/paths, whose
+      // top-level fs/path side effects crash in the browser. Redirect every
+      // relative import of config/paths(.js|.ts) to the browser-safe stub.
+      const normalizedSource = source.replace(/\\/gu, "/").replace(/\.(js|ts)$/u, "");
+      if (normalizedSource.endsWith("/config/paths") && !source.startsWith("@")) {
+        return browserConfigPathsPath;
       }
       return null;
     },

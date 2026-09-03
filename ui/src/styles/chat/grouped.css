@@ -523,7 +523,8 @@ details.msg-meta {
 }
 
 .msg-meta__cost {
-  color: var(--ok);
+  color: var(--muted);
+  opacity: 0.7;
 }
 
 .msg-meta__ctx--warn {
