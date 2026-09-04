@@ -45,6 +45,9 @@ export function buildMediaLocalRoots(
       path.join(resolvedStateDir, "canvas"),
       path.join(resolvedStateDir, "workspace"),
       path.join(resolvedStateDir, "sandboxes"),
+      // GCS 定制：开放家目录下 ~/media 作为媒体附件根（agent 文档约定写 ~/media/outbound/<agentId>/）。
+      // 已先在容器内(openclaw-ssh/beta-2)实测：meta available=true、下载 200，前后端同源生效。
+      path.join(resolvedStateDir, "..", "media"),
     ]),
   );
 }

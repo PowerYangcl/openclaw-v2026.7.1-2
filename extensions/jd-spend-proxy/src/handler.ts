@@ -115,8 +115,9 @@ export async function handleJdSpendRequest(
   const record = data as Record<string, unknown>;
   const rawSpend = record?.spend;
 
-  // 上游 spend 原值先保留 6 位小数，再 × 1000 后返回给前端
-  const spend = typeof rawSpend === "number" ? Number(rawSpend.toFixed(6)) * 1000 : null;
+  // 上游 spend 按 8 位小数定点取整后再 ×1000（整数刻度换算），避免浮点乘法
+  // 把 0.163944 × 1000 算成 163.94400000000002 的尾差。
+  const spend = typeof rawSpend === "number" ? Math.round(rawSpend * 1e8) / 1e5 : null;
 
   sendJson(res, 200, { ok: true, spend });
   return true;
