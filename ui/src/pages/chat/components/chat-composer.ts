@@ -48,6 +48,8 @@ const COMPACTION_TOAST_DURATION_MS = 5000;
 const FALLBACK_TOAST_DURATION_MS = 8000;
 const CONTEXT_NOTICE_RATIO = 0.85;
 const CONTEXT_COMPACT_RATIO = 0.9;
+// context 窗口缺失时的兜底默认值（1M，对齐 jd-llm 模型 contextWindow），保证环常驻显示
+const DEFAULT_CONTEXT_WINDOW = 1_048_576;
 const COMPOSER_CHROME_INTERACTIVE_SELECTOR = [
   "a[href]",
   "button",
@@ -1491,12 +1493,18 @@ export function getContextNoticeViewModel(
   compactRecommended: boolean;
   approximate: boolean;
 } | null {
-  const used = session?.totalTokens;
-  const limit = session?.contextTokens ?? defaultContextTokens ?? 0;
-  if (typeof used !== "number" || !Number.isFinite(used) || used < 0 || !limit) {
-    return null;
-  }
-  const approximate = session?.totalTokensFresh === false;
+  const rawUsed = session?.totalTokens;
+  const used =
+    typeof rawUsed === "number" && Number.isFinite(rawUsed) && rawUsed >= 0 ? rawUsed : 0;
+  const rawLimit = session?.contextTokens ?? defaultContextTokens ?? 0;
+  // context 窗口缺失时兜底默认 1M，保证 context 环常驻显示
+  const limit =
+    typeof rawLimit === "number" && Number.isFinite(rawLimit) && rawLimit > 0
+      ? rawLimit
+      : DEFAULT_CONTEXT_WINDOW;
+  const usedUnknown = typeof rawUsed !== "number" || !Number.isFinite(rawUsed) || rawUsed < 0;
+  const limitFallback = rawLimit !== limit;
+  const approximate = session?.totalTokensFresh === false || usedUnknown || limitFallback;
   const ratio = used / limit;
   const pct = Math.min(Math.round(ratio * 100), 100);
   // A stale total is still useful orientation, but must not drive warning or
@@ -1773,75 +1781,13 @@ function renderChatPrimaryActions(props: ChatRunControlsProps) {
 
   return html`
     ${
-      props.voiceActive && props.onToggleVoice
-        ? html`
-            <openclaw-tooltip .content=${t("chat.composer.stopVoiceInput")}>
-              <button
-                class="chat-send-btn chat-send-btn--stop"
-                @click=${props.onToggleVoice}
-                aria-label=${t("chat.composer.stopVoiceInput")}
-              >
-                ${icons.stop}
-                <span class="agent-chat__control-label">${t("chat.composer.stopVoiceInput")}</span>
-              </button>
-            </openclaw-tooltip>
-            ${abortAction}
-          `
-        : props.canAbort
-          ? html`
-              ${hasComposedContent
-                ? html`
-                    <openclaw-tooltip .content=${t("chat.runControls.queue")}>
-                      <button
-                        class="chat-send-btn"
-                        @click=${storeDraftAndSend}
-                        ?disabled=${!props.connected || props.sending}
-                        aria-label=${t("chat.runControls.queueMessage")}
-                      >
-                        ${icons.send}
-                        <span class="agent-chat__control-label"
-                          >${t("chat.runControls.queue")}</span
-                        >
-                      </button>
-                    </openclaw-tooltip>
-                  `
-                : nothing}
-              <openclaw-tooltip .content=${t("chat.runControls.stop")}>
-                <button
-                  class="chat-send-btn chat-send-btn--stop"
-                  @click=${props.onAbort}
-                  aria-label=${t("chat.runControls.stopGenerating")}
-                >
-                  ${icons.stop}
-                  <span class="agent-chat__control-label">${t("chat.runControls.stop")}</span>
-                </button>
-              </openclaw-tooltip>
-            `
-          : true /* 产品需求：默认总是展示发送按钮（语音能力已移除，隐藏语音按钮后此处恒为 true，直接展示发送） */
-            ? html`
-                <openclaw-tooltip
-                  .content=${props.isBusy
-                    ? t("chat.runControls.queue")
-                    : t("chat.runControls.send")}
-                >
-                  <button
-                    class="chat-send-btn"
-                    @click=${storeDraftAndSend}
-                    ?disabled=${!props.connected || props.sending}
-                    aria-label=${props.isBusy
-                      ? t("chat.runControls.queueMessage")
-                      : t("chat.runControls.sendMessage")}
-                  >
-                    ${icons.send}
-                    <span class="agent-chat__control-label"
-                      >${props.isBusy
-                        ? t("chat.runControls.queue")
-                        : t("chat.runControls.send")}</span
-                    >
-                  </button>
-                </openclaw-tooltip>
-              `
-            : nothing /* 产品需求：隐藏语音输入按钮（无语音能力）。原代码以注释形式保留，便于回退：
+      props.voiceActive && props.onToggleVoice ? html` <openclaw-tooltip .content=${t("chat.composer.stopVoiceInput")}> <button class="chat-send-btn chat-send-btn--stop" @click=${props.onToggleVoice} aria-label=${t("chat.composer.stopVoiceInput")}>${icons.stop}
+                <span class="agent-chat__control-label">${t("chat.composer.stopVoiceInput")}</span></button> </openclaw-tooltip>
+            ${abortAction} ` : props.canAbort ? html` ${hasComposedContent ? html` <openclaw-tooltip .content=${t("chat.runControls.queue")}> <button class="chat-send-btn" @click=${storeDraftAndSend} ?disabled=${!props.connected || props.sending} aria-label=${t("chat.runControls.queueMessage")}>${icons.send}
+                        <span class="agent-chat__control-label">${t("chat.runControls.queue")}</span></button> </openclaw-tooltip> ` : nothing}
+              <openclaw-tooltip .content=${t("chat.runControls.stop")}> <button class="chat-send-btn chat-send-btn--stop" @click=${props.onAbort} aria-label=${t("chat.runControls.stopGenerating")}>${icons.stop}
+                  <span class="agent-chat__control-label">${t("chat.runControls.stop")}</span></button> </openclaw-tooltip> ` : true /* 产品需求：默认总是展示发送按钮（语音能力已移除，隐藏语音按钮后此处恒为 true，直接展示发送） */ ? html` <openclaw-tooltip .content=${props.isBusy ? t("chat.runControls.queue") : t("chat.runControls.send")}> <button class="chat-send-btn" @click=${storeDraftAndSend} ?disabled=${!props.connected || props.sending} aria-label=${props.isBusy ? t("chat.runControls.queueMessage") : t("chat.runControls.sendMessage")}>${icons.send}
+                    <span class="agent-chat__control-label">${props.isBusy ? t("chat.runControls.queue") : t("chat.runControls.send")}</span></button> </openclaw-tooltip> ` : nothing /* 产品需求：隐藏语音输入按钮（无语音能力）。原代码以注释形式保留，便于回退：
                      <openclaw-tooltip .content=${t("chat.composer.startVoiceInput")}>
                         <button
                           class="chat-send-btn chat-send-btn--voice"
