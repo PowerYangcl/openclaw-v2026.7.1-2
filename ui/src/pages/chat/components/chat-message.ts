@@ -624,7 +624,80 @@ type StreamGroupOptions = {
   assistant?: AssistantIdentity;
   basePath?: string;
   authToken?: string | null;
+  // GCS 定制：流式气泡内工具调用也渲染为 Activity 折叠块（带展开交互）
+  isToolMessageExpanded?: (messageId: string) => boolean | undefined;
+  onToggleToolMessageExpanded?: (messageId: string, expanded?: boolean) => void;
 };
+
+/**
+ * GCS 定制：渲染一个工具调用的 Activity 折叠块（不包含外层 avatar/footer，
+ * 供流式气泡与合并气泡复用）。
+ */
+function renderActivityDisclosure(
+  toolGroup: MessageGroup,
+  opts: {
+    isToolMessageExpanded?: (messageId: string) => boolean | undefined;
+    onToggleToolMessageExpanded?: (messageId: string, expanded?: boolean) => void;
+    onOpenSidebar?: (content: SidebarContent) => void;
+  },
+) {
+  const cards = toolGroup.messages.flatMap((item) =>
+    extractToolCardsCached(item.message, item.key),
+  );
+  const toolCount = cards.length || toolGroup.messages.length;
+  const hasError = cards.some(isToolCardError) && toolGroup.turnSucceeded !== true;
+  const activityDisclosureId = `activity:${toolGroup.key}`;
+  const activityExpanded = opts.isToolMessageExpanded?.(activityDisclosureId) ?? hasError;
+
+  return html`
+    <div class="chat-activity-group ${activityExpanded ? "is-open" : ""}">
+      <button
+        class="chat-activity-group__summary ${hasError
+          ? "chat-activity-group__summary--error"
+          : ""}"
+        type="button"
+        aria-expanded=${String(activityExpanded)}
+        aria-label=${hasError
+          ? `Activity: ${toolCount} tool${toolCount === 1 ? "" : "s"}, includes errors.`
+          : nothing}
+        @click=${(event: MouseEvent) => {
+          if (shouldToggleSelectableDisclosure(event)) {
+            opts.onToggleToolMessageExpanded?.(activityDisclosureId, activityExpanded);
+          }
+        }}
+      >
+        <span class="chat-activity-group__icon">${hasError ? icons.x : icons.activity}</span>
+        <span class="chat-activity-group__label"
+          >Activity: ${toolCount} tool${toolCount === 1 ? "" : "s"}</span
+        >
+        <span
+          class="collapse-chevron ${activityExpanded ? "" : "collapse-chevron--collapsed"}"
+          aria-hidden="true"
+          >${icons.chevronDown}</span
+        >
+      </button>
+      ${activityExpanded
+        ? html`
+            <div class="chat-activity-group__body">
+              ${toolGroup.messages.map((item, index) =>
+                renderGroupedMessage(
+                  item.message,
+                  item.key,
+                  buildGroupedMessageRenderOptions(
+                    toolGroup,
+                    item,
+                    index,
+                    opts as unknown as RenderMessageGroupOptions,
+                  ),
+                  opts.onOpenSidebar,
+                ),
+              )}
+            </div>
+          `
+        : nothing}
+    </div>
+  `;
+}
 
 function renderReadingIndicatorBubble() {
   return html`
@@ -663,6 +736,10 @@ export function renderStreamGroup(parts: StreamGroupPart[], opts: StreamGroupOpt
             }
             if (part.kind === "group") {
               // Tool group folded into the streaming assistant bubble.
+              // GCS 定制：多工具调用折叠为 Activity 折叠块，与完成后形态一致
+              if (part.messages.length > 1) {
+                return renderActivityDisclosure(part, opts);
+              }
               return html`${part.messages.map((item) =>
                 renderGroupedMessage(
                   item.message,
@@ -942,6 +1019,136 @@ export function renderMessageGroup(group: MessageGroup, opts: RenderMessageGroup
                   ${opts.onDelete && normalizedRole !== "user"
                     ? renderDeleteButton(opts.onDelete, "right")
                     : nothing}
+                  ${footerActionDetails
+                    ? renderMessageActionButtons(footerActionDetails, opts, opts.onOpenSidebar)
+                    : nothing}
+                </div>
+              `
+            : nothing}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+/**
+ * GCS 定制：把同一回合的 工具调用 Activity 折叠块 与 assistant 文字回复
+ * 合并渲染到同一个气泡里（历史完成回合不再单独拆成两个气泡）。
+ */
+export function renderMergedAssistantTurn(
+  toolGroup: MessageGroup,
+  assistantGroup: MessageGroup,
+  opts: RenderMessageGroupOptions,
+) {
+  const assistantName = opts.assistantName ?? "Assistant";
+  const resolvedUserName = resolveLocalUserName({
+    name: opts.userName ?? null,
+    avatar: opts.userAvatar ?? null,
+  });
+  const userLabel = assistantGroup.senderLabel?.trim();
+  const who = userLabel ?? assistantName;
+
+  // ── Activity 折叠块（复用 tool 分支逻辑，去掉外层 avatar/footer）──
+  const toolCards = toolGroup.messages.flatMap((item) =>
+    extractToolCardsCached(item.message, item.key),
+  );
+  const toolCount = toolCards.length || toolGroup.messages.length;
+  const hasError = toolCards.some(isToolCardError) && toolGroup.turnSucceeded !== true;
+  const activityDisclosureId = `activity:${toolGroup.key}`;
+  const activityExpanded = opts.isToolMessageExpanded?.(activityDisclosureId) ?? hasError;
+
+  // ── assistant 内容与 footer 元数据 ──
+  const meta = extractGroupMeta(assistantGroup, opts.contextWindow ?? null);
+  const messageActionDetails = assistantGroup.messages.map((item) =>
+    resolveMessageActionDetails(item.message, opts.onOpenSidebar),
+  );
+  const lastMessageIndex = assistantGroup.messages.length - 1;
+  const footerActionDetails = messageActionDetails[lastMessageIndex] ?? null;
+
+  return html`
+    <div class="chat-group assistant">
+      ${renderChatAvatar(
+        "assistant",
+        {
+          name: assistantName,
+          avatar: opts.assistantAvatar ?? null,
+        },
+        {
+          name: opts.userName ?? null,
+          avatar: opts.userAvatar ?? null,
+        },
+        opts.basePath,
+        opts.assistantAttachmentAuthToken,
+      )}
+      <div class="chat-group-messages">
+        <div class="chat-bubble chat-bubble--turn-merged fade-in">
+          <div class="chat-activity-group ${activityExpanded ? "is-open" : ""}">
+            <button
+              class="chat-activity-group__summary ${hasError
+                ? "chat-activity-group__summary--error"
+                : ""}"
+              type="button"
+              aria-expanded=${String(activityExpanded)}
+              aria-label=${hasError
+                ? `Activity: ${toolCount} tool${toolCount === 1 ? "" : "s"}, includes errors.`
+                : nothing}
+              @click=${(event: MouseEvent) => {
+                if (shouldToggleSelectableDisclosure(event)) {
+                  opts.onToggleToolMessageExpanded?.(activityDisclosureId, activityExpanded);
+                }
+              }}
+            >
+              <span class="chat-activity-group__icon">${hasError ? icons.x : icons.activity}</span>
+              <span class="chat-activity-group__label"
+                >Activity: ${toolCount} tool${toolCount === 1 ? "" : "s"}</span
+              >
+              <span
+                class="collapse-chevron ${activityExpanded ? "" : "collapse-chevron--collapsed"}"
+                aria-hidden="true"
+                >${icons.chevronDown}</span
+              >
+            </button>
+            ${activityExpanded
+              ? html`
+                  <div class="chat-activity-group__body">
+                    ${toolGroup.messages.map((item, index) =>
+                      renderGroupedMessage(
+                        item.message,
+                        item.key,
+                        buildGroupedMessageRenderOptions(toolGroup, item, index, opts),
+                        opts.onOpenSidebar,
+                      ),
+                    )}
+                  </div>
+                `
+              : nothing}
+          </div>
+          ${assistantGroup.messages.map((item, index) =>
+            renderGroupedMessage(
+              item.message,
+              item.key,
+              {
+                ...buildGroupedMessageRenderOptions(assistantGroup, item, index, opts),
+                mergeInBubble: true,
+              },
+              opts.onOpenSidebar,
+            ),
+          )}
+        </div>
+        <div class="chat-group-footer">
+          <div class="chat-group-footer__meta">
+            <span class="chat-sender-name">${who}</span>
+            ${renderMessageMeta(
+              assistantGroup.timestamp,
+              meta,
+              opts.assistantAttachmentAuthToken,
+              opts.onRequestUpdate,
+            )}
+          </div>
+          ${footerActionDetails || opts.onDelete
+            ? html`
+                <div class="chat-group-footer-actions">
+                  ${opts.onDelete ? renderDeleteButton(opts.onDelete, "right") : nothing}
                   ${footerActionDetails
                     ? renderMessageActionButtons(footerActionDetails, opts, opts.onOpenSidebar)
                     : nothing}

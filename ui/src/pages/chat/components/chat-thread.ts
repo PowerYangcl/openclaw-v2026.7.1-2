@@ -32,6 +32,7 @@ import {
   getAssistantAttachmentAvailabilityRenderVersion,
   getJdSpendRenderVersion,
   renderMessageGroup,
+  renderMergedAssistantTurn,
   renderStreamGroup,
 } from "./chat-message.ts";
 import { renderRealtimeTalkConversation } from "./chat-realtime-controls.ts";
@@ -776,6 +777,61 @@ export function renderChatThread(props: ChatThreadProps) {
                     assistant: assistantIdentity,
                     basePath: props.basePath,
                     authToken: props.assistantAttachmentAuthToken ?? null,
+                    isToolMessageExpanded: (messageId: string) => expandedToolCards.get(messageId),
+                    onToggleToolMessageExpanded: (messageId: string, expanded?: boolean) => {
+                      expandedToolCards.set(
+                        messageId,
+                        !(expanded ?? expandedToolCards.get(messageId) ?? false),
+                      );
+                      requestUpdate();
+                    },
+                  });
+                }
+                if (
+                  item.kind === "merged-reply" &&
+                  (deleted.has(item.key) ||
+                    deleted.has(item.toolGroup.key) ||
+                    deleted.has(item.assistantGroup.key))
+                ) {
+                  return nothing;
+                }
+                if (item.kind === "merged-reply") {
+                  return renderMergedAssistantTurn(item.toolGroup, item.assistantGroup, {
+                    onOpenSidebar: props.onOpenSidebar,
+                    sessionKey: props.sessionKey,
+                    agentId: props.fullMessageAgentId,
+                    showReasoning,
+                    showToolCalls: props.showToolCalls,
+                    autoExpandToolCalls: Boolean(props.autoExpandToolCalls),
+                    isToolMessageExpanded: (messageId: string) => expandedToolCards.get(messageId),
+                    onToggleToolMessageExpanded: (messageId: string, expanded?: boolean) => {
+                      expandedToolCards.set(
+                        messageId,
+                        !(expanded ?? expandedToolCards.get(messageId) ?? false),
+                      );
+                      requestUpdate();
+                    },
+                    isToolExpanded: (toolCardId: string) =>
+                      expandedToolCards.get(toolCardId) ?? false,
+                    onToggleToolExpanded: toggleToolCardExpanded,
+                    onRequestUpdate: requestUpdate,
+                    onAssistantAttachmentLoaded: props.onAssistantAttachmentLoaded,
+                    assistantName: props.assistantName,
+                    assistantAvatar: assistantIdentity.avatar,
+                    userName: props.userName ?? null,
+                    userAvatar: props.userAvatar ?? null,
+                    basePath: props.basePath,
+                    localMediaPreviewRoots: props.localMediaPreviewRoots ?? [],
+                    assistantAttachmentAuthToken: props.assistantAttachmentAuthToken ?? null,
+                    canvasPluginSurfaceUrl: props.canvasPluginSurfaceUrl,
+                    embedSandboxMode: props.embedSandboxMode ?? "scripts",
+                    allowExternalEmbedUrls: props.allowExternalEmbedUrls ?? false,
+                    contextWindow: threadContextWindow,
+                    onDelete: () => {
+                      deleted.delete(item.toolGroup.key);
+                      deleted.delete(item.assistantGroup.key);
+                      requestUpdate();
+                    },
                   });
                 }
                 if (item.kind === "group") {

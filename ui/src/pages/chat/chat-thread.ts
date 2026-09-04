@@ -64,6 +64,13 @@ type StreamRunRenderItem = {
     | Extract<RenderChatItem, { kind: "group" }>
   >;
 };
+// GCS 定制：同一回合的工具 Activity 组 + assistant 回复合并渲染
+type MergedReplyRenderItem = {
+  kind: "merged-reply";
+  key: string;
+  toolGroup: MessageGroup;
+  assistantGroup: MessageGroup;
+};
 
 const chatItemsBySession = new Map<string, CachedChatItems>();
 const expandedToolCardsBySession = new Map<string, Map<string, boolean>>();
@@ -1141,8 +1148,8 @@ export function buildCachedChatItems(
 
 export function coalesceStreamRuns(
   items: ReturnType<typeof buildChatItems>,
-): Array<RenderChatItem | StreamRunRenderItem> {
-  const result: Array<RenderChatItem | StreamRunRenderItem> = [];
+): Array<RenderChatItem | StreamRunRenderItem | MergedReplyRenderItem> {
+  const result: Array<RenderChatItem | StreamRunRenderItem | MergedReplyRenderItem> = [];
   let run: StreamRunRenderItem["parts"] = [];
   const flush = () => {
     const [first] = run;
@@ -1152,14 +1159,24 @@ export function coalesceStreamRuns(
     }
   };
 
-  // 一个回合在出现第一个 stream/reading 片段时即视为"正在流式"。
+  // 一个回合在出现第一个 stream/reading 片段时即视为“正在流式”。
   // 该回合内（即到下一个 user 边界为止）的任何 tool group 都会被并入流式
   // assistant 气泡，而不是作为独立的 tool group 渲染。已完成的回合不再有
   // stream 片段，因此它们的 tool group 仍独立渲染。
+  // GCS 定制：同一回合内、位于首个 stream/文本之前的 tool 活动组也会先暂存，
+  // 等文本流式到来时一起并入同一条气泡（避免流式中 Activity 独立成第二个气泡）。
   let streamingTurn = false;
+  const pendingPreStream: Array<Extract<RenderChatItem, { kind: "group" }>> = [];
+  const consumePendingPreStream = () => {
+    for (const p of pendingPreStream) {
+      run.push(p);
+    }
+    pendingPreStream.length = 0;
+  };
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
     if (item.kind === "stream" || item.kind === "reading-indicator") {
+      consumePendingPreStream();
       streamingTurn = true;
       run.push(item);
       continue;
@@ -1170,9 +1187,56 @@ export function coalesceStreamRuns(
     }
     if (item.kind === "group" && item.role === "user") {
       streamingTurn = false;
+      pendingPreStream.length = 0;
+    }
+    if (
+      !streamingTurn &&
+      item.kind === "group" &&
+      item.role === "tool" &&
+      item.messages.length > 1
+    ) {
+      // 同回合后续（到下一个 user 边界前）是否会出现 stream/reading？
+      const hasStreamAfter = items.slice(i + 1).some((n) => {
+        if (n.kind === "group" && n.role === "user") {
+          return false;
+        }
+        return n.kind === "stream" || n.kind === "reading-indicator";
+      });
+      if (hasStreamAfter) {
+        // 暂存，等文本流式到来一起并入同一条气泡
+        pendingPreStream.push(item);
+        continue;
+      }
+      // 已完成回合：tool 活动组后紧跟同回合 assistant 回复 → 合并成同一气泡
+      const next = items[i + 1];
+      const canMerge =
+        next &&
+        next.kind === "group" &&
+        next.role === "assistant" &&
+        !assistantGroupIsForwardedBoundary(next) &&
+        next.messages.length >= 1;
+      if (canMerge) {
+        flush();
+        result.push({
+          kind: "merged-reply",
+          key: `merged-reply:${item.key}`,
+          toolGroup: item,
+          assistantGroup: next,
+        });
+        i += 1;
+        continue;
+      }
     }
     flush();
     result.push(item);
+  }
+  // 防御：若暂存的 tool 到末尾仍无 stream 消费，独立输出，避免丢失
+  if (pendingPreStream.length > 0) {
+    flush();
+    for (const p of pendingPreStream) {
+      result.push(p);
+    }
+    pendingPreStream.length = 0;
   }
   flush();
   return result;
