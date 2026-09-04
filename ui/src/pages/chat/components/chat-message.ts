@@ -1005,7 +1005,10 @@ export function renderMessageGroup(group: MessageGroup, opts: RenderMessageGroup
             ${opts.onDelete && normalizedRole === "user"
               ? renderDeleteButton(opts.onDelete, "left")
               : nothing}
-            <span class="chat-sender-name">${who}</span>
+            <!-- GCS 定制：user 消息不显示发送者名字（其余角色保留） -->
+            ${normalizedRole !== "user"
+              ? html`<span class="chat-sender-name">${who}</span>`
+              : nothing}
             ${renderMessageMeta(
               group.timestamp,
               meta,
