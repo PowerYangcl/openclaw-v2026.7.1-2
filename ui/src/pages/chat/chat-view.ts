@@ -286,27 +286,29 @@ export function renderChat(props: ChatProps) {
       }}
     >
       ${props.disabledReason ? html`<div class="callout">${props.disabledReason}</div>` : nothing}
-      ${props.error
-        ? html`
-            <div class="callout danger callout--dismissible" role="alert">
-              <span class="callout__content">${props.error}</span>
-              ${props.onDismissError
-                ? html`
-                    <openclaw-tooltip content="Dismiss error">
-                      <button
-                        class="callout__dismiss"
-                        type="button"
-                        @click=${props.onDismissError}
-                        aria-label="Dismiss error"
-                      >
-                        ${icons.x}
-                      </button>
-                    </openclaw-tooltip>
-                  `
-                : nothing}
-            </div>
-          `
-        : nothing}
+      ${
+        /* 【隐藏会话错误横幅 @2026-09-04 产品决策】原代码保留、不渲染；恢复：把 false 改回 props.error */ false
+          ? html`
+              <div class="callout danger callout--dismissible" role="alert">
+                <span class="callout__content">${props.error}</span>
+                ${props.onDismissError
+                  ? html`
+                      <openclaw-tooltip content="Dismiss error">
+                        <button
+                          class="callout__dismiss"
+                          type="button"
+                          @click=${props.onDismissError}
+                          aria-label="Dismiss error"
+                        >
+                          ${icons.x}
+                        </button>
+                      </openclaw-tooltip>
+                    `
+                  : nothing}
+              </div>
+            `
+          : nothing
+      }
       ${props.focusMode && props.onToggleFocusMode
         ? html`
             <openclaw-tooltip content="Exit focus mode">

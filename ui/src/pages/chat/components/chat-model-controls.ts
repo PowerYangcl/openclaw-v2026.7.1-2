@@ -1028,62 +1028,73 @@ function renderChatModelReasoningSelect(params: {
                           : ""}
                     `
                   : ""}
-                <div class="chat-controls__inline-select-section-label">Speed</div>
-                <div
-                  class="chat-controls__reasoning-options chat-controls__reasoning-options--speed"
-                  role="group"
-                  aria-label="Speed"
-                >
-                  ${repeat(
-                    fastMode.options,
-                    (speed) => speed.value,
-                    (speed) => {
-                      const speedValue = speed.value as ChatFastModeSelectValue;
-                      const speedSelected = speedValue === fastMode.currentOverride;
-                      return html`
-                        <button
-                          class="chat-controls__reasoning-option ${speedSelected
-                            ? "chat-controls__reasoning-option--selected"
-                            : ""}"
-                          data-chat-speed-option=${speed.value}
-                          aria-pressed=${speedSelected ? "true" : "false"}
-                          type="button"
-                          ?disabled=${fastMode.disabled}
-                          @click=${(event: MouseEvent) => {
-                            event.stopPropagation();
-                            if (fastMode.disabled) {
-                              event.preventDefault();
-                              return;
-                            }
-                            const draft = ensureChatModelPickerDraft(draftStore, {
-                              fastModeValue: initialFastModeValue,
-                              modelValue: initialModelValue,
-                              sessionKey,
-                              thinkingValue: initialThinkingValue,
-                            });
-                            draft.fastModeValue = speedValue;
-                            const currentButton = event.currentTarget as HTMLButtonElement;
-                            currentButton
-                              .closest(".chat-controls__reasoning-options--speed")
-                              ?.querySelectorAll<HTMLButtonElement>("[data-chat-speed-option]")
-                              .forEach((button) => {
-                                const selected =
-                                  button.dataset.chatSpeedOption === draft.fastModeValue;
-                                button.setAttribute("aria-pressed", selected ? "true" : "false");
-                                button.classList.toggle(
-                                  "chat-controls__reasoning-option--selected",
-                                  selected,
-                                );
-                              });
-                            onRequestUpdate?.();
-                          }}
+                ${
+                  /* 【隐藏 Speed 一组 Default/Fast/Standard/Auto @2026-09-04】原代码保留、不渲染；恢复：把 false 改成 true */ false
+                    ? html`
+                        <div class="chat-controls__inline-select-section-label">Speed</div>
+                        <div
+                          class="chat-controls__reasoning-options chat-controls__reasoning-options--speed"
+                          role="group"
+                          aria-label="Speed"
                         >
-                          <span>${speed.label}</span>
-                        </button>
-                      `;
-                    },
-                  )}
-                </div>
+                          ${repeat(
+                            fastMode.options,
+                            (speed) => speed.value,
+                            (speed) => {
+                              const speedValue = speed.value as ChatFastModeSelectValue;
+                              const speedSelected = speedValue === fastMode.currentOverride;
+                              return html`
+                                <button
+                                  class="chat-controls__reasoning-option ${speedSelected
+                                    ? "chat-controls__reasoning-option--selected"
+                                    : ""}"
+                                  data-chat-speed-option=${speed.value}
+                                  aria-pressed=${speedSelected ? "true" : "false"}
+                                  type="button"
+                                  ?disabled=${fastMode.disabled}
+                                  @click=${(event: MouseEvent) => {
+                                    event.stopPropagation();
+                                    if (fastMode.disabled) {
+                                      event.preventDefault();
+                                      return;
+                                    }
+                                    const draft = ensureChatModelPickerDraft(draftStore, {
+                                      fastModeValue: initialFastModeValue,
+                                      modelValue: initialModelValue,
+                                      sessionKey,
+                                      thinkingValue: initialThinkingValue,
+                                    });
+                                    draft.fastModeValue = speedValue;
+                                    const currentButton = event.currentTarget as HTMLButtonElement;
+                                    currentButton
+                                      .closest(".chat-controls__reasoning-options--speed")
+                                      ?.querySelectorAll<HTMLButtonElement>(
+                                        "[data-chat-speed-option]",
+                                      )
+                                      .forEach((button) => {
+                                        const selected =
+                                          button.dataset.chatSpeedOption === draft.fastModeValue;
+                                        button.setAttribute(
+                                          "aria-pressed",
+                                          selected ? "true" : "false",
+                                        );
+                                        button.classList.toggle(
+                                          "chat-controls__reasoning-option--selected",
+                                          selected,
+                                        );
+                                      });
+                                    onRequestUpdate?.();
+                                  }}
+                                >
+                                  <span>${speed.label}</span>
+                                </button>
+                              `;
+                            },
+                          )}
+                        </div>
+                      `
+                    : ""
+                }
               </div>
             `
           : ""}
