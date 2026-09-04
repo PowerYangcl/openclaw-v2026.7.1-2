@@ -117,7 +117,7 @@ export async function handleJdSpendRequest(
 
   // 上游 spend 按 8 位小数定点取整后再 ×1000（整数刻度换算），避免浮点乘法
   // 把 0.163944 × 1000 算成 163.94400000000002 的尾差。
-  const spend = typeof rawSpend === "number" ? Math.round(rawSpend * 1e8) / 1e5 : null;
+  const spend = typeof rawSpend === "number" ? Math.round(rawSpend * 1e8) / 1e6 : null;
 
   sendJson(res, 200, { ok: true, spend });
   return true;

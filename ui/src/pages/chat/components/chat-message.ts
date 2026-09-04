@@ -628,7 +628,8 @@ type StreamGroupOptions = {
 
 function renderReadingIndicatorBubble() {
   return html`
-    <div class="chat-bubble chat-reading-indicator" aria-hidden="true">
+    <div class="chat-bubble chat-reading-indicator">
+      <span class="chat-reading-indicator__text">思考中</span>
       <span class="chat-reading-indicator__dots"> <span></span><span></span><span></span> </span>
     </div>
   `;
@@ -644,12 +645,18 @@ export function renderStreamGroup(parts: StreamGroupPart[], opts: StreamGroupOpt
   // is only the reading indicator has no timestamp and therefore no footer.
   const streamStarts = parts.flatMap((part) => (part.kind === "stream" ? [part.startedAt] : []));
   const footerStartedAt = streamStarts.length > 0 ? Math.min(...streamStarts) : null;
+  // GCS 定制：只含 reading-indicator 时给外层气泡加专用 class，供 CSS 去边框
+  const isReadingOnly = parts.every((p) => p.kind === "reading-indicator");
 
   return html`
     <div class="chat-group assistant">
       ${renderChatAvatar("assistant", assistant, undefined, basePath, authToken)}
       <div class="chat-group-messages">
-        <div class="chat-bubble chat-bubble--turn-merged fade-in">
+        <div
+          class="chat-bubble chat-bubble--turn-merged fade-in${isReadingOnly
+            ? " chat-bubble--reading-only"
+            : ""}"
+        >
           ${parts.map((part) => {
             if (part.kind === "reading-indicator") {
               return renderReadingIndicatorBubble();

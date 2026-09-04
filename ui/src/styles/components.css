@@ -3563,6 +3563,11 @@ td.data-table-key-col {
 .chat-bubble.chat-reading-indicator {
   width: fit-content;
   padding: 10px 16px;
+  /* GCS 定制：去掉阅读指示器气泡的边框与背景，只留“思考中”文字+三点动画 */
+  border: 0 !important;
+  border-color: transparent !important;
+  background: transparent !important;
+  box-shadow: none;
 }
 
 /* Cron markdown overrides out-specify the base .chat-text rules in chat/text.css. */

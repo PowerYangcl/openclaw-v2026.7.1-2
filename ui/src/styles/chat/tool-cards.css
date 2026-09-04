@@ -548,10 +548,28 @@
   border-left: 1px solid color-mix(in srgb, var(--border) 85%, transparent);
 }
 
+/* GCS 定制：流式回复只含 reading-indicator 时，去掉外层气泡的边框、背景、内边距 */
+.chat-bubble--reading-only {
+  border: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  padding: 0 !important;
+}
+
 /* Reading Indicator: bubble chrome and sizing come from .chat-bubble and
    .chat-bubble.chat-reading-indicator (components.css). */
 .chat-reading-indicator {
   display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* GCS 定制：阅读指示器文字“思考中” */
+.chat-reading-indicator__text {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1;
+  white-space: nowrap;
 }
 
 .chat-reading-indicator__dots {
