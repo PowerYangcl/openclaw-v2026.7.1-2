@@ -1004,7 +1004,6 @@ function extractGroupMeta(group: MessageGroup, contextWindow: number | null): Gr
     if (typeof m.provider === "string") {
       provider = m.provider;
     }
-    console.log(m, 7777777);
     if (typeof m.responseId === "string" && m.responseId) {
       completionId = m.responseId;
     } else if (!completionId && typeof m.id === "string" && m.id) {

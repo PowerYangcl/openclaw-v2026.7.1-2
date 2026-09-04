@@ -114,8 +114,9 @@ export async function handleJdSpendRequest(
 
   const record = data as Record<string, unknown>;
   const rawSpend = record?.spend;
-  // 上游 spend 原值 × 1000 后返回给前端（保留完整小数，不截断）
-  const spend = typeof rawSpend === "number" ? rawSpend * 1000 : null;
+
+  // 上游 spend 原值先保留 6 位小数，再 × 1000 后返回给前端
+  const spend = typeof rawSpend === "number" ? Number(rawSpend.toFixed(6)) * 1000 : null;
 
   sendJson(res, 200, { ok: true, spend });
   return true;
