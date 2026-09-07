@@ -737,6 +737,7 @@ export async function handleControlUiAvatarRequest(
       trustedProxies: opts.trustedProxies,
       allowRealIpFallback: opts.allowRealIpFallback,
       rateLimiter: opts.rateLimiter,
+      allowQueryToken: true,
     }))
   ) {
     return true;

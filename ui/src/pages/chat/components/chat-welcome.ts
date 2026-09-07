@@ -8,6 +8,8 @@ type ChatWelcomeProps = {
   assistantName: string;
   assistantAvatar: string | null;
   assistantAvatarUrl?: string | null;
+  /** 鉴权 token：头像为本地相对路径时拼接到 img src，通过网关头像路由鉴权 */
+  assistantAttachmentAuthToken?: string | null;
   basePath?: string;
   /** Optional per-agent quick-start phrases (shown instead of the default list). */
   quickStart?: string[];
@@ -56,9 +58,26 @@ function resolveSuggestionTexts(props: ChatWelcomeProps): string[] {
   return WELCOME_SUGGESTION_KEYS.map((key) => t(key));
 }
 
+function withAvatarToken(url: string | null, token: string | null | undefined): string | null {
+  if (!url || !token || !url.startsWith("/")) {
+    return url;
+  }
+  const separator = url.includes("?") ? "&" : "?";
+  return `${url}${separator}token=${encodeURIComponent(token)}`;
+}
+
+/**
+ * @description: welcome 页头像 img 直出时拼接网关鉴权 token，避免本地头像路径 401 破图。
+ * @author yangchenglin11@jd.com
+ * @date 2026年9月7日 16:10:00
+ * @version v2026.8.28-1-build-dev
+ */
 export function renderWelcomeState(props: ChatWelcomeProps) {
   const name = props.assistantName || "Assistant";
-  const avatar = resolveAssistantAvatarUrl(props);
+  const avatar = withAvatarToken(
+    resolveAssistantAvatarUrl(props),
+    props.assistantAttachmentAuthToken,
+  );
   const avatarText = avatar ? null : resolveAssistantTextAvatar(props.assistantAvatar);
   const fallbackAvatarUrl = assistantAvatarFallbackUrl(props.basePath ?? "");
   const suggestions = resolveSuggestionTexts(props);
