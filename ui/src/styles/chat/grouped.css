@@ -522,6 +522,21 @@ details.msg-meta {
   font-family: var(--font-mono, monospace);
 }
 
+/* 隐藏消息上方 token 计数 / cache / ctx 百分比标签：仅 CSS 隐藏，渲染代码保留不动，便于随时恢复显示 */
+
+/**
+ * @description: 隐藏对话框消息上方的 ↑↓ token 计数、R/W cache、ctx 百分比标签。
+ *               仅用 CSS 覆盖为 display:none，渲染代码保留不动；如需恢复，直接删除本规则即可。
+ * @author yangchenglin11@jd.com
+ * @date 2026年9月7日 13:42:00
+ * @version v2026.8.28-1-build-dev
+ */
+.msg-meta__tokens,
+.msg-meta__cache,
+.msg-meta__ctx {
+  display: none;
+}
+
 .msg-meta__cost {
   color: var(--muted);
   opacity: 0.7;
