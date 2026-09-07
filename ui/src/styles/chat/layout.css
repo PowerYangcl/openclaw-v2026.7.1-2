@@ -318,6 +318,23 @@ openclaw-chat-page {
   font-weight: 650;
 }
 
+/* 仅保留标题区与进度条：隐藏 配额/最新运行令牌/成本分类/提供商/模型 区块（渲染代码保留，便于恢复） */
+.context-usage__quota,
+.context-usage__section-label,
+.context-usage__stats,
+.context-usage__model {
+  display: none;
+}
+
+/**
+ * @description: context 环详情浮层只展示「上下文窗口标题区 + 进度条」，其余区块（配额、
+ *               最新运行令牌统计、成本分类、提供商、模型）用 CSS 隐藏，渲染代码保留不动。
+ *               如需恢复，直接删除本规则即可。
+ * @author yangchenglin11@jd.com
+ * @date 2026年9月7日 13:56:00
+ * @version v2026.8.28-1-build-dev
+ */
+
 .context-ring__action {
   display: inline-flex;
   align-items: center;

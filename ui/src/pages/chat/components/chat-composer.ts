@@ -1606,11 +1606,19 @@ export function renderContextNotice(
       style=${model ? `--ctx-color:${model.color};--ctx-bg:${model.bg}` : ""}
     >
       <details>
+        <!--
+          2026-09-07 同事改主意，恢复点击展开 context 环详情浮层：移除 @click preventDefault 禁用逻辑
+          （原禁用改动见提交 1d7d043，git 历史可随时回溯）。
+			@click=${(event: Event) => event.preventDefault()}
+			
+          @author yangchenglin11@jd.com
+          @date 2026年9月7日 13:54:00
+          @version v2026.8.28-1-build-dev
+        -->
         <summary
           class="context-ring ${model?.warning ? "context-ring--warning" : ""}"
           aria-label=${summary}
           title=${t("chat.composer.contextUsage.open")}
-          @click=${(event: Event) => event.preventDefault()}
         >
           <svg
             class="context-ring__dial"
