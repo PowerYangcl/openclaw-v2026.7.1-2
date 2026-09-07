@@ -3453,6 +3453,8 @@ td.data-table-key-col {
 .chat-queue__list {
   display: grid;
   gap: 8px;
+  max-height: 300px;
+  overflow-y: auto;
 }
 
 .chat-queue__item {
