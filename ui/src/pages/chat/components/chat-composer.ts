@@ -2293,7 +2293,7 @@ export function renderChatComposer(props: ChatComposerProps) {
             >
               <button
                 type="button"
-                class="agent-chat__attach-menu-option"
+                class="agent-chat__attach-menu-option agent-chat__attach-menu-option--hidden-media"
                 role="menuitem"
                 @click=${clickComposerCameraInput}
               >
@@ -2302,7 +2302,7 @@ export function renderChatComposer(props: ChatComposerProps) {
               </button>
               <button
                 type="button"
-                class="agent-chat__attach-menu-option"
+                class="agent-chat__attach-menu-option agent-chat__attach-menu-option--hidden-media"
                 role="menuitem"
                 @click=${clickComposerPhotoInput}
               >

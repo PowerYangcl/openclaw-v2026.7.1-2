@@ -1376,6 +1376,16 @@ openclaw-chat-page {
   cursor: pointer;
 }
 
+/**
+ * @description: 隐藏“拍照 / 照片”两个附件菜单项（仅 CSS 隐藏，不删除按钮代码，便于日后恢复）。
+ * @author yangchenglin11@jd.com
+ * @date 2026年9月7日 21:10:00
+ * @version v2026.8.28-1-build-dev
+ */
+.agent-chat__attach-menu-option--hidden-media {
+  display: none !important;
+}
+
 .agent-chat__attach-menu-option:hover,
 .agent-chat__attach-menu-option:focus-visible {
   background: var(--bg-hover);
