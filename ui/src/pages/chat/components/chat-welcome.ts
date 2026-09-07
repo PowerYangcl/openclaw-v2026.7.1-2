@@ -58,6 +58,12 @@ function resolveSuggestionTexts(props: ChatWelcomeProps): string[] {
   return WELCOME_SUGGESTION_KEYS.map((key) => t(key));
 }
 
+/**
+ * @description: welcome 页头像 img 直出时拼接网关鉴权 token，避免本地头像路径 401 破图。
+ * @author yangchenglin11@jd.com
+ * @date 2026年9月7日 16:10:00
+ * @version v2026.8.28-1-build-dev
+ */
 function withAvatarToken(url: string | null, token: string | null | undefined): string | null {
   if (!url || !token || !url.startsWith("/")) {
     return url;
@@ -66,12 +72,6 @@ function withAvatarToken(url: string | null, token: string | null | undefined): 
   return `${url}${separator}token=${encodeURIComponent(token)}`;
 }
 
-/**
- * @description: welcome 页头像 img 直出时拼接网关鉴权 token，避免本地头像路径 401 破图。
- * @author yangchenglin11@jd.com
- * @date 2026年9月7日 16:10:00
- * @version v2026.8.28-1-build-dev
- */
 export function renderWelcomeState(props: ChatWelcomeProps) {
   const name = props.assistantName || "Assistant";
   const avatar = withAvatarToken(

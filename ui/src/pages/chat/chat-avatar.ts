@@ -19,6 +19,20 @@ import {
   resolveUiSelectedGlobalAgentId,
 } from "../../lib/sessions/session-key.ts";
 
+/**
+ * @description: 消息气泡旁 assistant 头像 img 直出时拼接网关鉴权 token，避免本地头像路径 401 破图。
+ * @author yangchenglin11@jd.com
+ * @date 2026年9月7日 17:12:00
+ * @version v2026.8.28-1-build-dev
+ */
+function withChatAvatarToken(url: string, token: string | null | undefined): string {
+  if (!token || !url.startsWith("/")) {
+    return url;
+  }
+  const separator = url.includes("?") ? "&" : "?";
+  return `${url}${separator}token=${encodeURIComponent(token)}`;
+}
+
 export function renderChatAvatar(
   role: string,
   assistant?: Pick<AssistantIdentity, "name" | "avatar">,
@@ -94,7 +108,7 @@ export function renderChatAvatar(
     if (isAvatarUrl(assistantAvatar)) {
       return html`<img
         class="chat-avatar ${className}"
-        src="${assistantAvatar}"
+        src="${withChatAvatarToken(assistantAvatar, authToken)}"
         alt="${assistantName}"
       />`;
     }
