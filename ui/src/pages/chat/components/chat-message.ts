@@ -77,54 +77,113 @@ const assistantAttachmentAvailabilityCache = new Map<string, AssistantAttachment
 const assistantAttachmentRefreshTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 // ── JD spend cache ──
-type JdSpendState = { status: "pending" } | { status: "done"; spend: number } | { status: "error" };
+type JdSpendState =
+  | { status: "pending" }
+  | { status: "done"; spend: number; balance: number | null }
+  | { status: "error" };
 
 const jdSpendCache = new Map<string, JdSpendState>();
 
-async function fetchJdSpend(completionId: string): Promise<number | null> {
-  const url = `/api/v1/jd/spend/${encodeURIComponent(completionId)}`;
-  // 最长轮询 60s；每次请求设 2s 超时，超时直接发起下一次，不等待
+/**
+ * 退避轮询 fetch。用于"对话刚完成"场景：
+ * 1. 先轮询直到 spend 非 null（上游数据 ready）；
+ *    轮询间隔：500ms → 1s → 2s → 4s，deadline 60s。
+ * 2. 拿到首个有效数据后，额外再请求 5 次（每次间隔 500ms）校验 balance 是否变化，
+ *    若变化则用最新值，5 次校验后停止。
+ */
+async function fetchJdSpendWithBackoff(
+  completionId: string,
+): Promise<{ spend: number; balance: number | null } | null> {
+  const url = `/api/v1/jd/spend/${encodeURIComponent(completionId)}?include_key_info=true`;
+  const waits = [500, 1000, 2000, 4000];
   const deadline = Date.now() + 60_000;
-  while (Date.now() < deadline) {
+
+  // Phase 1: 轮询直到拿到非 null 的 spend（含 balance 可能仍为 null）
+  let firstResult: { spend: number; balance: number | null } | null = null;
+  let phaseOneRetries = 0;
+  while (Date.now() < deadline && firstResult === null) {
     let res: Response;
     try {
       res = await fetch(url, { signal: AbortSignal.timeout(2000) });
     } catch {
-      // 超时或网络错误，立即重试
-      continue;
-    }
-    if (res.status === 202) {
+      await new Promise<void>((r) =>
+        setTimeout(r, waits[Math.min(phaseOneRetries, waits.length - 1)]!),
+      );
+      phaseOneRetries++;
       continue;
     }
     if (!res.ok) {
-      return null;
+      await new Promise<void>((r) =>
+        setTimeout(r, waits[Math.min(phaseOneRetries, waits.length - 1)]!),
+      );
+      phaseOneRetries++;
+      continue;
     }
     try {
       const data = (await res.json()) as Record<string, unknown>;
       const rawSpend = data?.spend;
+      const rawBalance = data?.balance;
       if (typeof rawSpend === "number") {
-        return rawSpend;
+        const balance = typeof rawBalance === "number" ? rawBalance : null;
+        firstResult = { spend: rawSpend, balance };
+        break;
       }
     } catch {
       // ignore parse error
     }
-    // spend not ready yet (upstream async), keep polling
+    await new Promise<void>((r) =>
+      setTimeout(r, waits[Math.min(phaseOneRetries, waits.length - 1)]!),
+    );
+    phaseOneRetries++;
   }
-  return null;
+
+  if (firstResult === null) return null;
+
+  // Phase 2: 额外最多再请求 5 次（每次间隔 500ms）
+  // 一旦 balance 发生变化（上游计算完成），立即停止并返回最新值
+  let latest = firstResult;
+  for (let i = 0; i < 5; i++) {
+    await new Promise<void>((r) => setTimeout(r, 500));
+    let res: Response;
+    try {
+      res = await fetch(url, { signal: AbortSignal.timeout(2000) });
+    } catch {
+      continue;
+    }
+    if (!res.ok) continue;
+    try {
+      const data = (await res.json()) as Record<string, unknown>;
+      const rawSpend = data?.spend;
+      const rawBalance = data?.balance;
+      if (typeof rawSpend === "number") {
+        const balance = typeof rawBalance === "number" ? rawBalance : null;
+        if (balance !== latest.balance) {
+          return { spend: rawSpend, balance };
+        }
+      }
+    } catch {
+      // ignore parse error
+    }
+  }
+
+  return latest;
 }
 
 function triggerJdSpendFetch(completionId: string, onRequestUpdate?: () => void): void {
   if (jdSpendCache.has(completionId)) return;
   jdSpendCache.set(completionId, { status: "pending" });
-  fetchJdSpend(completionId).then((spend) => {
+  fetchJdSpendWithBackoff(completionId).then((result) => {
     jdSpendCache.set(
       completionId,
-      spend !== null ? { status: "done", spend } : { status: "error" },
+      result !== null
+        ? { status: "done", spend: result.spend, balance: result.balance }
+        : { status: "error" },
     );
     bumpJdSpendRenderVersion();
     onRequestUpdate?.();
   });
 }
+
 const pairingQrExpiryRefreshTimers = new Map<string, PairingQrExpiryRefreshTimer>();
 const ASSISTANT_ATTACHMENT_UNAVAILABLE_RETRY_MS = 5_000;
 const ASSISTANT_ATTACHMENT_MEDIA_TICKET_REFRESH_SKEW_MS = 30_000;
@@ -1288,11 +1347,17 @@ function renderMessageMeta(
     const cached = jdSpendCache.get(meta.completionId);
     if (!cached) {
       triggerJdSpendFetch(meta.completionId, onRequestUpdate);
-      parts.push(html`<span class="msg-meta__cost">共消耗计算中...</span>`);
+      // parts.push(html`<span class="msg-meta__cost">共消耗计算中...</span>`);
+      parts.push(html`<span class="msg-meta__cost">剩余积分计算中...</span>`);
     } else if (cached.status === "pending") {
-      parts.push(html`<span class="msg-meta__cost">共消耗计算中...</span>`);
+      // parts.push(html`<span class="msg-meta__cost">共消耗计算中...</span>`);
+      parts.push(html`<span class="msg-meta__cost">剩余积分计算中...</span>`);
     } else if (cached.status === "done") {
-      parts.push(html`<span class="msg-meta__cost">共消耗 ${cached.spend} </span>`);
+      // 消耗部分暂时隐藏，改为展示剩余积分
+      // parts.push(html`<span class="msg-meta__cost">共消耗 ${cached.spend} </span>`);
+      if (cached.balance !== null && cached.balance > 0) {
+        parts.push(html`<span class="msg-meta__cost">剩余积分：${cached.balance}</span>`);
+      }
     }
   } else if (!isJdLlm && meta.cost > 0) {
     parts.push(html`<span class="msg-meta__cost">$${meta.cost}</span>`);
