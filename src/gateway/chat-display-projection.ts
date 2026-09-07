@@ -1650,6 +1650,30 @@ function projectSessionsSendInterSessionMessages(
 
 const GATEWAY_ASSISTANT_ERROR_FALLBACK_TEXT = "The agent run failed before producing a reply.";
 
+/**
+ * @description: 用户欠费/积分不足时的定制兜底文案，命中 budget 类错误时由 webchat 显示为中文提示。
+ * @author yangchenglin11@jd.com
+ * @date 2026年9月7日 15:00:00
+ * @version v2026.8.28-1-build-dev
+ */
+const BUDGET_EXCEEDED_FALLBACK_TEXT = "积分不足，请前往充值页面充值";
+
+/**
+ * @description: 判断 assistant 错误消息是否属于欠费/预算超限类（大小写不敏感，已统一小写后匹配）。
+ * @author yangchenglin11@jd.com
+ * @date 2026年9月7日 15:00:00
+ * @version v2026.8.28-1-build-dev
+ */
+function isBudgetExceededErrorLike(msg: Record<string, unknown>): boolean {
+  const haystack = [msg.errorType, msg.errorCode, msg.errorBody, msg.errorMessage]
+    .filter((v): v is string => typeof v === "string")
+    .join(" ")
+    .toLowerCase();
+  return /budget_exceeded|budget has been exceeded|max budget|insufficient (credit|funds|balance)|欠费|余额不足|充值/.test(
+    haystack,
+  );
+}
+
 function sanitizeAssistantErrorDisplayMessage(
   message: Record<string, unknown>,
 ): Record<string, unknown> {
@@ -1734,9 +1758,12 @@ function projectEmptyAssistantErrorMessages(
       return sanitizeAssistantErrorDisplayMessage(message);
     }
     changed = true;
+    const fallbackText = isBudgetExceededErrorLike(message)
+      ? BUDGET_EXCEEDED_FALLBACK_TEXT
+      : GATEWAY_ASSISTANT_ERROR_FALLBACK_TEXT;
     const next: Record<string, unknown> = {
       ...sanitized,
-      content: [{ type: "text", text: GATEWAY_ASSISTANT_ERROR_FALLBACK_TEXT }],
+      content: [{ type: "text", text: fallbackText }],
     };
     delete next.diagnostics;
     delete next.errorBody;
