@@ -16,6 +16,10 @@ export type ChatQueueSkillWorkshopRevision = { proposalId: string; agentId?: str
 export type ChatQueueItem = {
   id: string;
   text: string;
+  /** 原始去重文本（合并计数用；不带 ×N 后缀） */
+  baseText?: string;
+  /** 连续相同时窗内重复次数（>=1；>1 时 text 会带 ×N 后缀） */
+  repeatCount?: number;
   createdAt: number;
   kind?: "queued" | "steered";
   attachments?: ChatAttachment[];

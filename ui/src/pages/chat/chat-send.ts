@@ -426,6 +426,8 @@ function isBtwCommand(text: string) {
   return /^\/(?:btw|side)(?::|\s|$)/i.test(text.trim());
 }
 
+const CHAT_QUEUE_DEDUP_WINDOW_MS = 10_000;
+
 function enqueuePendingSendMessage(
   host: ChatHost,
   text: string,
@@ -442,9 +444,59 @@ function enqueuePendingSendMessage(
   if (!trimmed && !hasAttachments) {
     return null;
   }
+  /**
+   * @description: 连续相同时窗内快速连发相同内容时，合并为一条计次消息（repeatCount 计数，text 保持原文），
+   *               避免并发重复提交触发后端 session 锁竞争，同时避免把“×N”当消息发给 agent。
+   * @author yangchenglin11@jd.com
+   * @date 2026年9月7日 20:42:00
+   * @version v2026.8.28-1-build-dev
+   */
+  if (!hasAttachments && trimmed.length > 0) {
+    const now = Date.now();
+    const last = host.chatQueue[host.chatQueue.length - 1];
+    if (
+      last &&
+      last.kind !== "steered" &&
+      !last.attachments?.length &&
+      last.sendState !== "sending" &&
+      (last.baseText ?? last.text) === trimmed &&
+      now - last.createdAt <= CHAT_QUEUE_DEDUP_WINDOW_MS &&
+      !last.repeatCount
+    ) {
+      const count = 2;
+      const merged: ChatQueueItem = {
+        ...last,
+        baseText: trimmed,
+        repeatCount: count,
+        text: trimmed,
+      };
+      host.chatQueue = [...host.chatQueue.slice(0, -1), merged];
+      return merged;
+    }
+    if (
+      last &&
+      last.kind !== "steered" &&
+      !last.attachments?.length &&
+      last.sendState !== "sending" &&
+      (last.baseText ?? last.text) === trimmed &&
+      last.repeatCount &&
+      last.baseText === trimmed &&
+      now - last.createdAt <= CHAT_QUEUE_DEDUP_WINDOW_MS
+    ) {
+      const count = last.repeatCount + 1;
+      const merged: ChatQueueItem = {
+        ...last,
+        repeatCount: count,
+        text: trimmed,
+      };
+      host.chatQueue = [...host.chatQueue.slice(0, -1), merged];
+      return merged;
+    }
+  }
   const pending: ChatQueueItem = {
     id: generateUUID(),
     text: trimmed,
+    baseText: hasAttachments ? undefined : trimmed,
     createdAt: Date.now(),
     attachments: hasAttachments ? attachments : undefined,
     refreshSessions,

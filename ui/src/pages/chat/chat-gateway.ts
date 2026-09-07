@@ -14,6 +14,7 @@ import {
   type ChatState,
 } from "./chat-history.ts";
 import { clearPendingQueueItemsForRun } from "./chat-queue.ts";
+import { flushChatQueueForEvent } from "./chat-send.ts";
 import { reconcileChatRunLifecycle } from "./run-lifecycle.ts";
 import { appendChatMessageToCache } from "./session-message-cache.ts";
 import {
@@ -295,6 +296,13 @@ export function handleChatGatewayEvent(state: ChatState, payload?: ChatEventPayl
     !isEventForDifferentActiveRun(payload, activeRunIdBeforeEvent)
   ) {
     clearPendingQueueItemsForRun(state, payload?.runId);
+    /**
+     * @description: run 结束后自动续发队列剩余消息（含合并的 ×N 项），避免已排队内容一直残留不消失。
+     * @author yangchenglin11@jd.com
+     * @date 2026年9月7日 20:28:00
+     * @version v2026.8.28-1-build-dev
+     */
+    void flushChatQueueForEvent(state as unknown as Parameters<typeof flushChatQueueForEvent>[0]);
   }
   return result;
 }
