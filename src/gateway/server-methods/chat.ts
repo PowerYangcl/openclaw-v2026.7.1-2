@@ -2809,6 +2809,17 @@ function broadcastChatError(params: {
   const seq = nextChatSeq({ agentRunSeq: params.context.agentRunSeq }, params.runId);
   const payloadAgentId = params.sessionKey === "global" ? params.agentId : undefined;
   const errorText = params.errorMessage?.trim();
+  /**
+   * @description: 会话被其他进程接管/占用（锁竞争）时，将广播的错误文案替换为友好中文提示，避免透出英文内部错误。
+   * @author yangchenglin11@jd.com
+   * @date 2026年9月7日 19:50:00
+   * @version v2026.8.28-1-build-dev
+   */
+  const isSessionTakeover =
+    /session file changed while embedded prompt lock was released|EmbeddedAttemptSessionTakeoverError/i.test(
+      errorText ?? "",
+    );
+  const visibleErrorText = isSessionTakeover ? "当前会话正在处理中，请稍后。" : errorText;
   const payload = {
     runId: params.runId,
     sessionKey: params.sessionKey,
@@ -2816,7 +2827,7 @@ function broadcastChatError(params: {
     seq,
     state: "error" as const,
     errorMessage: params.errorMessage,
-    ...(errorText
+    ...(visibleErrorText
       ? {
           message: {
             role: "assistant",
@@ -2824,9 +2835,9 @@ function broadcastChatError(params: {
               {
                 type: "text",
                 text:
-                  errorText.startsWith("⚠️") || errorText.startsWith("Error:")
-                    ? errorText
-                    : `Error: ${errorText}`,
+                  visibleErrorText.startsWith("⚠️") || visibleErrorText.startsWith("Error:")
+                    ? visibleErrorText
+                    : `Error: ${visibleErrorText}`,
               },
             ],
             timestamp: Date.now(),

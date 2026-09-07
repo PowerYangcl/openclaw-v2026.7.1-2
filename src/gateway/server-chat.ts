@@ -206,7 +206,21 @@ function buildChatErrorMessage(error: unknown): Record<string, unknown> | undefi
   if (!raw) {
     return undefined;
   }
-  const text = raw.startsWith("⚠️") || raw.startsWith("Error:") ? raw : `Error: ${raw}`;
+  /**
+   * @description: 会话被其他进程接管/占用（锁竞争）时，将 chat 错误消息替换为友好中文提示，避免透出英文内部错误。
+   * @author yangchenglin11@jd.com
+   * @date 2026年9月7日 19:55:00
+   * @version v2026.8.28-1-build-dev
+   */
+  const isSessionTakeover =
+    /session file changed while embedded prompt lock was released|EmbeddedAttemptSessionTakeoverError/i.test(
+      raw,
+    );
+  const text = isSessionTakeover
+    ? "当前会话正在处理中，请稍后。"
+    : raw.startsWith("⚠️") || raw.startsWith("Error:")
+      ? raw
+      : `Error: ${raw}`;
   return {
     role: "assistant",
     content: [{ type: "text", text }],
