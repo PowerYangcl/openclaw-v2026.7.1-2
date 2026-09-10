@@ -297,6 +297,17 @@ export const ResponseResourceSchema = z.object({
       message: z.string(),
     })
     .optional(),
+  // Spend tracking result for jd-llm provider. Populated by the gateway after
+  // the upstream completion is recorded, on the non-streaming response path.
+  // spend/balance may be `null` if the upstream query failed or timed out —
+  // the field is always emitted once polling completes (success or failure)
+  // so the field's presence signals "polling finished".
+  spendResult: z
+    .object({
+      spend: z.number().nullable(),
+      balance: z.number().nullable(),
+    })
+    .optional(),
 });
 
 export type ResponseResource = z.infer<typeof ResponseResourceSchema>;

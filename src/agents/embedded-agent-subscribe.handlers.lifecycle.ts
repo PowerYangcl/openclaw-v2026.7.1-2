@@ -191,6 +191,11 @@ export function handleAgentEnd(
         : {}),
       ...(typeof terminalAborted === "boolean" ? { aborted: terminalAborted } : {}),
       ...(toolErrorSummary ? { toolErrorSummary } : {}),
+      // Carry the upstream completion id (chatcmpl-xxx) so gateway chat
+      // consumers can resolve per-turn JD spend without polling themselves.
+      ...(isAssistantMessage(lastAssistant) && lastAssistant.responseId
+        ? { responseId: lastAssistant.responseId }
+        : {}),
     };
     const phase =
       ctx.params.terminalLifecyclePhase === "finishing" ? "finishing" : isError ? "error" : "end";

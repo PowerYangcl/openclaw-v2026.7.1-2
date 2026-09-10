@@ -18,6 +18,10 @@ extensions/*/dist/
 /packages/*/dist/
 /extensions/*/dist/
 
+# 忽略整个 packages 目录
+packages/
+/packages/
+
 # 日志文件（安装 / 构建 / 运行产物）
 *.log
 

@@ -2208,6 +2208,12 @@ export async function runReplyAgent(params: {
     const payloadResult = await buildFinalPayloads(payloadCandidates);
     let { replyPayloads } = payloadResult;
     didLogHeartbeatStrip = payloadResult.didLogHeartbeatStrip;
+    // Carry the upstream responseId (chatcmpl-xxx) on the final reply so the
+    // gateway can resolve per-turn JD spend without the UI re-polling.
+    const runResponseId = runResult.meta?.responseId;
+    if (runResponseId) {
+      replyPayloads = replyPayloads.map((payload) => ({ ...payload, responseId: runResponseId }));
+    }
     const hasTerminalReplyPayload = replyPayloads.some(
       (payload) =>
         !payload.isReasoning &&

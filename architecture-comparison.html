@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>OpenClaw Gateway 与 Control UI 架构对比</title>
+<style>
+:root{--bg:#f4f7fb;--surface:#fff;--ink:#172033;--muted:#637083;--line:#dbe3ee;--brand:#335cff;--brand2:#15a58c;--warn:#a85d00;--shadow:0 14px 40px rgba(24,39,75,.09)}
+*{box-sizing:border-box}html{scroll-behavior:smooth}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.7 system-ui,-apple-system,"Segoe UI","PingFang SC",sans-serif}a{color:inherit}.shell{max-width:1240px;margin:auto;padding:0 24px}.hero{padding:72px 0 58px;color:#fff;background:radial-gradient(circle at 85% 20%,rgba(38,208,181,.35),transparent 30%),linear-gradient(125deg,#172454,#274ed8 62%,#167d8e)}.eyebrow{font-size:13px;letter-spacing:.14em;text-transform:uppercase;opacity:.8}.hero h1{max-width:900px;margin:12px 0 16px;font-size:clamp(34px,6vw,64px);line-height:1.08}.hero p{max-width:850px;margin:0;font-size:18px;opacity:.88}.badges{display:flex;flex-wrap:wrap;gap:10px;margin-top:28px}.badge{padding:6px 12px;border:1px solid rgba(255,255,255,.3);border-radius:999px;background:rgba(255,255,255,.1)}nav{position:sticky;top:0;z-index:10;border-bottom:1px solid var(--line);background:rgba(255,255,255,.92);backdrop-filter:blur(12px)}nav .shell{display:flex;gap:22px;overflow:auto;white-space:nowrap}nav a{padding:14px 0;text-decoration:none;color:var(--muted)}nav a:hover{color:var(--brand)}main{padding:42px 0 72px}section{scroll-margin-top:70px;margin-bottom:34px;padding:30px;border:1px solid var(--line);border-radius:18px;background:var(--surface);box-shadow:var(--shadow)}h2{margin:0 0 18px;font-size:27px}h3{margin:20px 0 9px;font-size:18px}.lead{font-size:17px;color:var(--muted)}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}.cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:14px}.card{padding:18px;border:1px solid var(--line);border-radius:14px;background:#fbfcff}.card strong{display:block;margin-bottom:5px;color:var(--brand)}.callout{padding:17px 19px;border-left:4px solid var(--brand);border-radius:8px;background:#eef3ff}.callout.good{border-color:var(--brand2);background:#eaf9f6}.callout.warn{border-color:#e79a2d;background:#fff7e9}.flow{display:grid;gap:11px;margin:15px 0}.step{display:grid;grid-template-columns:34px 1fr;gap:12px;align-items:start}.num{display:grid;width:30px;height:30px;place-items:center;border-radius:50%;color:#fff;background:var(--brand);font-weight:700}pre{overflow:auto;margin:10px 0;padding:15px 17px;border-radius:11px;color:#dce6ff;background:#111a2f;font:13px/1.65 ui-monospace,SFMono-Regular,Menlo,monospace}code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}.diagram{overflow:auto;padding:18px;border:1px dashed #9eacc2;border-radius:14px;background:#f8faff;text-align:center;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre;line-height:1.85}.table-wrap{overflow:auto;border:1px solid var(--line);border-radius:12px}table{width:100%;border-collapse:collapse;min-width:850px}th,td{padding:13px 14px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{position:sticky;top:0;background:#edf2ff;color:#243a80}tr:last-child td{border:0}.tag{display:inline-block;padding:2px 8px;border-radius:999px;background:#eaf9f6;color:#087765;font-size:12px;font-weight:700}.tag.alt{background:#fff1dc;color:#8b5200}.decision{display:grid;grid-template-columns:1fr auto 1fr;gap:16px;align-items:stretch}.choice{padding:20px;border:2px solid var(--line);border-radius:14px}.choice.primary{border-color:var(--brand)}.or{align-self:center;font-weight:800;color:var(--muted)}.source-list{columns:2;column-gap:40px}.source-list li{break-inside:avoid;margin-bottom:7px}footer{padding:24px;color:var(--muted);text-align:center}@media(max-width:800px){.grid,.cards,.decision{grid-template-columns:1fr}.or{text-align:center}.hero{padding:52px 0}.shell{padding:0 16px}section{padding:22px}.source-list{columns:1}}
+</style>
+</head>
+<body>
+<header class="hero">
+<div class="shell">
+<div class="eyebrow">OpenClaw Architecture Brief</div>
+<h1>Gateway 与 Control UI：同仓协作、两种运行模式</h1>
+<p>基于本仓库实际脚本与文档，说明本地 gateway-lite 联调、生产集成交付，以及前端独立部署时的收益、成本和选择边界。</p>
+<div class="badges"><span class="badge">pnpm monorepo</span><span class="badge">Vite + Lit</span><span class="badge">WebSocket RPC</span><span class="badge">Gateway :18789</span></div>
+</div>
+</header>
+<nav><div class="shell"><a href="#summary">结论</a><a href="#architecture">架构</a><a href="#local">本地启动</a><a href="#production">生产交付</a><a href="#comparison">多维对比</a><a href="#decision">选择建议</a><a href="#sources">源码依据</a></div></nav>
+<main class="shell">
+<section id="summary">
+<h2>先看结论</h2>
+<p class="lead">“同一个 monorepo”解决的是代码、协议、版本与交付协同；它不意味着开发阶段前后端必须运行在同一个进程。</p>
+<div class="cards">
+<div class="card"><strong>同仓的核心价值</strong>Gateway 与 UI 共享协议演进节奏，能够在同一变更中完成后端方法、类型契约、前端调用和测试更新。</div>
+<div class="card"><strong>开发模式</strong>Vite 单独提供 UI 热更新，gateway-lite 只提供轻量 WebSocket 后端，并关闭 Gateway 内置 Control UI。</div>
+<div class="card"><strong>生产默认模式</strong>先构建 UI 到 <code>dist/control-ui</code>，再由 Gateway 在同一端口托管静态页面和 WebSocket API。</div>
+</div>
+<div class="callout good"><b>默认建议：</b>保持同仓与集成交付。只有存在独立域名/CDN、独立发布团队、超大规模静态流量或严格故障域隔离时，再选择前端独立部署。</div>
+</section>
+<section id="architecture">
+<h2>项目架构与运行模式</h2>
+<div class="grid">
+<div>
+<h3>模式一：生产集成托管</h3>
+<div class="diagram">Browser
+   │ HTTP 静态资源 + WebSocket RPC
+   ▼
+Gateway :18789
+   ├── dist/control-ui
+   ├── 类型化 WS API
+   └── 鉴权 / 配对 / 策略</div>
+<p>同源、同端口、单入口。安装、升级与回滚可按一个产品版本执行。</p>
+</div>
+<div>
+<h3>模式二：本地分离联调</h3>
+<div class="diagram">Browser
+   ├── HTTP ──▶ Vite :5173
+   └── WS ───▶ Gateway Lite :18789
+                    ├── Control UI disabled
+                    └── Channels skipped</div>
+<p>前端获得热更新体验；Gateway 通过 <code>allowedOrigins</code> 接受指定的 Vite Origin。</p>
+</div>
+</div>
+<h3>为什么放在同一 monorepo</h3>
+<div class="cards">
+<div class="card"><strong>共享契约</strong><code>packages/gateway-protocol</code>、Gateway 方法和 UI API 可原子修改，降低协议错配风险。</div>
+<div class="card"><strong>统一工程入口</strong>根工作区统一提供安装、UI 构建、Gateway 启动、协议生成和测试命令。</div>
+<div class="card"><strong>单包交付</strong>UI 产物随 Gateway 版本分发，不需要维护额外的前端部署清单和兼容矩阵。</div>
+<div class="card"><strong>安全边界集中</strong>Token、密码、设备配对、代理身份与 Origin 策略集中在 Gateway 入口处理。</div>
+<div class="card"><strong>跨层评审</strong>一次变更即可完整呈现协议、服务端、客户端和验证影响，便于审查与回滚。</div>
+<div class="card"><strong>多客户端一致性</strong>Web UI 与 CLI、原生应用一样都是 Gateway 客户端，围绕同一类型化 WS API 演进。</div>
+</div>
+</section>
+<section id="local">
+<h2>本地启动：gateway-lite + UI 热更新</h2>
+<p class="lead">适用于日常前端开发与轻量联调。gateway-lite 会生成临时配置，不直接改写原配置；默认绑定 loopback、监听 18789、跳过 Channels，并关闭内置 Control UI。</p>
+<div class="flow">
+<div class="step"><span class="num">1</span><div><b>安装依赖（首次）</b><pre>pnpm install
+pnpm ui:install</pre></div></div>
+<div class="step"><span class="num">2</span><div><b>终端 A：启动轻量 Gateway</b><pre>pnpm gateway:lite</pre></div></div>
+<div class="step"><span class="num">3</span><div><b>终端 B：启动 Control UI</b><pre>pnpm ui:dev</pre></div></div>
+<div class="step"><span class="num">4</span><div><b>打开 Vite 输出的地址</b><p>当前 Vite 配置默认端口为 <code>5173</code>。若 Gateway 日志提示 Origin 不允许，请显式对齐 Origin 后重启：</p><pre>OPENCLAW_FRONTEND_ORIGIN=http://localhost:5173 pnpm gateway:lite</pre></div></div>
+</div>
+<div class="callout warn"><b>端口注意：</b><code>start-gateway-lite.sh</code> 当前默认允许 <code>http://localhost:5273</code>，而 <code>ui/vite.config.ts</code> 当前默认使用 <code>5173</code>。应以实际 Vite 输出地址为准，通过 <code>OPENCLAW_FRONTEND_ORIGIN</code> 对齐。</div>
+<h3>可调整的环境变量</h3>
+<div class="table-wrap"><table><thead><tr><th>变量</th><th>用途</th><th>默认/说明</th></tr></thead><tbody>
+<tr><td><code>OPENCLAW_GATEWAY_PORT</code></td><td>Gateway 监听端口</td><td><code>18789</code></td></tr>
+<tr><td><code>OPENCLAW_GATEWAY_BIND</code></td><td>Gateway 绑定范围</td><td><code>loopback</code>；对外暴露前需评估安全策略</td></tr>
+<tr><td><code>OPENCLAW_FRONTEND_ORIGIN</code></td><td>允许连接的前端 Origin</td><td>必须与浏览器实际访问 Origin 完全一致</td></tr>
+<tr><td><code>OPENCLAW_CONFIG_PATH</code></td><td>指定配置来源</td><td>脚本基于其生成临时配置</td></tr>
+<tr><td><code>OPENCLAW_STATE_DIR</code></td><td>指定状态目录</td><td>用于隔离本地运行状态</td></tr>
+</tbody></table></div>
+</section>
+<section id="production">
+<h2>生产集成交付</h2>
+<div class="grid">
+<div><h3>构建与启动</h3><pre>pnpm install
+pnpm build
+pnpm ui:build
+pnpm gateway:watch</pre><p>UI 构建结果进入 <code>dist/control-ui</code>，Gateway 负责 SPA fallback、运行时配置、CSP 和受控资源访问。</p></div>
+<div><h3>关键约束</h3><ul><li><code>gateway:watch</code> 不会自动重建 Control UI。</li><li>修改 UI 后需重新执行 <code>pnpm ui:build</code>，或开发时改用 <code>pnpm ui:dev</code>。</li><li>浏览器缓存旧 UI 或旧 Service Worker 时，可能与新 Gateway 发生协议不匹配。</li><li>协议变更应同步服务端方法、UI 调用并按需执行 <code>pnpm protocol:gen</code>。</li></ul></div>
+</div>
+<div class="callout"><b>同仓不等于强耦合成一个源码模块：</b>仓库仍通过 <code>ui/</code>、<code>src/gateway/</code> 和协议包保持边界；集成发生在构建产物、协议版本与部署入口层面。</div>
+</section>
+<section id="comparison">
+<h2>同仓集成交付 vs 前端独立部署</h2>
+<div class="table-wrap"><table><thead><tr><th>维度</th><th>同仓 + Gateway 托管 <span class="tag">默认</span></th><th>前端独立部署 <span class="tag alt">可选</span></th></tr></thead><tbody>
+<tr><td>协议一致性</td><td>前后端可原子提交、测试和发布，错配概率低</td><td>必须维护 API/WS 兼容策略、版本探测和兼容矩阵</td></tr>
+<tr><td>本地开发</td><td>同一工作区安装；仍可用 Vite + gateway-lite 热更新</td><td>仓库更轻，但跨仓联调、契约同步和环境准备更复杂</td></tr>
+<tr><td>发布与回滚</td><td>Gateway 与 UI 单版本、单制品、同步回滚</td><td>可独立发布和回滚，但需防止新 UI 连接旧 Gateway</td></tr>
+<tr><td>部署复杂度</td><td>一个服务入口，无额外静态站点、反向代理和部署流水线</td><td>需要对象存储/CDN/静态站点、域名、证书及缓存策略</td></tr>
+<tr><td>鉴权与安全</td><td>同源入口，鉴权、设备配对、CSP 与访问策略集中</td><td>需重新设计跨域凭证、Origin 白名单、代理信任和 CSP</td></tr>
+<tr><td>CORS / 网络</td><td>同源，浏览器限制少；HTTP 与 WS 路径清晰</td><td>需处理 CORS、WebSocket Origin、代理升级和多域名网络故障</td></tr>
+<tr><td>静态资源性能</td><td>足以支撑控制面 UI，但静态流量由 Gateway 承担</td><td>可使用全球 CDN、边缘缓存和静态资源专用优化</td></tr>
+<tr><td>扩展与隔离</td><td>UI 和 API 共用部署入口，模型简单但故障域一致</td><td>静态站点与 Gateway 可独立扩缩容、限流和隔离故障</td></tr>
+<tr><td>缓存风险</td><td>版本随 Gateway 发布，但 Service Worker 仍需正确失效</td><td>CDN 多层缓存增加旧 UI 命中新 Gateway 的概率</td></tr>
+<tr><td>CI/CD 成本</td><td>跨层检查集中；UI 改动可能触发更大流水线</td><td>流水线自治且前端发布快，但需增加跨仓契约测试</td></tr>
+<tr><td>团队协作</td><td>适合共享产品目标、频繁跨层变更的小中型团队</td><td>适合边界成熟、团队独立且发布节奏明显不同的组织</td></tr>
+<tr><td>运维与可观测性</td><td>入口、日志、版本和告警更集中</td><td>故障定位需串联 CDN、静态站点、代理与 Gateway</td></tr>
+<tr><td>总体成本</td><td>工程与运维成本较低，产品交付路径短</td><td>灵活性更高，但治理、兼容、安全和基础设施成本更高</td></tr>
+</tbody></table></div>
+<p class="lead">以上为定性比较；实际性能与成本取决于访问规模、地域分布、缓存策略、组织结构和基础设施能力，不应脱离压测与运行数据给出固定数字。</p>
+</section>
+<section id="decision">
+<h2>如何选择</h2>
+<div class="decision">
+<div class="choice primary"><h3>优先同仓 + 集成交付</h3><ul><li>UI 是 Gateway 的控制面，而非独立公众产品</li><li>前后端协议变化频繁</li><li>重视开箱即用、离线/本地运行和单包升级</li><li>希望降低部署、安全与运维复杂度</li></ul></div>
+<div class="or">或</div>
+<div class="choice"><h3>考虑前端独立部署</h3><ul><li>静态流量规模需要 CDN 和边缘分发</li><li>前端拥有独立团队、域名、SLA 和发布节奏</li><li>必须隔离 UI 与 Gateway 故障域</li><li>愿意投入版本协商、跨域鉴权和契约治理</li></ul></div>
+</div>
+<h3>若选择独立部署，至少补齐</h3>
+<div class="cards"><div class="card"><strong>契约治理</strong>协议版本握手、兼容窗口、生成客户端与跨版本集成测试。</div><div class="card"><strong>安全设计</strong>明确 Token 传递、设备配对、Origin 白名单、CSP、TLS 与代理信任边界。</div><div class="card"><strong>发布防护</strong>灰度、可回滚制品、CDN 缓存失效、Service Worker 更新与旧版本熔断。</div></div>
+</section>
+<section id="sources">
+<h2>本仓库依据</h2>
+<ul class="source-list"><li><code>scripts/start-gateway-lite.sh</code>：轻量 Gateway 的端口、绑定、临时配置、Origin 与禁用项。</li><li><code>package.json</code>：<code>gateway:lite</code>、<code>ui:dev</code>、<code>ui:build</code> 等根级脚本。</li><li><code>ui/vite.config.ts</code>：Vite 开发服务器默认端口。</li><li><code>docs/web/control-ui.md</code>：Control UI 的开发连接与 Gateway 静态托管。</li><li><code>docs/concepts/architecture.md</code>：Gateway 长生命周期进程和类型化 WebSocket 客户端模型。</li><li><code>PROJECT_GUIDE.md</code>：本地开发、Mock、构建及协议生成流程。</li><li><code>README.md</code>：源码安装、UI 构建与 Gateway watch 开发循环。</li><li><code>src/gateway/control-ui.ts</code>：静态资源、SPA fallback、运行时配置与安全响应处理。</li></ul>
+</section>
+</main>
+<footer>OpenClaw Gateway / Control UI 架构说明 · 基于仓库当前实现整理</footer>
+</body>
+</html>
