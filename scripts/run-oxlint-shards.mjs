@@ -29,10 +29,10 @@ let parentSignalForwardingInstalled = false;
 
 const CORE_SHARD = {
   name: "core",
-  args: ["--tsconfig", "config/tsconfig/oxlint.core.json", "src", "ui", "packages"],
+  args: ["--tsconfig", "config/tsconfig/oxlint.core.json", "src", "ui", "web", "packages"],
 };
 const CORE_TS_CONFIG = "config/tsconfig/oxlint.core.json";
-const CORE_SPLIT_TARGETS = ["ui", "packages"];
+const CORE_SPLIT_TARGETS = ["ui", "web", "packages"];
 const EXTENSIONS_SHARD = {
   name: "extensions",
   args: ["--tsconfig", EXTENSION_TS_CONFIG, EXTENSIONS_DIR],

@@ -14,16 +14,32 @@ function sendJson(res: ServerResponse, status: number, body: unknown): void {
 
 function resolveJdLlmConfig(): { apiKey: string; spendBaseUrl: string } | null {
   const config = getRuntimeConfig();
-  if (!config) return null;
+  if (!config) {
+    return null;
+  }
   // apiKey from models.providers.jd-llm
   const models = config.models as Record<string, unknown> | undefined;
   const providers = models?.providers as Record<string, unknown> | undefined;
   const jdLlm = providers?.["jd-llm"] as Record<string, unknown> | undefined;
-  if (!jdLlm) return null;
+  if (!jdLlm) {
+    return null;
+  }
   const apiKey = typeof jdLlm.apiKey === "string" ? jdLlm.apiKey : "";
-  // spendBaseUrl from models.providers.jd-llm.baseUrl
-  const spendBaseUrl = typeof jdLlm.baseUrl === "string" ? jdLlm.baseUrl : "";
-  if (!apiKey || !spendBaseUrl) return null;
+  // Spend queries live on the JD spend gateway (HTTPS, no /v1 suffix), NOT on
+  // the LLM baseUrl. Resolution order: jd-llm.spendBaseUrl (explicit) →
+  // jd-spend-proxy plugin config spendBaseUrl → jd-llm.baseUrl (legacy fallback).
+  const plugins = config.plugins as Record<string, unknown> | undefined;
+  const pluginEntries = plugins?.entries as Record<string, unknown> | undefined;
+  const spendProxyEntry = pluginEntries?.["jd-spend-proxy"] as Record<string, unknown> | undefined;
+  const spendProxyConfig = spendProxyEntry?.config as Record<string, unknown> | undefined;
+  const pluginSpendBaseUrl =
+    typeof spendProxyConfig?.spendBaseUrl === "string" ? spendProxyConfig.spendBaseUrl : "";
+  const providerSpendBaseUrl = typeof jdLlm.spendBaseUrl === "string" ? jdLlm.spendBaseUrl : "";
+  const legacyBaseUrl = typeof jdLlm.baseUrl === "string" ? jdLlm.baseUrl : "";
+  const spendBaseUrl = providerSpendBaseUrl || pluginSpendBaseUrl || legacyBaseUrl;
+  if (!apiKey || !spendBaseUrl) {
+    return null;
+  }
   return { apiKey, spendBaseUrl };
 }
 
@@ -31,16 +47,6 @@ function extractCompletionId(url: string): string | null {
   // Matches /api/v1/jd/spend/:completionId
   const match = /\/api\/v1\/jd\/spend\/([^/?#]+)/.exec(url);
   return match ? decodeURIComponent(match[1]!) : null;
-}
-
-function extractIncludeKeyInfo(url: string): boolean {
-  // Parse ?include_key_info=true from request URL
-  const qIdx = url.indexOf("?");
-  if (qIdx < 0) return false;
-  const query = url.slice(qIdx + 1);
-  const params = new URLSearchParams(query);
-  const v = params.get("include_key_info");
-  return v === "true" || v === "1";
 }
 
 /** Handle one gateway-authenticated JD spend proxy request. */
@@ -79,10 +85,8 @@ export async function handleJdSpendRequest(
   }
 
   const base = jdConfig.spendBaseUrl.replace(/\/+$/, "").replace(/\/v1$/, "");
-  const includeKeyInfo = extractIncludeKeyInfo(req.url ?? "");
-  const upstreamUrl = includeKeyInfo
-    ? `${base}/spend/logs/ui/${encodeURIComponent(completionId)}?include_key_info=true`
-    : `${base}/spend/logs/ui/${encodeURIComponent(completionId)}`;
+  // key.balance requires include_key_info=true upstream; always request it.
+  const upstreamUrl = `${base}/spend/logs/ui/${encodeURIComponent(completionId)}?include_key_info=true`;
 
   let upstreamRes: Response;
   try {
@@ -150,7 +154,9 @@ export async function handleJdSpendRequest(
     if (retryRes.ok) {
       const data2 = (await retryRes.json()) as Record<string, unknown>;
       const key2 = data2?.key as Record<string, unknown> | undefined;
-      if (typeof key2?.balance === "number") rawBalance = key2.balance;
+      if (typeof key2?.balance === "number") {
+        rawBalance = key2.balance;
+      }
     }
   } catch {
     // 忽略额外请求错误，使用第一次结果

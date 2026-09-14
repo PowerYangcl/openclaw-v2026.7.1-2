@@ -227,6 +227,7 @@ export const CORE_GATEWAY_METHOD_SPECS: readonly CoreGatewayMethodSpec[] = [
   { name: "chat.startup", scope: "operator.read", startup: true },
   { name: "chat.metadata", scope: "operator.read", startup: true },
   { name: "chat.message.get", scope: "operator.read", startup: true },
+  { name: "chat.spend.getBatch", scope: "operator.read" },
   { name: "chat.abort", scope: "operator.write" },
   { name: "chat.send", scope: "operator.write" },
   // Operator terminal: admin-only PTY surface. Appended to the advertised block

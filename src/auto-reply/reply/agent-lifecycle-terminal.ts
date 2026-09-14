@@ -21,6 +21,9 @@ const DEFERRED_TERMINAL_METADATA_KEYS = [
   "aborted",
   "livenessState",
   "replayInvalid",
+  // Carry the upstream completion id (chatcmpl-xxx) so gateway chat consumers
+  // can resolve per-turn JD spend without the UI re-polling.
+  "responseId",
 ] as const;
 
 export function resolveAgentLifecycleTerminalMetadata(meta: unknown): Record<string, unknown> {

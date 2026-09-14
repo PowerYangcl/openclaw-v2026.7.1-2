@@ -1,0 +1,340 @@
+@import 'tailwindcss';
+@import 'element-plus/theme-chalk/dark/css-vars.css';
+
+/*
+ * WorkBuddy 风格视觉 token。
+ *
+ * 主色取自 WorkBuddy App 内提取的真实设计变量，深浅双主题。
+ * 设计原则：克制、扁平、轻卡片、小圆角、留白舒适。
+ */
+
+:root {
+  /* 品牌主色（与 WorkBuddy 蓝一致） */
+  --wb-accent: #3b82f6;
+  --wb-accent-strong: #2563eb;
+  --wb-accent-hover: #1d4ed8;
+  --wb-accent-soft: rgba(59, 130, 246, 0.10);
+  --wb-accent-softer: rgba(59, 130, 246, 0.06);
+  --wb-accent-link: #1a79ff;
+
+  /* 表面（背景/卡片） */
+  --wb-bg-content: #f5f6f8;        /* 页面底色，比白略深 */
+  --wb-bg-card: #ffffff;            /* 卡片底色 */
+  --wb-bg-card-strong: #f7f7f8;     /* 次级卡片 */
+  --wb-bg-elevated: #ffffff;        /* 浮层 */
+  --wb-bg-inset: #f1f2f5;           /* 内嵌/代码块底 */
+  --wb-bg-hover: rgba(15, 23, 42, 0.04);
+
+  /* 文本 */
+  --wb-text-primary: #1f2329;
+  --wb-text-secondary: rgba(31, 35, 41, 0.65);
+  --wb-text-tertiary: rgba(31, 35, 41, 0.45);
+  --wb-text-on-accent: #ffffff;
+
+  /* 边框/分割线 */
+  --wb-border: rgba(15, 23, 42, 0.08);
+  --wb-border-strong: rgba(15, 23, 42, 0.16);
+
+  /* 语义状态色（上下文占用告警等） */
+  --wb-ctx-warn: #d97706;
+  --wb-ctx-danger: #dc2626;
+
+  /* 代码块 */
+  --wb-code-bg: #f1f2f5;
+  --wb-code-header-bg: rgba(15, 23, 42, 0.03);
+  --wb-tok-str: #16a34a;
+  --wb-tok-com: #8c8c8c;
+  --wb-tok-num: #d97706;
+  --wb-tok-key: #2563eb;
+
+  /* 圆角/阴影 */
+  --wb-radius-sm: 6px;
+  --wb-radius: 10px;
+  --wb-radius-lg: 14px;
+  --wb-radius-xl: 18px;
+  --wb-shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.04);
+  --wb-shadow: 0 1px 3px rgba(15, 23, 42, 0.06), 0 1px 2px rgba(15, 23, 42, 0.04);
+  --wb-shadow-lg: 0 14px 40px rgba(15, 23, 42, 0.08);
+
+  /* 尺寸 */
+  --wb-aside-width: 220px;
+  --wb-header-height: 52px;
+  --wb-input-height: 38px;
+
+  /* 缓动 */
+  --wb-ease: cubic-bezier(0.2, 0.6, 0.2, 1);
+}
+
+html.dark {
+  --wb-accent: #4f8cff;
+  --wb-accent-strong: #3b82f6;
+  --wb-accent-hover: #60a5fa;
+  --wb-accent-soft: rgba(59, 130, 246, 0.18);
+  --wb-accent-softer: rgba(59, 130, 246, 0.10);
+  --wb-accent-link: #6ea8ff;
+
+  --wb-bg-content: #16181c;
+  --wb-bg-card: #1f2126;
+  --wb-bg-card-strong: #25272d;
+  --wb-bg-elevated: #2a2d33;
+  --wb-bg-inset: #181a1f;
+  --wb-bg-hover: rgba(255, 255, 255, 0.05);
+
+  --wb-text-primary: #e7e9ee;
+  --wb-text-secondary: rgba(231, 233, 238, 0.62);
+  --wb-text-tertiary: rgba(231, 233, 238, 0.40);
+  --wb-text-on-accent: #ffffff;
+
+  --wb-border: rgba(255, 255, 255, 0.08);
+  --wb-border-strong: rgba(255, 255, 255, 0.18);
+
+  --wb-ctx-warn: #fbbf24;
+  --wb-ctx-danger: #f87171;
+
+  --wb-code-bg: #14161b;
+  --wb-code-header-bg: rgba(255, 255, 255, 0.04);
+  --wb-tok-str: #4ade80;
+  --wb-tok-com: #6b7280;
+  --wb-tok-num: #f59e0b;
+  --wb-tok-key: #60a5fa;
+
+  --wb-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --wb-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
+  --wb-shadow-lg: 0 18px 44px rgba(0, 0, 0, 0.5);
+}
+
+/* Element Plus 主色对齐 WorkBuddy 蓝，弱化其默认深色边框 */
+:root {
+  --el-color-primary: #2563eb;
+  --el-color-primary-light-3: #6692f1;
+  --el-color-primary-light-5: #92b1f5;
+  --el-color-primary-light-7: #bed0f9;
+  --el-color-primary-light-8: #d3e0fb;
+  --el-color-primary-light-9: #e9effd;
+  --el-color-primary-dark-2: #1e4fbc;
+
+  --el-bg-color: #ffffff;
+  --el-bg-color-page: #f5f6f8;
+  --el-fill-color-light: #f3f4f6;
+  --el-fill-color-blank: #ffffff;
+  --el-border-radius-base: 8px;
+  --el-border-color-light: rgba(15, 23, 42, 0.06);
+  --el-border-color-lighter: rgba(15, 23, 42, 0.04);
+  --el-box-shadow-light: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+
+html.dark {
+  --el-bg-color: #1f2126;
+  --el-bg-color-page: #16181c;
+  --el-fill-color-light: #25272d;
+  --el-fill-color-blank: #1f2126;
+  --el-border-color: rgba(255, 255, 255, 0.10);
+  --el-border-color-light: rgba(255, 255, 255, 0.08);
+  --el-border-color-lighter: rgba(255, 255, 255, 0.05);
+  --el-text-color-primary: #e7e9ee;
+  --el-text-color-regular: rgba(231, 233, 238, 0.85);
+  --el-text-color-secondary: rgba(231, 233, 238, 0.62);
+  --el-mask-color: rgba(0, 0, 0, 0.7);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB",
+    "Microsoft YaHei", "Helvetica Neue", sans-serif;
+  background: var(--wb-bg-content);
+  color: var(--wb-text-primary);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.mono {
+  font-family: "SFMono-Regular", "SF Mono", "JetBrains Mono", "Fira Code", Consolas, "Liberation Mono",
+    Menlo, monospace;
+}
+
+/* ============== 通用排版 ============== */
+
+.page-container {
+  padding: 20px 24px 32px;
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.page-title {
+  font-size: 18px;
+  font-weight: 600;
+  margin: 0 0 16px;
+  letter-spacing: -0.01em;
+}
+
+.page-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 16px;
+  gap: 12px;
+}
+
+.head-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.stat-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+/* ============== 卡片（轻 WorkBuddy 卡片） ============== */
+
+.wb-card {
+  background: var(--wb-bg-card);
+  border: 1px solid var(--wb-border);
+  border-radius: var(--wb-radius-lg);
+  box-shadow: var(--wb-shadow-sm);
+}
+
+.wb-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 18px;
+  border-bottom: 1px solid var(--wb-border);
+}
+
+.wb-card-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--wb-text-primary);
+}
+
+.wb-card-body {
+  padding: 16px 18px;
+}
+
+/* 覆盖 Element Plus el-card 的硬阴影与边框 */
+.el-card {
+  border-radius: var(--wb-radius-lg) !important;
+  border: 1px solid var(--wb-border) !important;
+  box-shadow: var(--wb-shadow-sm) !important;
+  background: var(--wb-bg-card) !important;
+}
+
+.el-card__header {
+  padding: 14px 18px !important;
+  border-bottom: 1px solid var(--wb-border) !important;
+  font-weight: 600;
+}
+
+/* ============== 表格 ============== */
+
+.el-table {
+  --el-table-border-color: var(--wb-border);
+  --el-table-header-bg-color: var(--wb-bg-card-strong);
+  --el-table-row-hover-bg-color: var(--wb-accent-softer);
+  --el-table-border: 1px solid var(--wb-border);
+  border-radius: var(--wb-radius-lg);
+  overflow: hidden;
+}
+
+.el-table th.el-table__cell {
+  font-weight: 600;
+  color: var(--wb-text-secondary);
+  font-size: 12px;
+  letter-spacing: 0.02em;
+  text-transform: none;
+  background: var(--wb-bg-card-strong);
+}
+
+.el-table td.el-table__cell,
+.el-table th.el-table__cell {
+  border-color: var(--wb-border) !important;
+}
+
+.el-table .el-table__cell {
+  padding: 8px 12px;
+}
+
+/* ============== 表单 ============== */
+
+.el-input__wrapper,
+.el-textarea__inner {
+  border-radius: var(--wb-radius) !important;
+  box-shadow: 0 0 0 1px var(--wb-border-strong) inset !important;
+  background: var(--wb-bg-card) !important;
+  transition: box-shadow 0.15s var(--wb-ease);
+}
+
+.el-input__wrapper:hover,
+.el-textarea__inner:hover {
+  box-shadow: 0 0 0 1px var(--wb-accent) inset !important;
+}
+
+.el-input__wrapper.is-focus,
+.el-input__wrapper:focus-within,
+.el-textarea__inner:focus {
+  box-shadow: 0 0 0 1px var(--wb-accent) inset, 0 0 0 3px var(--wb-accent-soft) !important;
+}
+
+.el-button {
+  border-radius: var(--wb-radius) !important;
+}
+
+/* ============== 菜单/导航（侧边栏） ============== */
+
+.el-menu {
+  border-right: none !important;
+  background: transparent !important;
+}
+
+/* ============== 滚动条 ============== */
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(128, 128, 128, 0.30);
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(128, 128, 128, 0.55);
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ============== 工具类 ============== */
+
+.text-secondary {
+  color: var(--wb-text-secondary);
+}
+
+.text-tertiary {
+  color: var(--wb-text-tertiary);
+}
+
+.divider {
+  height: 1px;
+  background: var(--wb-border);
+  margin: 12px 0;
+}

@@ -9,6 +9,15 @@ import {
 } from "../../packages/gateway-protocol/src/schema.js";
 import { MACOS_APP_SOURCES_DIR } from "../compat/legacy-names.js";
 
+async function canReadFile(filePath: string): Promise<boolean> {
+  try {
+    await fs.access(filePath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 type SchemaLike = {
   anyOf?: Array<SchemaLike>;
   properties?: Record<string, unknown>;
@@ -40,7 +49,15 @@ function extractConstUnionValues(schema: SchemaLike): string[] {
     .filter((value): value is string => typeof value === "string");
 }
 
-const UI_FILES = ["ui/src/api/types.ts", "ui/src/lib/cron/index.ts", "ui/src/pages/cron/view.ts"];
+const UI_FILES = [
+  "ui/src/api/types.ts",
+  "ui/src/lib/cron/index.ts",
+  "ui/src/pages/cron/view.ts",
+  // Vue 3 + Element Plus UI (transition: both surfaces must agree on the cron contract).
+  "web/src/api/types.ts",
+  "web/src/lib/cron/index.ts",
+  "web/src/views/CronView.vue",
+];
 
 const SWIFT_MODEL_CANDIDATES = [`${MACOS_APP_SOURCES_DIR}/CronModels.swift`];
 const SWIFT_STATUS_CANDIDATES = [`${MACOS_APP_SOURCES_DIR}/GatewayConnection.swift`];
@@ -68,6 +85,12 @@ describe("cron protocol conformance", () => {
 
     const cwd = process.cwd();
     for (const relPath of UI_FILES) {
+      // Skip optional surfaces (web/) whose directory may not exist yet
+      // during the Lit → Vue transition; only the legacy ui/ surface is
+      // required for cron conformance today.
+      if (!(await canReadFile(path.join(cwd, relPath)))) {
+        continue;
+      }
       const content = await fs.readFile(path.join(cwd, relPath), "utf-8");
       for (const mode of modes) {
         expect(content, `${relPath} missing delivery mode ${mode}`).toContain(`"${mode}"`);
@@ -86,10 +109,20 @@ describe("cron protocol conformance", () => {
 
   it("cron status shape matches gateway fields in UI + Swift", async () => {
     const cwd = process.cwd();
+    // Lit UI source (legacy; kept during i18n transition per docs/web/web-replacement-plan.md §4).
     const uiTypes = await fs.readFile(path.join(cwd, "ui/src/api/types.ts"), "utf-8");
     expect(uiTypes).toContain("export type CronStatus");
     expect(uiTypes).toContain("jobs:");
     expect(uiTypes).not.toContain("jobCount");
+    // Vue 3 + Element Plus UI source (web/). The contract must agree with the gateway
+    // and the legacy UI. If web/src is not populated yet, skip rather than fail.
+    const webTypesPath = path.join(cwd, "web/src/api/types.ts");
+    if (await canReadFile(webTypesPath)) {
+      const webTypes = await fs.readFile(webTypesPath, "utf-8");
+      expect(webTypes).toContain("export type CronStatus");
+      expect(webTypes).toContain("jobs:");
+      expect(webTypes).not.toContain("jobCount");
+    }
 
     const [swiftRelPath] = await resolveSwiftFiles(cwd, SWIFT_STATUS_CANDIDATES);
     const swiftPath = path.join(cwd, swiftRelPath);

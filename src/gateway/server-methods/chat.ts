@@ -106,6 +106,7 @@ import type { ChannelRouteRef } from "../../plugin-sdk/channel-route.js";
 import { isPluginOwnedSessionBindingRecord } from "../../plugins/conversation-binding.js";
 import { normalizeAgentId, scopeLegacySessionKeyToAgent } from "../../routing/session-key.js";
 import { normalizeInputProvenance, type InputProvenance } from "../../sessions/input-provenance.js";
+import { applyModelOverrideToSessionEntry } from "../../sessions/model-overrides.js";
 import { resolveSendPolicy } from "../../sessions/send-policy.js";
 import { parseAgentSessionKey } from "../../sessions/session-key-utils.js";
 import { beginSessionWorkAdmission } from "../../sessions/session-lifecycle-admission.js";
@@ -180,6 +181,7 @@ import {
   createManagedOutgoingImageBlocks,
 } from "../managed-image-attachments.js";
 import { ADMIN_SCOPE } from "../method-scopes.js";
+import { pollJdSpendForChat, pollSpendResultsForResponseIds } from "../openresponses-http.js";
 import {
   chatAbortMarkerTimestampMs,
   createChatAbortMarker,
@@ -2734,6 +2736,36 @@ function nextChatSeq(context: { agentRunSeq: Map<string, number> }, runId: strin
   return next;
 }
 
+/**
+ * Decorates a final chat message with the upstream completion id (chatcmpl-xxx)
+ * and the per-turn JD spend result. The gateway polls the JD spend endpoint
+ * until a value arrives (or the deadline is reached); on error/timeout the
+ * `spendResult` still carries `{ spend: null, balance: null }` so independent
+ * frontends see a stable shape without polling themselves.
+ */
+async function resolveChatFinalMessage(
+  message: Record<string, unknown> | undefined,
+  responseId: string | undefined,
+): Promise<Record<string, unknown> | undefined> {
+  if (!message || !responseId) {
+    return message;
+  }
+  try {
+    // 6s ceiling — enough for the upstream to accumulate the post-turn
+    // `key.spend` in the common case; the poll falls back to a deterministic
+    // `oldBalance - spend` computation when the deadline hits.
+    const spendResult = await pollJdSpendForChat(responseId, { deadlineMs: 6_000 });
+    return {
+      ...message,
+      responseId,
+      ...(spendResult ? { spendResult } : {}),
+    };
+  } catch {
+    // Spend decoration must never suppress the final broadcast itself.
+    return message;
+  }
+}
+
 function broadcastChatFinal(params: {
   context: Pick<GatewayRequestContext, "broadcast" | "nodeSendToSession" | "agentRunSeq"> &
     Partial<Pick<GatewayRequestContext, "getRuntimeConfig">>;
@@ -3309,6 +3341,9 @@ async function handleChatHistoryRequest({
     messages: bounded.messages,
     maxBytes: maxHistoryBytes,
   });
+  // Spend backfill is intentionally NOT done here so chat.history returns
+  // immediately with message content. The frontend issues a follow-up
+  // `chat.spend.getBatch` RPC to populate `spendResult` asynchronously.
   const payload = {
     sessionKey,
     sessionId,
@@ -3331,6 +3366,38 @@ async function handleChatHistoryRequest({
   respond(true, payload);
 }
 
+/**
+ * Batch spend resolver used by the frontend to populate `spendResult` on
+ * historical messages asynchronously after `chat.history` returns. Runs the
+ * same backfill poll with `mode:"history"` (trust the first fetch for past
+ * records) and bounded per-message timeout, so a 20-message history resolves
+ * in a few seconds without blocking the initial page render.
+ */
+async function handleChatSpendGetBatchRequest({
+  params,
+  respond,
+}: GatewayRequestHandlerOptions): Promise<void> {
+  const ids = Array.isArray((params as { responseIds?: unknown })?.responseIds)
+    ? ((params as { responseIds: unknown[] }).responseIds.filter(
+        (id) => typeof id === "string" && id,
+      ) as string[])
+    : [];
+  if (ids.length === 0) {
+    respond(true, { results: {} });
+    return;
+  }
+  const results = await pollSpendResultsForResponseIds(ids, {
+    concurrency: 4,
+    perMessageTimeoutMs: 3_000,
+    mode: "history",
+  });
+  const out: Record<string, { spend: number | null; balance: number | null }> = {};
+  for (const [id, value] of results.entries()) {
+    out[id] = value;
+  }
+  respond(true, { results: out });
+}
+
 export const chatHandlers: GatewayRequestHandlers = {
   "chat.history": async (opts) => {
     await handleChatHistoryRequest({ ...opts, method: "chat.history" });
@@ -3344,6 +3411,7 @@ export const chatHandlers: GatewayRequestHandlers = {
     });
   },
   "chat.metadata": handleChatMetadataRequest,
+  "chat.spend.getBatch": handleChatSpendGetBatchRequest,
   "chat.message.get": async ({ params, respond, context }) => {
     if (!validateChatMessageGetParams(params)) {
       respond(
@@ -3746,6 +3814,8 @@ export const chatHandlers: GatewayRequestHandlers = {
       systemProvenanceReceipt?: string;
       suppressCommandInterpretation?: boolean;
       expectedSessionRoutingContract?: string;
+      modelProvider?: string;
+      model?: string;
       idempotencyKey: string;
     };
     const suppressCommandInterpretation = p.suppressCommandInterpretation === true;
@@ -3858,7 +3928,76 @@ export const chatHandlers: GatewayRequestHandlers = {
     }
     const requestedSessionId = normalizeOptionalText(p.sessionId);
     const backingSessionId = entry?.sessionId ?? requestedSessionId;
-    const deletedAgentId = resolveDeletedAgentIdFromSessionKey(cfg, sessionKey, entry, {
+
+    /**
+     * Apply per-send model override from the UI model picker:
+     * - non-empty `modelProvider` + `model` → persist to session.providerOverride/modelOverride
+     * - explicit empty strings → clear override (revert to agent default)
+     * - omitted → leave existing override untouched
+     *
+     * The in-memory `entry` clone is also mutated so `resolveSessionModelRef`
+     * below picks up the new model for this run, not just future ones.
+     */
+    const requestedModelProvider = normalizeOptionalText(p.modelProvider);
+    const requestedModel = typeof p.model === "string" ? p.model : undefined;
+    const modelOverrideRequested =
+      requestedModelProvider !== undefined || requestedModel !== undefined;
+    let mutableEntry: typeof entry = entry;
+    if (modelOverrideRequested && entry && storePath) {
+      const entrySessionId = entry.sessionId;
+      const explicitProvider = requestedModelProvider ?? "";
+      const explicitModel = requestedModel ?? "";
+      const wantDefault = explicitProvider.length === 0 && explicitModel.length === 0;
+      const currentProvider = normalizeOptionalText(entry.providerOverride) ?? "";
+      const currentModel = normalizeOptionalText(entry.modelOverride) ?? "";
+      const currentIsDefault = currentProvider.length === 0 && currentModel.length === 0;
+      const needsUpdate = wantDefault
+        ? !currentIsDefault
+        : currentProvider !== explicitProvider || currentModel !== explicitModel;
+      if (needsUpdate) {
+        const cloned = { ...entry };
+        const { updated } = applyModelOverrideToSessionEntry({
+          entry: cloned,
+          selection: wantDefault
+            ? { provider: "", model: "", isDefault: true }
+            : { provider: explicitProvider, model: explicitModel },
+        });
+        if (updated) {
+          try {
+            await patchSessionEntry(
+              { storePath, sessionKey },
+              // Guard on sessionId to avoid clobbering a different session row
+              // when the loaded entry has no sessionId yet.
+              entrySessionId
+                ? (current) =>
+                    current.sessionId === entrySessionId
+                      ? {
+                          providerOverride: cloned.providerOverride,
+                          modelOverride: cloned.modelOverride,
+                          modelOverrideSource: cloned.modelOverrideSource,
+                        }
+                      : null
+                : (current) =>
+                    current.sessionId
+                      ? null
+                      : {
+                          providerOverride: cloned.providerOverride,
+                          modelOverride: cloned.modelOverride,
+                          modelOverrideSource: cloned.modelOverrideSource,
+                        },
+              { skipMaintenance: true, requireWriteSuccess: true },
+            );
+          } catch (patchErr) {
+            context.logGateway.warn(
+              `chat.send model override patch failed: ${formatForLog(patchErr)}`,
+            );
+          }
+          mutableEntry = { ...entry, ...cloned };
+        }
+      }
+    }
+
+    const deletedAgentId = resolveDeletedAgentIdFromSessionKey(cfg, sessionKey, mutableEntry, {
       acpMetadataSessionKey: legacyKey ?? sessionKey,
     });
     if (deletedAgentId !== null) {
@@ -3882,7 +4021,7 @@ export const chatHandlers: GatewayRequestHandlers = {
       agentId: selectedAgent.agentId,
       mainKey: cfg.session?.mainKey,
     });
-    const resolvedSessionModel = resolveSessionModelRef(cfg, entry, agentId);
+    const resolvedSessionModel = resolveSessionModelRef(cfg, mutableEntry, agentId);
     const resolvedSessionAuthProvider = resolveProviderIdForAuth(resolvedSessionModel.provider, {
       config: cfg,
     });
@@ -4584,6 +4723,9 @@ export const chatHandlers: GatewayRequestHandlers = {
         channel: INTERNAL_MESSAGE_CHANNEL,
       });
       const deliveredReplies: Array<{ payload: ReplyPayload; kind: "block" | "final" }> = [];
+      // Upstream provider response identifier (chatcmpl-xxx) carried on the final
+      // reply payload; used to resolve per-turn JD spend before the final broadcast.
+      let deliveredResponseId: string | undefined;
       let appendedWebchatAgentMedia = false;
       let agentRunStarted = false;
       let queuedFollowupEnqueued = false;
@@ -4745,6 +4887,9 @@ export const chatHandlers: GatewayRequestHandlers = {
             case "block":
             case "final":
               deliveredReplies.push({ payload, kind: info.kind });
+              if (typeof payload.responseId === "string" && payload.responseId.trim()) {
+                deliveredResponseId = payload.responseId.trim();
+              }
               await appendWebchatAgentMediaTranscriptIfNeeded(payload);
               break;
             case "tool":
@@ -5441,7 +5586,7 @@ export const chatHandlers: GatewayRequestHandlers = {
                     runId: clientRunId,
                     sessionKey,
                     agentId,
-                    message,
+                    message: await resolveChatFinalMessage(message, deliveredResponseId),
                   });
                 }
               } else {
@@ -5698,7 +5843,7 @@ export const chatHandlers: GatewayRequestHandlers = {
                       runId: clientRunId,
                       sessionKey,
                       agentId,
-                      message,
+                      message: await resolveChatFinalMessage(message, deliveredResponseId),
                     });
                     broadcastedSourceReplyFinal = hasSourceReplyTranscriptMirror;
                   }

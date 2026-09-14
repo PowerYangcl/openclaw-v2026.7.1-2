@@ -97,6 +97,14 @@ export const ChatSendParamsSchema = Type.Object(
     systemProvenanceReceipt: Type.Optional(Type.String()),
     suppressCommandInterpretation: Type.Optional(Type.Boolean()),
     expectedSessionRoutingContract: Type.Optional(NonEmptyString),
+    /**
+     * Optional per-session model override applied for this send and persisted
+     * to the session entry's `providerOverride` / `modelOverride`. Pass both
+     * empty strings to clear the override and fall back to the agent default
+     * model. Omit both to leave the existing override untouched.
+     */
+    modelProvider: Type.Optional(Type.String()),
+    model: Type.Optional(Type.String()),
     idempotencyKey: NonEmptyString,
   },
   { additionalProperties: false },

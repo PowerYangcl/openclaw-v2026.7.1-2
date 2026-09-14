@@ -62,6 +62,12 @@ export type ReplyPayload = {
   isStatusNotice?: boolean;
   /** Channel-specific payload data (per-channel envelope). */
   channelData?: Record<string, unknown>;
+  /**
+   * Upstream provider response identifier (e.g. OpenAI `chatcmpl-xxx`) for the
+   * terminal assistant turn. Carried on the final reply so the gateway can
+   * resolve per-turn spend (JD spend accounting) without the UI re-polling.
+   */
+  responseId?: string;
 };
 
 // Private device-pair -> Gateway live-display envelope key. Do not re-export

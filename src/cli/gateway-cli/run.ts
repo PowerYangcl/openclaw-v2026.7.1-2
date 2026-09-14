@@ -221,7 +221,7 @@ async function maybeLogPendingControlUiBuild(cfg: OpenClawConfig): Promise<void>
     return;
   }
   gatewayLog.info(
-    "Control UI assets are missing; first startup may spend a few seconds building them before the gateway binds. `pnpm gateway:watch` does not rebuild Control UI assets, so rerun `pnpm ui:build` after UI changes or use `pnpm ui:dev` while developing the Control UI. For a full local dist, run `pnpm build && pnpm ui:build`.",
+    "Control UI assets are missing; first startup may spend a few seconds building them before the gateway binds. `pnpm gateway:watch` does not rebuild Control UI assets, so rerun `pnpm ui:build` after UI changes or use `pnpm ui:dev` while developing the Control UI. For a full local dist, run `pnpm build && pnpm ui:build`. (Note: the new Vue 3 + Element Plus Web UI lives under `web/` — build it standalone with `pnpm web:build` while the migration is in progress; it does not affect the default Control UI flow.)",
   );
 }
 

@@ -129,7 +129,7 @@ export type GatewayControlUiConfig = {
   enabled?: boolean;
   /** Optional base path prefix for the Control UI (e.g. "/openclaw"). */
   basePath?: string;
-  /** Optional filesystem root for Control UI assets (defaults to dist/control-ui). */
+  /** Optional filesystem root for Control UI assets (defaults to dist/control-ui). The new Vue 3 + Element Plus Web UI under `web/dist/` is auto-detected as a parallel candidate by `resolveControlUiRootSync` (see `src/infra/control-ui-assets.ts`); it does not override this default. */
   root?: string;
   /**
    * Embed sandbox mode for hosted Control UI previews.

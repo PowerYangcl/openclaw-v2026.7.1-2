@@ -9,6 +9,7 @@ export type ConsumerScope =
   | "package"
   | "app"
   | "ui"
+  | "web"
   | "script"
   | "test"
   | "other";

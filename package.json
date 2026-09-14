@@ -480,6 +480,10 @@
       "types": "./dist/plugin-sdk/runtime-config-snapshot.d.ts",
       "default": "./dist/plugin-sdk/runtime-config-snapshot.js"
     },
+    "./plugin-sdk/jd-spend": {
+      "types": "./dist/plugin-sdk/jd-spend.d.ts",
+      "default": "./dist/plugin-sdk/jd-spend.js"
+    },
     "./plugin-sdk/runtime-group-policy": {
       "types": "./dist/plugin-sdk/runtime-group-policy.d.ts",
       "default": "./dist/plugin-sdk/runtime-group-policy.js"
@@ -1626,6 +1630,7 @@
     "format:swift": "swiftformat --lint --config config/swiftformat --exclude '**/apps/swabble,**/apps/android,**/apps/ios,**/apps/shared,**/OpenClawProtocol,**/HostEnvSecurityPolicy.generated.swift' apps/macos/Sources apps/ios/Sources apps/shared/OpenClawKit/Sources",
     "gateway:dev": "node scripts/run-with-env.mjs OPENCLAW_SKIP_CHANNELS=1 -- node scripts/run-node.mjs --dev gateway",
     "gateway:dev:reset": "node scripts/run-with-env.mjs OPENCLAW_SKIP_CHANNELS=1 -- node scripts/run-node.mjs --dev gateway --reset",
+    "gateway:lite": "bash scripts/start-gateway-lite.sh",
     "gateway:watch": "node scripts/gateway-watch-tmux.mjs gateway --force",
     "gateway:watch:raw": "node scripts/watch-node.mjs gateway --force",
     "gen:host-env-policy:swift": "node scripts/generate-host-env-security-policy-swift.mjs --write",
@@ -1689,6 +1694,7 @@
     "lint:tmp:session-transcript-reader-boundary": "node scripts/check-session-transcript-reader-boundary.mjs",
     "lint:tmp:tsgo-core-boundary": "node scripts/check-tsgo-core-boundary.mjs",
     "lint:ui:no-raw-window-open": "node scripts/check-no-raw-window-open.mjs",
+    "lint:web:no-raw-window-open": "node scripts/check-no-raw-window-open.mjs",
     "lint:web-fetch-provider-boundaries": "node scripts/check-web-fetch-provider-boundaries.mjs",
     "lint:web-search-provider-boundaries": "node scripts/check-web-search-provider-boundaries.mjs",
     "lint:webhook:no-low-level-body-read": "node scripts/check-webhook-auth-body-order.mjs",
@@ -1939,7 +1945,9 @@
     "test:restart:gateway": "node --import tsx scripts/bench-gateway-restart.ts",
     "test:startup:memory": "node scripts/ensure-cli-startup-build.mjs && node scripts/check-cli-startup-memory.mjs",
     "test:ui": "pnpm ui:i18n:check && pnpm lint:ui:no-raw-window-open && node scripts/ensure-playwright-chromium.mjs && pnpm --dir ui test",
+    "test:web": "node scripts/ensure-playwright-chromium.mjs && pnpm --dir web typecheck && pnpm --dir web test:unit",
     "test:ui:e2e": "node scripts/ensure-playwright-chromium.mjs && node scripts/run-vitest.mjs run --config test/vitest/vitest.ui-e2e.config.ts --configLoader runner",
+    "test:web:e2e": "node scripts/ensure-playwright-chromium.mjs && pnpm --dir web test:e2e",
     "test:unit": "pnpm test:unit:fast && node scripts/run-vitest.mjs run --config test/vitest/vitest.unit.config.ts",
     "test:unit:fast": "node scripts/run-vitest.mjs run --config test/vitest/vitest.unit-fast.config.ts",
     "test:unit:fast:audit": "node scripts/test-unit-fast-audit.mjs",
@@ -1971,7 +1979,9 @@
     "tui:pty:test:watch:fake": "node --import tsx scripts/dev/tui-pty-test-watch.ts --mode fake",
     "tui:pty:test:watch:local": "node --import tsx scripts/dev/tui-pty-test-watch.ts --mode local",
     "ui:build": "node scripts/ui.js build",
+    "web:build": "node scripts/web.js build",
     "ui:dev": "node scripts/ui.js dev",
+    "web:dev": "node scripts/web.js dev",
     "ui:i18n:check": "node --import tsx scripts/control-ui-i18n.ts check",
     "ui:i18n:report": "node --import tsx scripts/control-ui-i18n-report.ts",
     "ui:i18n:sync": "node --import tsx scripts/control-ui-i18n.ts sync --write",
@@ -1980,6 +1990,7 @@
     "android:i18n:check": "node --import tsx scripts/android-app-i18n.ts check",
     "apple:i18n:check": "node --import tsx scripts/apple-app-i18n.ts check",
     "ui:install": "node scripts/ui.js install",
+    "web:install": "node scripts/web.js install",
     "verify": "node scripts/verify.mjs"
   },
   "dependencies": {

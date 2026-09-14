@@ -243,6 +243,6 @@
       "@openclaw/*": ["./extensions/*"]
     }
   },
-  "include": ["src/**/*", "ui/**/*", "extensions/**/*", "packages/**/*"],
-  "exclude": ["node_modules", "dist", "**/dist/**"]
+  "include": ["src/**/*", "ui/**/*", "web/**/*", "extensions/**/*", "packages/**/*"],
+  "exclude": ["node_modules", "dist", "**/dist/**", "web/dist", "web/node_modules"]
 }

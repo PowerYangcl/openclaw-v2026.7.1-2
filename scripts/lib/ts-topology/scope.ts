@@ -33,6 +33,9 @@ function classifyScope(relPath: string): ConsumerScope {
   if (relPath.startsWith("ui/")) {
     return "ui";
   }
+  if (relPath.startsWith("web/")) {
+    return "web";
+  }
   if (relPath.startsWith("scripts/")) {
     return "script";
   }
@@ -66,6 +69,8 @@ function extractOwner(relPath: string): string | null {
       return "src";
     case "ui":
       return "ui";
+    case "web":
+      return "web";
     case "script":
       return "scripts";
     case "other":

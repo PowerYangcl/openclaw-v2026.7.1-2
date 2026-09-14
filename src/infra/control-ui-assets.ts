@@ -49,7 +49,10 @@ export function resolveControlUiRepoRoot(
   const srcIndex = parts.lastIndexOf("src");
   if (srcIndex !== -1) {
     const root = parts.slice(0, srcIndex).join(path.sep);
-    if (controlUiFsRuntime.existsSync(path.join(root, "ui", "vite.config.ts"))) {
+    if (
+      controlUiFsRuntime.existsSync(path.join(root, "ui", "vite.config.ts")) ||
+      controlUiFsRuntime.existsSync(path.join(root, "web", "vite.config.ts"))
+    ) {
       return root;
     }
   }
@@ -58,7 +61,8 @@ export function resolveControlUiRepoRoot(
   for (let i = 0; i < 8; i++) {
     if (
       controlUiFsRuntime.existsSync(path.join(dir, "package.json")) &&
-      controlUiFsRuntime.existsSync(path.join(dir, "ui", "vite.config.ts"))
+      (controlUiFsRuntime.existsSync(path.join(dir, "ui", "vite.config.ts")) ||
+        controlUiFsRuntime.existsSync(path.join(dir, "web", "vite.config.ts")))
     ) {
       return dir;
     }
@@ -228,21 +232,28 @@ export function resolveControlUiRootSync(opts: ControlUiRootResolveOptions = {})
     addCandidate(candidates, path.join(moduleDir, "../control-ui"));
     // src/gateway/control-ui.ts -> dist/control-ui
     addCandidate(candidates, path.join(moduleDir, "../../dist/control-ui"));
+    // src/infra/control-ui-assets.ts -> web/dist (new Vue 3 UI)
+    addCandidate(candidates, path.join(moduleDir, "../../web/dist"));
   }
   if (argv1Dir) {
     // openclaw.mjs or dist/<bundle>.js
     addCandidate(candidates, path.join(argv1Dir, "dist", "control-ui"));
     addCandidate(candidates, path.join(argv1Dir, "control-ui"));
+    // New Vue 3 UI lives at <repo>/web/dist
+    addCandidate(candidates, path.join(argv1Dir, "web", "dist"));
   }
   if (argv1RealpathDir && argv1RealpathDir !== argv1Dir) {
     // Symlinked wrappers (e.g. ~/.bun/bin/openclaw -> .../dist/index.js)
     addCandidate(candidates, path.join(argv1RealpathDir, "dist", "control-ui"));
     addCandidate(candidates, path.join(argv1RealpathDir, "control-ui"));
+    addCandidate(candidates, path.join(argv1RealpathDir, "web", "dist"));
   }
   if (packageRoot) {
     addCandidate(candidates, path.join(packageRoot, "dist", "control-ui"));
+    addCandidate(candidates, path.join(packageRoot, "web", "dist"));
   }
   addCandidate(candidates, path.join(cwd, "dist", "control-ui"));
+  addCandidate(candidates, path.join(cwd, "web", "dist"));
 
   for (const dir of candidates) {
     const indexPath = path.join(dir, "index.html");
@@ -307,43 +318,68 @@ export async function ensureControlUiAssetsBuilt(
     return {
       ok: false,
       built: false,
-      message: `${hint}. Build them with \`pnpm ui:build\` (auto-installs UI deps).`,
+      message: `${hint}. Build them with \`pnpm web:build\` (auto-installs web deps).`,
     };
   }
 
   const indexPath = resolveControlUiDistIndexPathForRoot(repoRoot);
-  if (controlUiFsRuntime.existsSync(indexPath)) {
+  const webIndexPath = path.join(repoRoot, "web", "dist", "index.html");
+  if (controlUiFsRuntime.existsSync(indexPath) || controlUiFsRuntime.existsSync(webIndexPath)) {
     return { ok: true, built: false };
   }
 
-  const uiScript = path.join(repoRoot, "scripts", "ui.js");
-  if (!controlUiFsRuntime.existsSync(uiScript)) {
+  const legacyUiScript = path.join(repoRoot, "scripts", "ui.js");
+  const webScript = path.join(repoRoot, "scripts", "web.js");
+  // Decide which build script to try. Both scripts are optional in the source
+  // checkout. Existing UI behavior (Lit + dist/control-ui) must remain working:
+  // - If scripts/ui.js exists, use it as the primary path (unchanged behavior).
+  // - If only scripts/web.js exists (web/ is the only UI), use it.
+  // - If both exist (transition period), try web.js first and fall back to
+  //   ui.js so a partial web/ checkout does not break the legacy UI flow.
+  const candidates = [webScript, legacyUiScript].filter((p) => controlUiFsRuntime.existsSync(p));
+  if (candidates.length === 0) {
     return {
       ok: false,
       built: false,
-      message: `Control UI assets missing but ${uiScript} is unavailable.`,
+      message: `Control UI assets missing but neither ${webScript} nor ${legacyUiScript} is available.`,
     };
   }
 
-  runtime.log("Control UI assets missing; building (ui:build, auto-installs UI deps)…");
-
-  const build = await runCommandWithTimeout([process.execPath, uiScript, "build"], {
-    cwd: repoRoot,
-    timeoutMs: opts?.timeoutMs ?? 10 * 60_000,
-  });
-  if (build.code !== 0) {
+  let lastBuild = null;
+  for (const candidate of candidates) {
+    const label = candidate === webScript ? "web:build" : "ui:build";
+    runtime.log(`Control UI assets missing; building (${label}, auto-installs deps)…`);
+    const build = await runCommandWithTimeout([process.execPath, candidate, "build"], {
+      cwd: repoRoot,
+      timeoutMs: opts?.timeoutMs ?? 10 * 60_000,
+    });
+    lastBuild = build;
+    if (build.code === 0) {
+      break;
+    }
+    // First script failed; if a fallback candidate remains, log the warning
+    // and continue. We surface the last failure to the caller only after all
+    // candidates are exhausted.
+    const candidateIndex = candidates.indexOf(candidate);
+    if (candidateIndex < candidates.length - 1) {
+      const next = candidates[candidateIndex + 1];
+      const nextLabel = next === webScript ? "web:build" : "ui:build";
+      runtime.log(`Control UI build via ${label} failed; falling back to ${nextLabel}.`);
+    }
+  }
+  if (!lastBuild || lastBuild.code !== 0) {
     return {
       ok: false,
       built: false,
-      message: `Control UI build failed: ${summarizeCommandOutput(build.stderr) ?? `exit ${build.code}`}`,
+      message: `Control UI build failed: ${summarizeCommandOutput(lastBuild?.stderr) ?? `exit ${lastBuild?.code ?? "?"}`}`,
     };
   }
 
-  if (!controlUiFsRuntime.existsSync(indexPath)) {
+  if (!controlUiFsRuntime.existsSync(indexPath) && !controlUiFsRuntime.existsSync(webIndexPath)) {
     return {
       ok: false,
       built: true,
-      message: `Control UI build completed but ${indexPath} is still missing.`,
+      message: `Control UI build completed but neither ${indexPath} nor ${webIndexPath} is present.`,
     };
   }
 

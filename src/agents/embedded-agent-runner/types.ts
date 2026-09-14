@@ -189,6 +189,12 @@ export type EmbeddedAgentRunMeta = {
   failureSignal?: EmbeddedRunFailureSignal;
   /** Stop reason for the agent run (e.g., "completed", "tool_calls"). */
   stopReason?: string;
+  /**
+   * Upstream provider response identifier (e.g. OpenAI `chatcmpl-xxx`) for the
+   * terminal assistant turn, when the provider exposes one. Used by the gateway
+   * to resolve per-turn spend via JD spend accounting.
+   */
+  responseId?: string;
   /** Pending tool calls when stopReason is "tool_calls". */
   pendingToolCalls?: Array<{
     id: string;

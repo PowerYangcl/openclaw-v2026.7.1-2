@@ -10,6 +10,9 @@ dist-runtime/
 # 前端 Web UI 产物（vite build 输出）
 ui/dist
 /ui/dist/
+# 新版 Vue 3 + Element Plus Web UI 产物
+web/dist
+/web/dist/
 
 # 各内部子包 / 扩展插件产物
 packages/*/dist/
@@ -18,11 +21,19 @@ extensions/*/dist/
 /packages/*/dist/
 /extensions/*/dist/
 
+# 忽略整个 packages 目录
+packages/
+/packages/
+
 # 日志文件（安装 / 构建 / 运行产物）
 *.log
 
 
 .artifacts/
+
+
+# 冒烟测试（Web 前端 E2E / CDP 烟测脚本，由 pnpm test:e2e:* 在 CI/本地运行，不入库）
+/web/tests/smoke/
 
 
 

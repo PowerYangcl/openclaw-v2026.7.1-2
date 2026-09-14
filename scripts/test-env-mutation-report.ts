@@ -37,7 +37,7 @@ export type TestEnvMutationReport = {
 };
 
 const DYNAMIC_ENV_KEY = "<dynamic>";
-const DEFAULT_SCAN_ROOTS = ["src", "test", "extensions", "packages", "ui", "scripts"];
+const DEFAULT_SCAN_ROOTS = ["src", "test", "extensions", "packages", "ui", "web", "scripts"];
 const DEFAULT_SKIPPED_DIR_NAMES = new Set([
   ".artifacts",
   ".generated",

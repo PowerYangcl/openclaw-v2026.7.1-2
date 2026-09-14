@@ -2109,6 +2109,7 @@ const SOURCE_TEST_TARGETS = new Map([
   ["src/plugins/runtime-sidecar-paths-baseline.ts", RUNTIME_SIDECAR_BASELINE_OWNER_TEST_TARGETS],
   ["src/plugins/runtime-sidecar-paths.ts", RUNTIME_SIDECAR_PATH_CONSUMER_TEST_TARGETS],
   ["ui/config/control-ui-chunking.ts", ["ui/src/app/control-ui-chunking.test.ts"]],
+  ["web/vite.config.ts", ["web/src/**/*.test.ts"]],
   [
     "src/plugin-sdk/test-helpers/directory-ids.ts",
     [
@@ -2187,7 +2188,10 @@ const SOURCE_ROOTS_FOR_IMPORT_GRAPH = [
   "extensions",
   "packages",
   "ui/src",
+  "web/src",
   "ui/config",
+  "web/src",
+  "web/config",
   "test",
 ];
 const IMPORTABLE_FILE_EXTENSIONS = [".ts", ".tsx", ".mts", ".cts"];
@@ -2538,7 +2542,7 @@ function toScopedIncludePattern(arg, cwd) {
   return `${relative.replace(/\/+$/u, "")}/**/*.test.ts`;
 }
 
-const EXPLICIT_TEST_TARGET_ROOTS = ["src", "test", "extensions", "ui", "packages", "apps"];
+const EXPLICIT_TEST_TARGET_ROOTS = ["src", "test", "extensions", "ui", "web", "packages", "apps"];
 let cachedExplicitTestTargetFiles = null;
 let cachedExplicitTestTargetFilesCwd = null;
 
@@ -3088,7 +3092,9 @@ function isControlUiE2eTarget(relative) {
     relative === "ui/src/test-helpers/control-ui-e2e.ts" ||
     relative === "ui/src/e2e" ||
     relative.startsWith("ui/src/e2e/") ||
-    (relative.startsWith("ui/src/") && relative.endsWith(".e2e.test.ts"))
+    (relative.startsWith("ui/src/") && relative.endsWith(".e2e.test.ts")) ||
+    relative === "web/src/test-helpers/web-e2e.ts" ||
+    (relative.startsWith("web/src/") && relative.endsWith(".e2e.test.ts"))
   );
 }
 
@@ -3372,7 +3378,11 @@ function shouldCombineSiblingTestWithImportGraph(changedPath) {
 }
 
 function shouldRouteChangedTargetWithoutImportGraph(changedPath) {
-  return changedPath.endsWith(".live.test.ts") || changedPath.startsWith("ui/src/");
+  return (
+    changedPath.endsWith(".live.test.ts") ||
+    changedPath.startsWith("ui/src/") ||
+    changedPath.startsWith("web/src/")
+  );
 }
 
 function resolvePromptSnapshotFixtureTargets(changedPath) {
@@ -3404,7 +3414,11 @@ function resolvePreciseChangedTestTargets(changedPath, options) {
     return [siblingTest];
   }
   if (shouldRouteChangedTargetWithoutImportGraph(changedPath)) {
-    return changedPath.startsWith("ui/src/") ? [changedPath] : null;
+    return changedPath.startsWith("ui/src/")
+      ? [changedPath]
+      : changedPath.startsWith("web/src/")
+        ? [changedPath]
+        : null;
   }
   if (options.skipImportGraph === true) {
     return null;
@@ -3755,7 +3769,10 @@ function shouldUseWholeConfigTarget(kind, targetArg, cwd) {
   }
   if (kind === "uiE2e") {
     const relative = toRepoRelativeTarget(targetArg, cwd);
-    return relative === "ui/src/test-helpers/control-ui-e2e.ts";
+    return (
+      relative === "ui/src/test-helpers/control-ui-e2e.ts" ||
+      relative === "web/src/test-helpers/web-e2e.ts"
+    );
   }
   if (kind !== "ui") {
     return false;
@@ -3764,7 +3781,7 @@ function shouldUseWholeConfigTarget(kind, targetArg, cwd) {
   if (isTestFileTarget(relative)) {
     return false;
   }
-  return relative.startsWith("ui/src/");
+  return relative.startsWith("ui/src/") || relative.startsWith("web/src/");
 }
 
 function createVitestArgs(params) {

@@ -441,6 +441,8 @@ function surfacesForFile(filename) {
   }
   if (filename.startsWith("ui/")) {
     surfaces.add("ui");
+  } else if (filename.startsWith("web/")) {
+    surfaces.add("web");
   } else if (filename.startsWith("src/gateway/")) {
     surfaces.add("src/gateway");
   } else if (filename.startsWith("src/plugins/")) {

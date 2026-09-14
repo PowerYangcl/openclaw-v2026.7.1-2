@@ -22,6 +22,7 @@ import {
   resolveMergedAssistantText,
   shouldSuppressAssistantEventForLiveChat,
 } from "./live-chat-projector.js";
+import { pollJdSpendForChat } from "./openresponses-http.js";
 import { isChatAbortMarkerCurrent } from "./server-chat-state.js";
 import type {
   BufferedAgentEvent,
@@ -687,7 +688,11 @@ export function createAgentEventHandler({
               ? "aborted"
               : "error";
         if (!(opts?.skipChatErrorFinal && terminalState === "error")) {
-          emitChatTerminal(
+          const terminalResponseId =
+            typeof evt.data?.responseId === "string" && evt.data.responseId.trim()
+              ? evt.data.responseId.trim()
+              : undefined;
+          void emitChatTerminal(
             terminalSessionKey,
             terminalRunId,
             evt.runId,
@@ -702,6 +707,7 @@ export function createAgentEventHandler({
               firstAssistantTimingEntry: finished,
               abortErrorMessage: readToolValidationErrorSummary(evt.data?.toolErrorSummary),
             },
+            terminalResponseId,
           );
         }
       } else {
@@ -965,7 +971,23 @@ export function createAgentEventHandler({
     }
   };
 
-  const emitChatTerminal = (
+  const decorateChatFinalMessageWithSpend = async (
+    message: Record<string, unknown>,
+    responseId: string,
+  ): Promise<Record<string, unknown>> => {
+    // 6s ceiling — enough for the upstream to accumulate the post-turn
+    // `key.spend` in the common case; the poll falls back to a deterministic
+    // `oldBalance - spend` computation when the deadline hits, so the new
+    // balance is still reported.
+    const spendResult = await pollJdSpendForChat(responseId, { deadlineMs: 6_000 });
+    return {
+      ...message,
+      responseId,
+      ...(spendResult ? { spendResult } : {}),
+    };
+  };
+
+  const emitChatTerminal = async (
     sessionKey: string,
     clientRunId: string,
     sourceRunId: string,
@@ -980,6 +1002,7 @@ export function createAgentEventHandler({
       firstAssistantTimingEntry?: ChatRunEntry;
       abortErrorMessage?: string;
     },
+    responseId?: string,
   ) => {
     const { text, shouldSuppressSilent } = resolveBufferedChatTextState(clientRunId, sourceRunId, {
       suppressLeadFragments: false,
@@ -992,6 +1015,28 @@ export function createAgentEventHandler({
     chatRunState.clearRun(clientRunId);
     const spawnedBy = resolveSpawnedBy(sessionKey);
     if (jobState !== "error") {
+      const baseMessage =
+        text && !shouldSuppressSilent
+          ? {
+              role: "assistant",
+              content: [{ type: "text", text }],
+              timestamp: Date.now(),
+            }
+          : undefined;
+      // Decorate with the upstream completion id (chatcmpl-xxx) and the per-turn
+      // JD spend result. Polling completes before broadcast so the final event
+      // carries both fields at the top level of `message` (or `spendResult`
+      // with nulls on upstream failure/timeout). Spend decoration must never
+      // suppress the final broadcast itself.
+      let message: Record<string, unknown> | undefined = baseMessage;
+      if (baseMessage && responseId) {
+        try {
+          message = await decorateChatFinalMessageWithSpend(baseMessage, responseId);
+        } catch {
+          // Fall back to the undecorated message; the run outcome is unchanged.
+          message = baseMessage;
+        }
+      }
       const payload = {
         runId: clientRunId,
         sessionKey,
@@ -1003,14 +1048,7 @@ export function createAgentEventHandler({
           ? { errorMessage: opts.abortErrorMessage }
           : {}),
         ...(stopReason && { stopReason }),
-        message:
-          text && !shouldSuppressSilent
-            ? {
-                role: "assistant",
-                content: [{ type: "text", text }],
-                timestamp: Date.now(),
-              }
-            : undefined,
+        message,
       };
       sendChatPayload(sessionKey, payload, opts);
       return;

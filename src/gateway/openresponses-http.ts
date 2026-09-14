@@ -15,6 +15,7 @@ import type { ClientToolDefinition } from "../agents/embedded-agent-runner/run/p
 import { createDefaultDeps } from "../cli/deps.js";
 import type { CliDeps } from "../cli/deps.types.js";
 import { agentCommandFromIngress } from "../commands/agent.js";
+import { getRuntimeConfig } from "../config/config.js";
 import type { GatewayHttpResponsesConfig } from "../config/types.gateway.js";
 import { emitAgentEvent, onAgentEvent } from "../infra/agent-events.js";
 import { logWarn } from "../logger.js";
@@ -399,6 +400,7 @@ function createResponseResource(params: {
   output: OutputItem[];
   usage?: Usage;
   error?: { code: string; message: string };
+  spendResult?: { spend: number | null; balance: number | null };
 }): ResponseResource {
   return {
     id: params.id,
@@ -409,7 +411,373 @@ function createResponseResource(params: {
     output: params.output,
     usage: params.usage ?? createEmptyUsage(),
     error: params.error,
+    spendResult: params.spendResult,
   };
+}
+
+// ─────────────────────────────────────────────────────────────────────────
+// JD-LLM spend polling
+// ─────────────────────────────────────────────────────────────────────────
+//
+// After every non-streaming chat completion the gateway polls the upstream
+// JD-LLM spend log endpoint to learn how much the request cost and what the
+// account balance is. The result is attached to the outgoing response as
+// `spendResult` so independent frontends can show per-turn spend without
+// having to call `GET /api/v1/jd/spend/:completionId` themselves.
+//
+// Polling cadence (cumulative ~3.8s) tolerates the upstream's async
+// accounting pipeline, where the cost record sometimes lands a few hundred
+// milliseconds after the completion itself.
+
+const JD_SPEND_POLL_DELAYS_MS = [300, 500, 1000, 2000] as const;
+const JD_SPEND_FETCH_TIMEOUT_MS = 3000;
+
+export function resolveJdLlmProviderConfig(): { apiKey: string; spendBaseUrl: string } | null {
+  const config = getRuntimeConfig();
+  if (!config) {
+    return null;
+  }
+  const models = config.models as Record<string, unknown> | undefined;
+  const providers = models?.providers as Record<string, unknown> | undefined;
+  const jdLlm = providers?.["jd-llm"] as Record<string, unknown> | undefined;
+  if (!jdLlm) {
+    return null;
+  }
+  const apiKey = typeof jdLlm.apiKey === "string" ? jdLlm.apiKey : "";
+  // Spend queries live on the JD spend gateway (HTTPS, no /v1 suffix), NOT on
+  // the LLM baseUrl. Resolution order: jd-llm.spendBaseUrl (explicit) →
+  // jd-spend-proxy plugin config spendBaseUrl → jd-llm.baseUrl (legacy fallback).
+  const plugins = config.plugins as Record<string, unknown> | undefined;
+  const pluginEntries = plugins?.entries as Record<string, unknown> | undefined;
+  const spendProxyEntry = pluginEntries?.["jd-spend-proxy"] as Record<string, unknown> | undefined;
+  const spendProxyConfig = spendProxyEntry?.config as Record<string, unknown> | undefined;
+  const pluginSpendBaseUrl =
+    typeof spendProxyConfig?.spendBaseUrl === "string" ? spendProxyConfig.spendBaseUrl : "";
+  const providerSpendBaseUrl = typeof jdLlm.spendBaseUrl === "string" ? jdLlm.spendBaseUrl : "";
+  const legacyBaseUrl = typeof jdLlm.baseUrl === "string" ? jdLlm.baseUrl : "";
+  const spendBaseUrl = providerSpendBaseUrl || pluginSpendBaseUrl || legacyBaseUrl;
+  if (!apiKey || !spendBaseUrl) {
+    return null;
+  }
+  return { apiKey, spendBaseUrl };
+}
+
+export async function fetchJdSpendOnce(
+  base: string,
+  apiKey: string,
+  completionId: string,
+  signal?: AbortSignal,
+): Promise<{
+  ok: boolean;
+  status: number;
+  spend: number | null;
+  balance: number | null;
+  /**
+   * Raw upstream cumulative spend (`key.spend`), used by `pollJdSpendForChat`
+   * to detect when the post-turn balance has been written. `null` when the
+   * record is not yet ready or the upstream did not return a `key` object.
+   */
+  keySpend: number | null;
+}> {
+  const upstreamUrl = `${base}/spend/logs/ui/${encodeURIComponent(completionId)}?include_key_info=true`;
+  let res: Response;
+  try {
+    res = await fetch(upstreamUrl, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${apiKey}`, Accept: "application/json" },
+      signal: signal ?? AbortSignal.timeout(JD_SPEND_FETCH_TIMEOUT_MS),
+    });
+  } catch {
+    return { ok: false, status: 0, spend: null, balance: null, keySpend: null };
+  }
+  if (res.status === 202) {
+    return { ok: false, status: 202, spend: null, balance: null, keySpend: null };
+  }
+  if (!res.ok) {
+    return { ok: false, status: res.status, spend: null, balance: null, keySpend: null };
+  }
+  // The upstream may answer 200 with an HTML error page (CDN interception) or
+  // an error JSON instead of the spend record. Treat non-JSON bodies as a
+  // retryable failure so callers poll instead of resolving to a null spend.
+  const contentType = res.headers.get("content-type") ?? "";
+  if (!contentType.toLowerCase().includes("application/json")) {
+    return { ok: false, status: res.status, spend: null, balance: null, keySpend: null };
+  }
+  let data: unknown;
+  try {
+    data = await res.json();
+  } catch {
+    return { ok: false, status: res.status, spend: null, balance: null, keySpend: null };
+  }
+  const record = data as Record<string, unknown>;
+  const rawSpend = typeof record?.spend === "number" ? record.spend : null;
+  const key = record?.key as Record<string, unknown> | undefined;
+  const rawBalance = typeof key?.balance === "number" ? key.balance : null;
+  const rawKeySpend = typeof key?.spend === "number" ? key.spend : null;
+  return {
+    ok: true,
+    status: res.status,
+    spend: rawSpend !== null ? Math.round(rawSpend * 1e5) / 100 : null,
+    balance: rawBalance !== null ? Math.round(rawBalance * 1e5) / 100 : null,
+    keySpend: rawKeySpend,
+  };
+}
+
+/**
+ * Poll the upstream JD-LLM spend endpoint until a non-pending response
+ * arrives or the budget is exhausted. Returns `{spend, balance}` — both
+ * fields are `null` on any error, timeout, or pending state. Never throws.
+ */
+export async function fetchAndPollJdSpend(
+  completionId: string,
+): Promise<{ spend: number | null; balance: number | null }> {
+  const cfg = resolveJdLlmProviderConfig();
+  if (!cfg) {
+    return { spend: null, balance: null };
+  }
+  const base = cfg.spendBaseUrl.replace(/\/+$/, "").replace(/\/v1$/, "");
+  let attempt = 0;
+  while (true) {
+    const result = await fetchJdSpendOnce(base, cfg.apiKey, completionId);
+    if (result.ok) {
+      return { spend: result.spend, balance: result.balance };
+    }
+    if (attempt >= JD_SPEND_POLL_DELAYS_MS.length) {
+      return { spend: null, balance: null };
+    }
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, JD_SPEND_POLL_DELAYS_MS[attempt]!);
+    });
+    attempt += 1;
+  }
+}
+
+const JD_SPEND_CHAT_POLL_DEADLINE_MS = 15_000;
+const JD_SPEND_CHAT_POLL_RETRY_DELAY_MS = 2_000;
+const JD_SPEND_BALANCE_CONVERGENCE_EPSILON = 1e-6;
+/**
+ * Clamp a numeric balance at zero. `null` (unknown) is preserved so callers
+ * can distinguish "upstream not yet known" from "depleted to zero". `spend`
+ * is left untouched — zero-spend completions are valid and must surface as 0.
+ */
+function clampBalanceFloor(balance: number | null): number | null {
+  return typeof balance === "number" ? Math.max(0, balance) : balance;
+}
+
+/**
+ * Polls the JD spend endpoint in two phases:
+ *  1. Wait for `spend` to resolve (this turn's cost). `spend === 0` short-
+ *     circuits the poll — there is no balance change to wait for.
+ *  2. Once `spend > 0`, keep polling until the upstream `key.spend` (cumulative)
+ *     reflects the new accumulation, at which point `key.balance` is the
+ *     post-turn remaining. If the upstream never converges before the deadline
+ *     (or the caller's `signal` aborts), fall back to a deterministic
+ *     `firstBalance - spend` computation.
+ *
+ * Rules:
+ *  - R3: `spend === 0` → stop polling, return immediately (balance unchanged).
+ *  - R4: while EITHER `spend` or `balance` is `null`, keep polling.
+ *  - R5: a numeric balance ≤ 0 is clamped to 0 on return; `null` is preserved.
+ *  - On `spend > 0` deadline without convergence: return a computed balance
+ *    (`firstBalance - spend`, clamped) so the new balance is always reported
+ *    when this turn actually cost something.
+ *
+ * Never throws. Returns `{ spend, balance }`; both fields may be `null` only
+ * when even the spend phase failed entirely.
+ */
+/**
+ * Polls the JD spend endpoint in two phases:
+ *  1. Wait for `spend` to resolve (this turn's cost). `spend === 0` short-
+ *     circuits the poll — there is no balance change to wait for.
+ *  2. Once `spend > 0`, keep polling until either a transition is observed
+ *     (`key.spend` advanced by ≈ this turn's cost) or the deadline passes.
+ *     The post-turn balance is the balance reported alongside the LARGEST
+ *     `key.spend` we ever observed, because `key.spend` is monotonically
+ *     non-decreasing (the upstream's per-record cumulative moves from
+ *     pre-turn to post-turn and never back). When the deadline expires
+ *     WITHOUT any transition, the fallback depends on `mode`:
+ *      - "history" — the record is from a past turn that is already in its
+ *        final state; return the observed balance as-is.
+ *      - "final" (default) — the record was just written and is most likely
+ *        still in its pre-turn state; derive the post-turn balance
+ *        deterministically as `firstBalance - spend`.
+ *
+ * Rules:
+ *  - R3: `spend === 0` → stop polling, return immediately (balance unchanged).
+ *  - R4: while EITHER `spend` or `balance` is `null`, keep polling.
+ *  - R5: a numeric balance ≤ 0 is clamped to 0 on return; `null` is preserved.
+ *
+ * Never throws. Returns `{ spend, balance }`; both fields may be `null` only
+ * when even the spend phase failed entirely.
+ */
+export async function pollJdSpendForChat(
+  completionId: string,
+  opts?: {
+    signal?: AbortSignal;
+    retryDelayMs?: number;
+    deadlineMs?: number;
+    /**
+     * Caller context that decides how to resolve a stable, never-transitioned
+     * record at the deadline:
+     *  - "final" (default): the chat just finished, the record is probably
+     *    pre-turn and upstream is slow — compute `firstBalance - spend`.
+     *  - "history": the record is from a past turn, definitely post-turn —
+     *    trust the observed balance.
+     */
+    mode?: "final" | "history";
+  },
+): Promise<{ spend: number | null; balance: number | null }> {
+  const cfg = resolveJdLlmProviderConfig();
+  if (!cfg) {
+    return { spend: null, balance: null };
+  }
+  const base = cfg.spendBaseUrl.replace(/\/+$/, "").replace(/\/v1$/, "");
+  const deadline = Date.now() + (opts?.deadlineMs ?? JD_SPEND_CHAT_POLL_DEADLINE_MS);
+  const retryDelay = opts?.retryDelayMs ?? JD_SPEND_CHAT_POLL_RETRY_DELAY_MS;
+  const mode = opts?.mode ?? "final";
+  const isAborted = () => opts?.signal?.aborted === true;
+
+  const sleep = (ms: number) =>
+    new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, ms);
+      if (opts?.signal) {
+        const onAbort = () => {
+          clearTimeout(timer);
+          resolve();
+        };
+        opts.signal.addEventListener("abort", onAbort, { once: true });
+      }
+    });
+
+  // Phase 1 — wait for `spend` to resolve.
+  let result = await fetchJdSpendOnce(base, cfg.apiKey, completionId, opts?.signal);
+  while ((!result.ok || result.spend === null) && !isAborted() && Date.now() < deadline) {
+    await sleep(retryDelay);
+    if (isAborted() || Date.now() >= deadline) {
+      break;
+    }
+    result = await fetchJdSpendOnce(base, cfg.apiKey, completionId, opts?.signal);
+  }
+  if (!result.ok || result.spend === null) {
+    return { spend: null, balance: null };
+  }
+  const spend = result.spend;
+  const firstBalance = result.balance;
+  const firstKeySpend = result.keySpend;
+
+  // R3 — spend === 0 means no balance change; return current state.
+  if (spend === 0) {
+    return { spend: 0, balance: clampBalanceFloor(firstBalance) };
+  }
+
+  // Phase 2 — track the best (largest key.spend) observation. We need at
+  // least one more fetch to detect a transition or confirm stability.
+  let bestKeySpend = firstKeySpend ?? -Infinity;
+  let bestBalance: number | null = firstBalance;
+  let sawTransition = firstKeySpend === null; // null keySpend ⇒ treat as already converged
+  while (!isAborted() && Date.now() < deadline) {
+    await sleep(retryDelay);
+    if (isAborted() || Date.now() >= deadline) {
+      break;
+    }
+    const refined = await fetchJdSpendOnce(base, cfg.apiKey, completionId, opts?.signal);
+    if (!refined.ok) {
+      continue;
+    }
+    if (typeof refined.keySpend === "number") {
+      if (refined.keySpend > bestKeySpend) {
+        bestKeySpend = refined.keySpend;
+        bestBalance = refined.balance;
+        // A jump ≥ spend means the record has accumulated this turn's cost.
+        if (refined.keySpend + JD_SPEND_BALANCE_CONVERGENCE_EPSILON >= firstKeySpend + spend) {
+          sawTransition = true;
+        }
+      }
+    } else if (typeof refined.balance === "number" && bestBalance === null) {
+      bestBalance = refined.balance;
+    }
+    if (sawTransition && typeof bestBalance === "number") {
+      return { spend, balance: clampBalanceFloor(bestBalance) };
+    }
+  }
+
+  // Deadline / abort resolution.
+  if (sawTransition && typeof bestBalance === "number") {
+    return { spend, balance: clampBalanceFloor(bestBalance) };
+  }
+  if (mode === "history") {
+    // Past-turn record: trust the observed balance (it is already post-turn).
+    return { spend, balance: clampBalanceFloor(bestBalance ?? firstBalance) };
+  }
+  // "final" — just-completed turn, record likely still pre-turn. Derive the
+  // post-turn balance as `firstBalance - spend`, clamped at 0.
+  const baseline = typeof firstBalance === "number" ? firstBalance : 0;
+  return { spend, balance: clampBalanceFloor(baseline - spend) };
+}
+
+export interface PollSpendBatchOptions {
+  /** Maximum number of concurrent polls (default 4). */
+  concurrency?: number;
+  /** Per-message wall-clock budget; once exceeded, the poll is aborted and
+   *  the best-known `spend`/`balance` (or computed fallback) is returned. */
+  perMessageTimeoutMs?: number;
+  /** Override the inter-retry delay (default 2000ms). */
+  retryDelayMs?: number;
+  /** Context passed through to each per-message poll. History backfill uses
+   *  "history" so a never-transitioned record is trusted as-is. */
+  mode?: "final" | "history";
+}
+
+/**
+ * Batch variant used by `chat.history` to backfill `spendResult` on existing
+ * transcript messages. Deduplicates the input, fans out polls with bounded
+ * concurrency, and aborts stragglers once each message's budget is exhausted.
+ * Never throws — failed/aborted messages resolve to `{spend: null, balance: null}`
+ * so the caller can always attach a stable envelope.
+ */
+export async function pollSpendResultsForResponseIds(
+  responseIds: readonly string[],
+  opts?: PollSpendBatchOptions,
+): Promise<Map<string, { spend: number | null; balance: number | null }>> {
+  const out = new Map<string, { spend: number | null; balance: number | null }>();
+  const unique = Array.from(new Set(responseIds.filter((id) => typeof id === "string" && id)));
+  if (unique.length === 0) {
+    return out;
+  }
+
+  const concurrency = Math.max(1, Math.floor(opts?.concurrency ?? 4));
+  const perMessageTimeoutMs = Math.max(100, Math.floor(opts?.perMessageTimeoutMs ?? 6_000));
+  const retryDelayMs = opts?.retryDelayMs;
+
+  let cursor = 0;
+  const total = unique.length;
+  const worker = async () => {
+    while (true) {
+      const idx = cursor++;
+      if (idx >= total) {
+        return;
+      }
+      const id = unique[idx]!;
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), perMessageTimeoutMs);
+      try {
+        const result = await pollJdSpendForChat(id, {
+          signal: controller.signal,
+          ...(retryDelayMs !== undefined ? { retryDelayMs } : {}),
+          ...(opts?.mode !== undefined ? { mode: opts.mode } : {}),
+        });
+        out.set(id, result);
+      } catch {
+        out.set(id, { spend: null, balance: null });
+      } finally {
+        clearTimeout(timer);
+      }
+    }
+  };
+
+  const workerCount = Math.min(concurrency, total);
+  await Promise.all(Array.from({ length: workerCount }, () => worker()));
+  return out;
 }
 
 async function runResponsesAgentCommand(params: {
@@ -784,6 +1152,8 @@ export async function handleOpenResponsesHttpRequest(
           },
           usage,
         });
+        const spendResult = await fetchAndPollJdSpend(responseId);
+        failed.spendResult = spendResult;
         rememberResponseSession();
         sendJson(res, 502, failed);
         return true;
@@ -832,6 +1202,8 @@ export async function handleOpenResponsesHttpRequest(
           output,
           usage,
         });
+        const spendResult = await fetchAndPollJdSpend(responseId);
+        response.spendResult = spendResult;
         rememberResponseSession();
         sendJson(res, 200, response);
         return true;
@@ -860,6 +1232,9 @@ export async function handleOpenResponsesHttpRequest(
         usage,
       });
 
+      const spendResult = await fetchAndPollJdSpend(responseId);
+      response.spendResult = spendResult;
+
       rememberResponseSession();
       sendJson(res, 200, response);
     } catch (err) {
@@ -875,6 +1250,8 @@ export async function handleOpenResponsesHttpRequest(
           output: [],
           error: { code: "invalid_request_error", message: "invalid tool configuration" },
         });
+        const spendResult = await fetchAndPollJdSpend(responseId);
+        response.spendResult = spendResult;
         sendJson(res, 400, response);
         return true;
       }
@@ -897,10 +1274,14 @@ export async function handleOpenResponsesHttpRequest(
             message: mapped.error.message,
           },
         });
+        const spendResult = await fetchAndPollJdSpend(responseId);
+        mappedResponse.spendResult = spendResult;
         rememberResponseSession();
         sendJson(res, mapped.status, mappedResponse);
         return true;
       }
+      const spendResult = await fetchAndPollJdSpend(responseId);
+      response.spendResult = spendResult;
       rememberResponseSession();
       sendJson(res, 500, response);
     } finally {

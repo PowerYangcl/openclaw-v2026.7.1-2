@@ -86,10 +86,10 @@ const jdSpendCache = new Map<string, JdSpendState>();
 
 /**
  * 退避轮询 fetch。用于"对话刚完成"场景：
- * 1. 先轮询直到 spend 非 null（上游数据 ready）；
+ * 1. 先轮询直到 spend 和 balance 均为有效数字（上游数据 ready）；
  *    轮询间隔：500ms → 1s → 2s → 4s，deadline 60s。
- * 2. 拿到首个有效数据后，额外再请求 5 次（每次间隔 500ms）校验 balance 是否变化，
- *    若变化则用最新值，5 次校验后停止。
+ * 2. 拿到首个有效数据后，额外再请求 10 次（每次间隔 500ms）校验 balance 是否变化；
+ *    任一字段无效则继续，spend 为 0 或 balance 变化时立即返回。
  */
 async function fetchJdSpendWithBackoff(
   completionId: string,
@@ -98,7 +98,7 @@ async function fetchJdSpendWithBackoff(
   const waits = [500, 1000, 2000, 4000];
   const deadline = Date.now() + 60_000;
 
-  // Phase 1: 轮询直到拿到非 null 的 spend（含 balance 可能仍为 null）
+  // Phase 1: 轮询直到 spend 和 balance 均为有效数字
   let firstResult: { spend: number; balance: number | null } | null = null;
   let phaseOneRetries = 0;
   while (Date.now() < deadline && firstResult === null) {
@@ -123,9 +123,12 @@ async function fetchJdSpendWithBackoff(
       const data = (await res.json()) as Record<string, unknown>;
       const rawSpend = data?.spend;
       const rawBalance = data?.balance;
-      if (typeof rawSpend === "number") {
-        const balance = typeof rawBalance === "number" ? rawBalance : null;
-        firstResult = { spend: rawSpend, balance };
+      if (typeof rawSpend === "number" && typeof rawBalance === "number") {
+        const result = { spend: rawSpend, balance: rawBalance };
+        if (rawSpend === 0) {
+          return result;
+        }
+        firstResult = result;
         break;
       }
     } catch {
@@ -139,10 +142,10 @@ async function fetchJdSpendWithBackoff(
 
   if (firstResult === null) return null;
 
-  // Phase 2: 额外最多再请求 5 次（每次间隔 500ms）
-  // 一旦 balance 发生变化（上游计算完成），立即停止并返回最新值
+  // Phase 2: 额外最多再请求 10 次（每次间隔 500ms）
+  // 无效响应继续等待；spend 为 0 或 balance 变化时立即返回
   let latest = firstResult;
-  for (let i = 0; i < 5; i++) {
+  for (let i = 0; i < 10; i++) {
     await new Promise<void>((r) => setTimeout(r, 500));
     let res: Response;
     try {
@@ -155,10 +158,10 @@ async function fetchJdSpendWithBackoff(
       const data = (await res.json()) as Record<string, unknown>;
       const rawSpend = data?.spend;
       const rawBalance = data?.balance;
-      if (typeof rawSpend === "number") {
-        const balance = typeof rawBalance === "number" ? rawBalance : null;
-        if (balance !== latest.balance) {
-          return { spend: rawSpend, balance };
+      if (typeof rawSpend === "number" && typeof rawBalance === "number") {
+        const result = { spend: rawSpend, balance: rawBalance };
+        if (rawSpend === 0 || rawBalance !== latest.balance) {
+          return result;
         }
       }
     } catch {
@@ -183,7 +186,6 @@ function triggerJdSpendFetch(completionId: string, onRequestUpdate?: () => void)
     onRequestUpdate?.();
   });
 }
-
 const pairingQrExpiryRefreshTimers = new Map<string, PairingQrExpiryRefreshTimer>();
 const ASSISTANT_ATTACHMENT_UNAVAILABLE_RETRY_MS = 5_000;
 const ASSISTANT_ATTACHMENT_MEDIA_TICKET_REFRESH_SKEW_MS = 30_000;

@@ -1,6 +1,7 @@
 packages:
   - .
-  - ui
+  - ui      # legacy Lit UI; kept during migration (decision 1: i18n not migrated)
+  - web     # replacement Vue 3 + Element Plus UI; scaffolded, content populated by follow-up PRs
   - packages/*
   - extensions/*
   - examples/*

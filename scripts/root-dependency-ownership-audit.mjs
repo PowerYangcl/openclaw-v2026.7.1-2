@@ -7,7 +7,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { packageNameFromSpecifier } from "./lib/plugin-package-dependencies.mjs";
 
-const DEFAULT_SCAN_ROOTS = ["src", "extensions", "packages", "ui", "scripts", "test"];
+const DEFAULT_SCAN_ROOTS = ["src", "extensions", "packages", "ui", "web", "scripts", "test"];
 const SCANNED_EXTENSIONS = new Set([".cjs", ".cts", ".js", ".jsx", ".mjs", ".mts", ".ts", ".tsx"]);
 const IMPORT_PATTERNS = [
   /\bfrom\s*["']([^"']+)["']/g,
@@ -203,7 +203,12 @@ function collectInternalizedBundledExtensionRuntimeDependencies(repoRoot, rootPa
 }
 
 function sectionSetContainsCore(sectionSet) {
-  return sectionSet.has("src") || sectionSet.has("packages") || sectionSet.has("ui");
+  return (
+    sectionSet.has("src") ||
+    sectionSet.has("packages") ||
+    sectionSet.has("ui") ||
+    sectionSet.has("web")
+  );
 }
 
 function sectionSetIsSubsetOf(sectionSet, allowed) {
