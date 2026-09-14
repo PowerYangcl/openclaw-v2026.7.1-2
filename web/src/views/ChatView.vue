@@ -14,7 +14,13 @@ import { useGatewayStore } from "@/stores/gateway";
 import { useSettingsStore } from "@/stores/settings";
 import { useAgentsStore } from "@/stores/agents";
 import { formatTime, formatDateTimeMinute } from "@/utils/format";
-import { areUiSessionKeysEquivalent } from "@/utils/sessionKey";
+import { sessionKeysMatch } from "@/utils/sessionListSelection";
+import {
+  contextPercentClassOf,
+  contextPercentOf,
+  contextRemainingTokensOf,
+  contextUsedTokensOf,
+} from "@/utils/contextUsage";
 import { resolveLocalUserName } from "@/utils/avatar";
 import { copyToClipboard } from "@/utils/clipboard";
 import type { SessionsListResult } from "@/api/types";
@@ -49,6 +55,11 @@ type TokenUsage = {
   output: number;
   cacheRead: number;
   cacheWrite: number;
+  /**
+   * 该轮总 token 数（部分代理只报 total 拆分不出 input/output 时用作「prompt token」估算回退源）。
+   * 与上游 `normalizeUsage` 的 `total` 字段对齐；持久化记录里多数会带 `{ input, output, totalTokens }` 三个字段。
+   */
+  totalTokens?: number;
 };
 
 type ChatMessage = {
@@ -433,8 +444,18 @@ function extractUsage(raw: unknown): TokenUsage | undefined {
       "cache_creation_input_tokens",
       "cacheWriteTokens",
     ]),
+    // 部分代理只报 total（如 `{ totalTokens: 12000 }`），保留下来供 contextUsedTokensOf 兜底用。
+    totalTokens: readNumber(usage, ["totalTokens", "total_tokens", "total"]),
   };
-  if (direct.input || direct.output || direct.cacheRead || direct.cacheWrite) return direct;
+  if (
+    direct.input ||
+    direct.output ||
+    direct.cacheRead ||
+    direct.cacheWrite ||
+    (typeof direct.totalTokens === "number" && direct.totalTokens > 0)
+  ) {
+    return direct;
+  }
   // 部分实现把 usage 嵌在 message.usage 里
   const nested = usage.usage ?? usage.tokens;
   if (nested && typeof nested === "object" && nested !== usage) {
@@ -444,11 +465,17 @@ function extractUsage(raw: unknown): TokenUsage | undefined {
   return undefined;
 }
 
-/** 单次请求的「提示词侧」token 数 = 输入 + 缓存读 + 缓存写（与上游一致）。 */
-function promptTokensOf(usage: TokenUsage | undefined): number {
-  if (!usage) return 0;
-  return usage.input + usage.cacheRead + usage.cacheWrite;
-}
+/*
+ * 上下文用量与占用百分比统一走 `@/utils/contextUsage`（纯函数，有单测）：
+ *   已用   = `input + cacheRead + cacheWrite`（**不含 output**，与旧版 UI / 上游
+ *            `normalizeUsage` 一致；含 output 会让「已用」数值对不上旧版显示）
+ *   剩余   = `max(0, contextWindow − 已用)`
+ *   百分比 = `round(已用 / contextWindow * 100)`，上限 100；无数据/无窗口 → null
+ * 弹层里数字一律 `toLocaleString("zh-CN")` 全量展示（不压缩成 k/M）。
+ *
+ * 旧版实测可反推验证（窗口 1,048,576 / input 917 / cacheRead 26,624 / output 92）：
+ *   已用 27,541 · 剩余 1,021,035 · 占用 3%  —— 三者完全吻合。
+ */
 
 /**
  * 消息的**跨刷新稳定身份**。
@@ -582,6 +609,25 @@ function resolvedSessionKey(): string {
 }
 
 /**
+ * 事件隔离：这条 `chat` / `agent` 事件属于当前会话吗？
+ *
+ * ⚠️ 必须用 `sessionKeysMatch`（先补全成规范形态再比），**不能**用
+ * `areUiSessionKeysEquivalent`：后者只把裸 `main` 补成 `agent:main:main`，
+ * 补不出 `id-<hash8>` 的 agent 前缀。
+ *
+ * 背景：本视图持有的 `sessionKey` 可能是入口 token 派生的**裸 key**（`id-<hash8>`），
+ * 而网关广播事件里的 `sessionKey` 一律是**带 agent 前缀的规范 key**（`agent:main:id-<hash8>`）。
+ * 用错比较函数 = 所有流式事件都被当成「别的会话」丢掉，包括 `chat` 的 `state:"error"`，
+ * 于是 `sending` 永远停在 true，UI 卡在三点「思考中」，正文 / 思考 / 错误全都不显示。
+ *
+ * 事件没带 sessionKey 时返回 true（不过滤），保持原有「不猜、放行」的策略。
+ */
+function isEventForCurrentSession(sessionKeyValue: unknown): boolean {
+  if (typeof sessionKeyValue !== "string" || !sessionKeyValue.trim()) return true;
+  return sessionKeysMatch(sessionKeyValue, sessionKey.value, agents.selectedAgentId);
+}
+
+/**
  * 加载可用模型列表。优先探测 `models.list` RPC（如果服务端实现了的话），
  * 然后从当前会话历史消息里聚合作补充数据来源。
  *
@@ -698,7 +744,7 @@ async function loadContextWindow(): Promise<void> {
     });
     const key = resolvedSessionKey();
     const current = (res?.sessions ?? []).find((row) =>
-      areUiSessionKeysEquivalent(row.key, key),
+      sessionKeysMatch(row.key, key, agents.selectedAgentId),
     );
     next = positiveNumber(current?.contextTokens) ?? positiveNumber(res?.defaults?.contextTokens);
   } catch {
@@ -711,30 +757,6 @@ async function loadContextWindow(): Promise<void> {
     next = positiveNumber(match?.contextWindow);
   }
   contextWindow.value = next;
-}
-
-/**
- * 单条消息的上下文占用百分比（0-100）。
- *
- * 移植自上游 `extractGroupMeta`：把该轮「输入 + 缓存读 + 缓存写」当作提示词规模，
- * 除以上下文窗口上限并四舍五入，截断到 100%。
- * 无 usage 或未知窗口时返回 null（宁可不显示，也不显示假的 0%）。
- */
-function contextPercentOf(msg: ChatMessage): number | null {
-  const window = contextWindow.value;
-  if (!window) return null;
-  const prompt = promptTokensOf(msg.usage);
-  if (prompt <= 0) return null;
-  return Math.min(Math.round((prompt / window) * 100), 100);
-}
-
-/** 占用率配色：>=90% 危险、>=75% 警告（阈值与上游一致）。 */
-function contextPercentClass(msg: ChatMessage): string {
-  const pct = contextPercentOf(msg);
-  if (pct === null) return "";
-  if (pct >= 90) return "ctx-danger";
-  if (pct >= 75) return "ctx-warn";
-  return "";
 }
 
 /** 一条消息可复制的内容：正文（不含思考过程），与上游 resolveNormalizedMessageMarkdown 一致。 */
@@ -772,20 +794,20 @@ function hasMessageMeta(msg: ChatMessage): boolean {
  */
 const latestContextMsg = computed<ChatMessage | null>(() => {
   for (let i = messages.value.length - 1; i >= 0; i -= 1) {
-    if (contextPercentOf(messages.value[i]) !== null) return messages.value[i];
+    if (contextPercentOf(messages.value[i].usage, contextWindow.value) !== null) {
+      return messages.value[i];
+    }
   }
   return null;
 });
 
-const latestContextPercent = computed<number | null>(() => {
-  const m = latestContextMsg.value;
-  return m ? contextPercentOf(m) : null;
-});
+const latestContextPercent = computed<number | null>(() =>
+  contextPercentOf(latestContextMsg.value?.usage, contextWindow.value),
+);
 
-const latestContextClass = computed<string>(() => {
-  const m = latestContextMsg.value;
-  return m ? contextPercentClass(m) : "";
-});
+const latestContextClass = computed<string>(() =>
+  contextPercentClassOf(latestContextPercent.value),
+);
 
 // ── 复制为 Markdown（移植自上游 components/copy-button.ts） ──
 
@@ -1531,8 +1553,8 @@ function holdStreamingBubbleForSteer(): void {
   void scrollToBottom();
 }
 
-function finalizeStreaming(): void {
-  commitStreamingMessage();
+function finalizeStreaming(skipCommit = false): void {
+  if (!skipCommit) commitStreamingMessage();
   streamingText.value = "";
   streamingThinking.value = "";
   streamingSpend.value = null;
@@ -1582,9 +1604,7 @@ function handleEvent(evt: { event: string; payload?: unknown }): void {
   if (isThinkingAgentEvent(evt)) {
     const payload = evt.payload;
     // 会话隔离：切到别的会话后，旧会话的思考增量不应再落进当前视图。
-    if (typeof payload.sessionKey === "string" && payload.sessionKey.trim()) {
-      if (!areUiSessionKeysEquivalent(payload.sessionKey, sessionKey.value)) return;
-    }
+    if (!isEventForCurrentSession(payload.sessionKey)) return;
     // 仅在发送中累积。idle / 已完成 / 已 abort 的迟到帧直接丢弃。
     // 注意：引导打断旧 run 时会刻意保持 sending=true，所以被引导那一轮的思考能接上同一个气泡。
     if (!sending.value) return;
@@ -1612,9 +1632,7 @@ function handleEvent(evt: { event: string; payload?: unknown }): void {
   if (!payload) return;
 
   // 会话隔离：切到别的会话后，旧会话的流式帧不应再落进当前视图。
-  if (typeof payload.sessionKey === "string" && payload.sessionKey.trim()) {
-    if (!areUiSessionKeysEquivalent(payload.sessionKey, sessionKey.value)) return;
-  }
+  if (!isEventForCurrentSession(payload.sessionKey)) return;
 
   switch (payload.state) {
     case "delta": {
@@ -1634,6 +1652,12 @@ function handleEvent(evt: { event: string; payload?: unknown }): void {
       // 当服务端 final 帧未带 provider/model（很多代理实现就是这样），
       // 用本地实际生效的模型回填，确保积分行的「生成模型」始终可见。
       const fallbackParts = effectiveModelParts.value;
+      // final 帧可能没带 message（异常兜底路径），但前端已经累积了流式正文 / 思考。
+      // 这种情况下走「落地流式内容」分支，避免用户看到「思考中」永远不消失。
+      const streamedText = streamingText.value;
+      const streamedThinking = streamingThinking.value;
+      const hasStreamedContent =
+        streamedText.trim().length > 0 || streamedThinking.trim().length > 0;
       if (normalized && (normalized.text || normalized.thinking)) {
         // 如果 final 携带 spendResult，合并到本次推送
         if (normalized.spendResult) streamingSpend.value = normalized.spendResult;
@@ -1650,15 +1674,28 @@ function handleEvent(evt: { event: string; payload?: unknown }): void {
             ...normalized,
             provider: normalized.provider ?? fallbackParts?.provider,
             model: normalized.model ?? fallbackParts?.model,
-            text: normalized.text || streamingText.value,
-            thinking: normalized.thinking || streamingThinking.value || undefined,
+            text: normalized.text || streamedText,
+            thinking: normalized.thinking || streamedThinking || undefined,
             spendResult: normalized.spendResult ?? streamingSpend.value ?? undefined,
           });
           // final 推送可能带 model/provider，刷新选择器
           void loadModelList();
         }
+      } else if (hasStreamedContent) {
+        // final 帧无效（缺 message），但前端已经流到了文本 / 思考 —— 必须把已产出
+        // 的内容落进历史再清空流式态，否则用户视角就是「思考中」永远卡住。
+        if (awaitingSteeredRun.value && steeredMessages.value.length > 0) {
+          promoteNextSteeredMessage();
+          awaitingSteeredRun.value = false;
+        }
+        commitStreamingMessage();
+        // 落库后必须走 finalizeStreaming 清掉 sending/streaming 态；传入 skipCommit=true
+        // 避免 commitStreamingMessage 被二次调用导致重复消息。
+        finalizeStreaming(true);
+        scheduleNextPendingTask();
+        break;
       } else {
-        // 空 final = 网关用终止帧收掉被打断的 run。
+        // 真·空 final = 网关用终止帧收掉被打断的 run
         if (steeredMessages.value.length === 0) {
           finalizeStreaming();
           return;
@@ -2044,11 +2081,15 @@ function formatCredits(value: number | null | undefined): string {
               <span>已引导 {{ steerCount }} 次</span>
             </div>
 
-            <!-- 思考过程：流式阶段强制展开；final/abort/error 后被 messages 列表的助手消息替换（那里走默认折叠态） -->
+            <!-- 思考过程：流式阶段强制展开；final/abort/error 后被 messages 列表的助手消息替换（那里走默认折叠态）。
+                 ⚠️ 整个气泡只允许出现**一个**思考指示，文案统一为「思考中」：
+                 此前这里写「正在思考」、下面兜底又写一个三点「思考中」，同一个气泡里
+                 出现两个思考标签。现在两种状态共用同一套「三点 + 思考中」头，只是
+                 「有思考内容时多一段正文」的区别。 -->
             <div v-if="streamingThinking" class="thinking-fold">
               <div class="thinking-fold-head open">
                 <span class="thinking-fold-icon open">▸</span>
-                <span>正在思考</span>
+                <span class="thinking"><i class="dot" /><i class="dot" /><i class="dot" /> 思考中</span>
               </div>
               <div class="thinking-fold-body thinking-fold-body-live">
                 {{ streamingThinking }}<span class="caret" />
@@ -2205,12 +2246,12 @@ function formatCredits(value: number | null | undefined): string {
             <!--
               上下文占用：迁自消息底部（之前每条消息都显示一次，重复且占地方）。
               现在持续显示「最后一条带 usage 的消息」的占用，单点更易观察。
-              hover 弹 el-popover 展示明细（窗口/已用/缓存/输出/剩余）。
+              hover 弹 el-popover 展示明细（参考 workbuddy 简洁态：百分比 + 已使用/总量）。
             -->
             <el-popover
               v-if="latestContextPercent !== null"
               placement="top-start"
-              :width="280"
+              :width="220"
               :show-arrow="false"
               trigger="hover"
               :hide-after="0"
@@ -2230,13 +2271,15 @@ function formatCredits(value: number | null | undefined): string {
                 </span>
               </template>
               <div v-if="latestContextMsg" class="ctx-detail">
+                <!-- 与旧版（用户参照的截图）逐行对齐：上下文窗口 / 本轮输入 / 缓存命中 /
+                     缓存写入 / 本轮输出 / 已用·剩余。数字一律 toLocaleString("zh-CN") 全量展示。 -->
                 <div class="ctx-detail__row ctx-detail__row--lead">
                   <span>上下文窗口</span>
                   <span class="ctx-detail__num">{{ (contextWindow ?? 0).toLocaleString("zh-CN") }} tokens</span>
                 </div>
                 <div v-if="latestContextMsg.usage" class="ctx-detail__row">
                   <span>本轮输入</span>
-                  <span class="ctx-detail__num">{{ (latestContextMsg.usage.input).toLocaleString("zh-CN") }} tokens</span>
+                  <span class="ctx-detail__num">{{ latestContextMsg.usage.input.toLocaleString("zh-CN") }} tokens</span>
                 </div>
                 <div v-if="latestContextMsg.usage?.cacheRead" class="ctx-detail__row">
                   <span>缓存命中</span>
@@ -2250,12 +2293,19 @@ function formatCredits(value: number | null | undefined): string {
                   <span>本轮输出</span>
                   <span class="ctx-detail__num">{{ latestContextMsg.usage.output.toLocaleString("zh-CN") }} tokens</span>
                 </div>
+                <!-- 上下文占用百分比：**独立成行**。
+                     ⚠️ 曾经它被塞进上面 `v-if="usage?.output"` 那个 div 里 —— 代理不上报
+                     output 时整行跟着消失，只有 output 非 0 才看得到占用百分比。别再放回去。 -->
+                <div class="ctx-detail__row">
+                  <span>上下文占用</span>
+                  <span class="ctx-detail__num">{{ latestContextPercent }}%</span>
+                </div>
                 <div class="ctx-detail__row ctx-detail__row--sum">
                   <span>已用 / 剩余</span>
                   <span class="ctx-detail__num">
-                    {{ promptTokensOf(latestContextMsg.usage).toLocaleString("zh-CN") }}
+                    {{ contextUsedTokensOf(latestContextMsg.usage).toLocaleString("zh-CN") }}
                     /
-                    {{ Math.max(0, (contextWindow ?? 0) - promptTokensOf(latestContextMsg.usage)).toLocaleString("zh-CN") }} tokens
+                    {{ contextRemainingTokensOf(latestContextMsg.usage, contextWindow).toLocaleString("zh-CN") }} tokens
                   </span>
                 </div>
                 <div
@@ -2273,7 +2323,7 @@ function formatCredits(value: number | null | undefined): string {
               class="credits-ctx credits-ctx--idle"
               :title="`上下文窗口 ${contextWindow.toLocaleString('zh-CN')} tokens · 暂无用量数据`"
             >
-              <span class="ctx-text">0% ctx</span>
+              <span class="ctx-text">— ctx</span>
             </span>
             <ModelSelector
               v-model="selectedModelRef"
@@ -2599,7 +2649,7 @@ html.dark .credits-alert :deep(.el-alert__title) {
 .bubble-actions {
   position: absolute;
   right: 0;
-  bottom: -32px;
+  bottom: -24px;
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -2755,6 +2805,13 @@ html.dark .credits-alert :deep(.el-alert__title) {
 .thinking-fold-icon.open {
   transform: rotate(90deg);
   color: var(--wb-accent);
+}
+
+/* 折叠头里的「思考中」三点：与独立兜底态共用 .thinking，字号/间距跟随折叠头 */
+.thinking-fold-head .thinking {
+  padding: 0;
+  font-size: 12px;
+  gap: 5px;
 }
 
 .thinking-fold-body {

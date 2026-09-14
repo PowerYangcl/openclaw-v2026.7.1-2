@@ -471,5 +471,37 @@ console.log("\n[10] pickRepresentativeSession：合成行出口（规则④⑤�
   );
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// [11] 事件隔离：网关广播帧能不能被认成「当前会话」。
+//
+// 真实事故（本机 CDP 实测）：入口 `#token=` 派生的会话 key 是裸 `id-225a9df9`，
+// 而网关下发的事件里 `sessionKey` 一律是规范形态 `agent:main:id-225a9df9`。
+// `handleEvent` 当时用 `areUiSessionKeysEquivalent` 比较 —— 它只把裸 `main` 补成
+// `agent:main:main`，**补不出 agent 前缀** → 恒为 false → 所有 `chat` / `agent`
+// 事件（含 `state:"error"`）全被当成「别的会话」丢弃 → `sending` 永远 true →
+// UI 永久卡在三点「思考中」，正文 / 思考 / 错误全都不显示。
+//
+// 这条断言锁住：裸 key ↔ 规范 key 必须判为同一会话。
+console.log("\n[11] 事件隔离：裸 key ↔ 规范 key 必须判为同一会话");
+{
+  ok(
+    "裸 id-<hash8> ↔ agent:main:id-<hash8> → 同一会话（事故用例）",
+    sessionKeysMatch("id-225a9df9", "agent:main:id-225a9df9", "main") === true,
+  );
+  ok("反向也成立", sessionKeysMatch("agent:main:id-225a9df9", "id-225a9df9", "main") === true);
+  ok("裸 main ↔ agent:main:main → 同一会话", sessionKeysMatch("main", "agent:main:main", "main"));
+  ok("大小写不敏感", sessionKeysMatch("ID-225A9DF9", "agent:MAIN:id-225a9df9", "main"));
+  ok(
+    "别的 agent 的同名裸 key 不算同一会话",
+    !sessionKeysMatch("id-225a9df9", "agent:cet4:id-225a9df9", "main"),
+  );
+  ok("不同会话仍不等价", !sessionKeysMatch("agent:main:a", "agent:main:b", "main"));
+  ok(
+    "空值不比出「同一会话」（避免放行一切）",
+    !sessionKeysMatch("", "agent:main:main", "main") &&
+      !sessionKeysMatch("agent:main:main", null, "main"),
+  );
+}
+
 console.log(`\n==== ${pass} passed, ${fail} failed ====`);
 process.exit(fail === 0 ? 0 : 1);

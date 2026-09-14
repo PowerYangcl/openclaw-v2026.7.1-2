@@ -11,7 +11,7 @@
     "build:pre": "vue-tsc --noEmit && vite build --mode pre",
     "typecheck": "vue-tsc --noEmit",
     "preview": "vite preview",
-    "test:unit": "npm run test:unit:session && npm run test:unit:media && npm run test:unit:sidebar",
+    "test:unit": "npm run test:unit:session && npm run test:unit:media && npm run test:unit:sidebar && npm run test:unit:ctx",
     "test:unit:session": "esbuild tests/sessionListSelection.test.ts --bundle --format=esm --platform=node --tsconfig=tsconfig.json --outfile=node_modules/.cache/sessionListSelection.test.mjs && node node_modules/.cache/sessionListSelection.test.mjs",
     "test:unit:media": "esbuild tests/mediaAndAvatarUrls.test.ts --bundle --format=esm --platform=node --tsconfig=tsconfig.json --outfile=node_modules/.cache/mediaAndAvatarUrls.test.mjs && node node_modules/.cache/mediaAndAvatarUrls.test.mjs",
     "test:unit:sidebar": "esbuild tests/sidebarSnapshot.test.ts --bundle --format=esm --platform=node --tsconfig=tsconfig.json --outfile=node_modules/.cache/sidebarSnapshot.test.mjs && node node_modules/.cache/sidebarSnapshot.test.mjs",
@@ -19,7 +19,8 @@
     "test:e2e:fallback": "node tests/smoke/avatar-fallback.e2e.mjs",
     "test:e2e:menu": "node tests/smoke/first-paint-menu.e2e.mjs",
     "test:e2e:boot": "node tests/smoke/gateway-web-boot.mjs",
-    "test": "npm run test:unit && npm run test:e2e"
+    "test": "npm run test:unit && npm run test:e2e",
+    "test:unit:ctx": "esbuild tests/contextUsage.test.ts --bundle --format=esm --platform=node --tsconfig=tsconfig.json --outfile=node_modules/.cache/contextUsage.test.mjs && node node_modules/.cache/contextUsage.test.mjs"
   },
   "dependencies": {
     "@element-plus/icons-vue": "^2.3.1",
@@ -51,6 +52,8 @@
     "vue-tsc": "^2.2.0"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["esbuild"]
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
   }
 }

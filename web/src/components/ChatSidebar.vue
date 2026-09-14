@@ -336,25 +336,26 @@ watch(
                 <span class="agent-row__desc">默认智能体</span>
               </el-tooltip>
             </span>
-            <!-- 代表会话的状态：运行中转圈 > 未读点 > 最近活跃时间 -->
-            <span
-              v-if="agentSessionRow(agent.id)"
-              class="agent-row__aside"
-            >
-              <span
-                v-if="agentSessionRow(agent.id)?.hasActiveRun"
-                class="agent-row__run"
-                aria-label="运行中"
-              />
-              <template v-else>
+            <!-- 代表会话的状态：运行中转圈 > 未读点 > 最近活跃时间。
+                 aside 整段始终渲染（不再整体 v-if）：初始化 / RPC 没回来时也保留占位，
+                 避免 sessions 回来后整行布局抖动；空状态仅占 min-width。 -->
+            <span class="agent-row__aside">
+              <template v-if="agentSessionRow(agent.id)">
                 <span
-                  v-if="agentSessionRow(agent.id)?.unread"
-                  class="agent-row__unread"
-                  aria-label="未读"
+                  v-if="agentSessionRow(agent.id)?.hasActiveRun"
+                  class="agent-row__run"
+                  aria-label="运行中"
                 />
-                <span v-if="agentTimeLabel(agent.id)" class="agent-row__meta">
-                  {{ agentTimeLabel(agent.id) }}
-                </span>
+                <template v-else>
+                  <span
+                    v-if="agentSessionRow(agent.id)?.unread"
+                    class="agent-row__unread"
+                    aria-label="未读"
+                  />
+                  <span v-if="agentTimeLabel(agent.id)" class="agent-row__meta">
+                    {{ agentTimeLabel(agent.id) }}
+                  </span>
+                </template>
               </template>
             </span>
           </el-button>
@@ -618,11 +619,18 @@ watch(
 .agent-row__aside {
   display: inline-flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 5px;
   flex-shrink: 0;
   /* 时间戳 / 状态点固定靠右对齐 —— margin-left:auto 在 flex 容器里把这一栏
      推到与「标题+描述」相对的行末，与父容器的 gap 互不影响。 */
   margin-left: auto;
+  /* 始终占位（min-width）：
+     初始化时 `sessions.list` 还没回来 → `agentSessionRow()` 为 null →
+     如果没有这段占位，__aside 整段会因 v-if 不渲染，
+     等 RPC 回来时整行右侧突然出现时间戳 → 整行布局抖动。
+     40px ≈ "2天" / "12分钟前" 这种短时间戳的渲染宽度。 */
+  min-width: 40px;
 }
 
 /* el-button 的 slot wrapper span 是子组件内部生成的，没有本组件的 data-v，
