@@ -1,39 +1,20 @@
 <script setup lang="ts">
 /**
- * 主布局：左侧导航 + 顶部状态条 + 内容区。
+ * 主布局：顶部连接状态提示 + 内容区。
  *
- * 视觉对齐 WorkBuddy：
- * - 侧边栏 220px，去掉 Element Plus 默认蓝底
- * - 顶部状态条只保留最小必要的连接状态指示
+ * 连接错误不再原样抛出网关的错误码（`AUTH_TOKEN_MISMATCH` 这类给机器看的字符串），
+ * 而是经 `utils/connectError.ts` 转成「人能看懂 + 知道下一步干什么」的文案。
  */
 import { computed } from "vue";
-import { useRoute, useRouter } from "vue-router";
+import { useRouter } from "vue-router";
 import { ElMessageBox } from "element-plus";
-import { navRoutes } from "@/router";
 import { useGatewayStore } from "@/stores/gateway";
-import { useSettingsStore } from "@/stores/settings";
+import { formatConnectError } from "@/utils/connectError";
 
-const route = useRoute();
 const router = useRouter();
 const gateway = useGatewayStore();
-const settings = useSettingsStore();
 
-const activePath = computed(() => route.path);
-
-const statusKind = computed(() => {
-  switch (gateway.phase) {
-    case "connected":
-      return "ok";
-    case "connecting":
-    case "reconnecting":
-      return "busy";
-    case "failed":
-      return "err";
-    default:
-      return "off";
-  }
-});
-
+/** 当前连接状态的可读文案（拼接在错误标题前，告诉用户「现在是什么状态」）。 */
 const statusText = computed(() => {
   switch (gateway.phase) {
     case "connected":
@@ -49,10 +30,8 @@ const statusText = computed(() => {
   }
 });
 
-function toggleTheme(): void {
-  settings.themeMode = settings.isDark() ? "light" : "dark";
-  settings.applyTheme();
-}
+/** 结构化错误 → 可读标题 + 可操作步骤。 */
+const connectAdvice = computed(() => formatConnectError(gateway.lastErrorInfo));
 
 async function handleDisconnect(): Promise<void> {
   try {
@@ -76,7 +55,7 @@ async function handleDisconnect(): Promise<void> {
 <template>
   <el-container class="layout">
     <!-- 左侧导航 -->
-    <el-aside width="220px" class="layout-aside">
+    <!-- <el-aside width="220px" class="layout-aside">
       <div class="brand">
         <span class="brand-mark">AC</span>
         <div class="brand-info">
@@ -96,11 +75,11 @@ async function handleDisconnect(): Promise<void> {
         <span class="dot" :class="`dot-${statusKind}`" />
         <span class="aside-footer-text">{{ statusText }}</span>
       </div>
-    </el-aside>
+    </el-aside> -->
 
     <!-- 右侧主区 -->
     <el-container>
-      <el-header height="52px" class="layout-header">
+      <!-- <el-header height="52px" class="layout-header">
         <div class="header-left">
           <span class="status-dot" :class="`dot-${statusKind}`" />
           <span class="status-text">{{ statusText }}</span>
@@ -115,18 +94,26 @@ async function handleDisconnect(): Promise<void> {
           </el-tooltip>
           <el-button text type="danger" @click="handleDisconnect">断开</el-button>
         </div>
-      </el-header>
+      </el-header> -->
 
       <el-main class="layout-main">
         <el-alert
           v-if="gateway.lastError && gateway.phase !== 'connected'"
-          :title="gateway.lastError"
+          class="page-container connect-error"
           type="error"
-          :closable="false"
           show-icon
-          class="page-container"
-          style="margin-bottom: 12px"
-        />
+          :closable="false"
+          :title="`${statusText}：${connectAdvice.title}`"
+        >
+          <div class="connect-error__body">
+            <span v-if="connectAdvice.detail" class="connect-error__detail">{{
+              connectAdvice.detail
+            }}</span>
+            <el-button size="small" text type="danger" @click="handleDisconnect">
+              断开连接
+            </el-button>
+          </div>
+        </el-alert>
         <router-view />
       </el-main>
     </el-container>
@@ -359,5 +346,23 @@ async function handleDisconnect(): Promise<void> {
   padding: 0;
   background: var(--wb-bg-content);
   overflow-y: auto;
+}
+
+
+.connect-error {
+  margin-bottom: 12px;
+}
+
+.connect-error__body {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.connect-error__detail {
+  color: var(--el-text-color-regular, #606266);
+  font-size: 13px;
+  line-height: 1.6;
 }
 </style>

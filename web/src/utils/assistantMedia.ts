@@ -13,9 +13,13 @@
  * - **响应不带 CORS 头、OPTIONS 直接 404**：跨源 `fetch` 必失败，所以
  *   ①可用性探测失败时要能「乐观继续」；②媒体本身必须靠 `<audio src>` 直出。
  *
- * ## 为什么从「消息文本」里找 mp3
- * 本项目的 `chat.history` 记录里 `content` 只有 `{type:"text"}`（实测字段集合里没有
- * attachment/media），音频是 agent **写在正文里的文件路径**，所以只能在文本层识别。
+ * ## 为什么音频从「消息文本」里找 mp3
+ * 网关 `chat.history` 的 `content` 实测只有 `{type:"text"}`，音频是 agent **写在正文里的
+ * 文件路径**，所以只能在文本层识别。
+ *
+ * ⚠️ 但**附件**不是这么回事：user 消息**顶层**带 `MediaPath`/`MediaPaths`/`MediaType`/
+ * `MediaTypes`（实测确认）。曾经把「content 里没有」写成「没有 media 字段」，
+ * 害得历史附件一直不显示 —— 附件解析见 `utils/transcriptMedia.ts`，别再把两者混为一谈。
  */
 
 /** 网关托管的媒体路由前缀。 */

@@ -194,6 +194,9 @@ function formatContext(tokens?: number): string {
   if (tokens >= 1000) return `${Math.round(tokens / 1000)}k`;
   return `${tokens}`;
 }
+
+/** 供父组件（如 `/model` 斜杠命令）直接打开面板。 */
+defineExpose({ openPanel: () => { open.value = true; } });
 </script>
 
 <template>

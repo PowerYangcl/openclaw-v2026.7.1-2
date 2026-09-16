@@ -10,6 +10,7 @@ import {
   GatewayBrowserClient,
   GatewayRequestError,
   deriveDefaultGatewayUrl,
+  type GatewayErrorInfo,
   type GatewayEventFrame,
   type GatewayHelloOk,
 } from "@/api/gateway";
@@ -17,6 +18,14 @@ import { ConnectErrorDetailCodes, readConnectErrorDetailCode } from "@/api/proto
 import { useSettingsStore } from "@/stores/settings";
 
 export type ConnectionPhase = "idle" | "connecting" | "connected" | "reconnecting" | "failed";
+
+/** 一条连接 / 请求耗时记录（诊断用）。 */
+export type GatewayTimingEntry = {
+  at: number;
+  label: string;
+  ms: number;
+  ok: boolean;
+};
 
 export const useGatewayStore = defineStore("gateway", () => {
   const url = ref<string>(deriveDefaultGatewayUrl().effectiveUrl);
@@ -27,7 +36,19 @@ export const useGatewayStore = defineStore("gateway", () => {
   const hello = shallowRef<GatewayHelloOk | null>(null);
   const lastError = ref<string | null>(null);
   const lastErrorCode = ref<string | null>(null);
+  /** 结构化的最后一次错误（含 code / details / retryAfterMs），供 `formatConnectError` 出可读文案。 */
+  const lastErrorInfo = ref<GatewayErrorInfo | null>(null);
   const everConnected = ref(false);
+
+  // -------------------------------------------------------------------------
+  // 连接 / 请求计时（诊断用，见 DebugView 的「网关诊断」面板）
+  // -------------------------------------------------------------------------
+  const MAX_TIMING_ENTRIES = 50;
+  const timings = ref<GatewayTimingEntry[]>([]);
+  function pushTiming(entry: GatewayTimingEntry): void {
+    timings.value.unshift(entry);
+    if (timings.value.length > MAX_TIMING_ENTRIES) timings.value.pop();
+  }
 
   /** 客户端实例非响应式，避免 Vue 深度代理 WebSocket。 */
   let client: GatewayBrowserClient | null = null;
@@ -46,9 +67,14 @@ export const useGatewayStore = defineStore("gateway", () => {
     set: (value: string) => useSettingsStore().setSessionKey(value),
   });
 
-  function setError(message: string | null, code: string | null = null): void {
+  function setError(
+    message: string | null,
+    code: string | null = null,
+    info: GatewayErrorInfo | null = null,
+  ): void {
     lastError.value = message;
     lastErrorCode.value = code;
+    lastErrorInfo.value = info;
   }
 
   function connect(overrides: { url?: string; token?: string; password?: string } = {}): void {
@@ -95,7 +121,7 @@ export const useGatewayStore = defineStore("gateway", () => {
           // 这条红条属于噪音，且会误导用户去改 Control UI 设置。
           // 连续多次仍失败（真的连不上）时才在第 4 次暴露错误，避免用户干等。
           if (consecutiveRetries > 3) {
-            setError(error?.message ?? `连接已断开 (${code})`, error?.code ?? null);
+            setError(error?.message ?? `连接已断开 (${code})`, error?.code ?? null, error ?? null);
           } else {
             setError(null);
           }
@@ -103,7 +129,11 @@ export const useGatewayStore = defineStore("gateway", () => {
         }
         consecutiveRetries = 0;
         phase.value = "failed";
-        setError(error?.message ?? `连接失败 (${code}): ${reason}`, error?.code ?? null);
+        setError(
+          error?.message ?? `连接失败 (${code}): ${reason}`,
+          error?.code ?? null,
+          error ?? null,
+        );
         // 清理过期的 token，避免下次自动连接仍用同一个坏 token 死循环
         if (
           detailCode === ConnectErrorDetailCodes.AUTH_TOKEN_MISMATCH ||
@@ -121,6 +151,12 @@ export const useGatewayStore = defineStore("gateway", () => {
       },
       onEvent: (evt) => {
         for (const listener of eventListeners) listener(evt);
+      },
+      onConnectTiming: ({ ms, ok }) => {
+        pushTiming({ at: Date.now(), label: "connect", ms, ok });
+      },
+      onRequestTiming: ({ method, ms, ok }) => {
+        pushTiming({ at: Date.now(), label: method, ms, ok });
       },
     });
     client.start();
@@ -244,7 +280,13 @@ export const useGatewayStore = defineStore("gateway", () => {
       return await client.request<T>(method, params);
     } catch (err) {
       if (err instanceof GatewayRequestError) {
-        setError(err.message, err.gatewayCode);
+        setError(err.message, err.gatewayCode, {
+          code: err.gatewayCode,
+          message: err.message,
+          details: err.details,
+          retryable: err.retryable,
+          retryAfterMs: err.retryAfterMs,
+        });
       }
       throw err;
     }
@@ -277,6 +319,8 @@ export const useGatewayStore = defineStore("gateway", () => {
     hello,
     lastError,
     lastErrorCode,
+    lastErrorInfo,
+    timings,
     connected,
     needsUserAction,
     errorDetailCode,

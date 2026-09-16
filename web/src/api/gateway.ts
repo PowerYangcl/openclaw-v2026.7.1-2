@@ -145,6 +145,10 @@ export type GatewayBrowserClientOptions = {
     willRetry: boolean;
   }) => void;
   onGap?: (info: { expected: number; received: number }) => void;
+  /** 连接握手计时（诊断用）：`ok=false` 表示这次握手失败。 */
+  onConnectTiming?: (info: { ms: number; ok: boolean }) => void;
+  /** 单次 RPC 往返计时（诊断用）。 */
+  onRequestTiming?: (info: { method: string; ms: number; ok: boolean }) => void;
 };
 
 export type GatewayEventListener = (evt: GatewayEventFrame) => void;
@@ -163,6 +167,8 @@ export const CONTROL_UI_OPERATOR_SCOPES = [
 const CONNECT_FAILED_CLOSE_CODE = 4008;
 const STARTUP_RETRY_CLOSE_CODE = 4013;
 const BROWSER_WEBSOCKET_CLOSE_CODE = 1006;
+/** 重连延迟上限：网关给的 retryAfterMs 可能很大，clamp 一下避免界面长时间假死。 */
+const MAX_RECONNECT_DELAY_MS = 60_000;
 
 function isLoopbackIPv4Host(host: string): boolean {
   const octets = host.split(".");
@@ -203,7 +209,9 @@ export function isNonRecoverableConnectError(error: { details?: unknown } | unde
     code === ConnectErrorDetailCodes.AUTH_DEVICE_TOKEN_MISMATCH ||
     code === ConnectErrorDetailCodes.AUTH_SCOPE_MISMATCH ||
     code === ConnectErrorDetailCodes.PROTOCOL_MISMATCH ||
-    code === ConnectErrorDetailCodes.PAIRING_REQUIRED ||
+    // ⚠️ PAIRING_REQUIRED 刻意**不**在这里：配对是「等设备在网关侧被批准」，
+    // 属于可以边等边自动重连的状态（对齐旧版：默认 wait_then_retry）。
+    // 若网关要求彻底停止重连，它会在 details 里给出 pauseReconnect。
     code === ConnectErrorDetailCodes.CONTROL_UI_DEVICE_IDENTITY_REQUIRED ||
     code === ConnectErrorDetailCodes.DEVICE_IDENTITY_REQUIRED
   );
@@ -269,9 +277,16 @@ export class GatewayBrowserClient {
       ws = new WebSocket(this.opts.url);
     } catch (err) {
       this.ws = null;
+      // HTTPS 页面去连 ws:// 会被浏览器直接拒（mixed content）——单独给码，
+      // 好让界面提示「改用 wss://」，而不是笼统的「无法创建连接」。
+      const isSecurityError = err instanceof DOMException && err.name === "SecurityError";
       const error: GatewayErrorInfo = {
-        code: "BROWSER_WEBSOCKET_CONSTRUCTOR_ERROR",
-        message: `无法创建 Gateway WebSocket：${err instanceof Error ? err.message : String(err)}`,
+        code: isSecurityError
+          ? "BROWSER_WEBSOCKET_SECURITY_ERROR"
+          : "BROWSER_WEBSOCKET_CONSTRUCTOR_ERROR",
+        message: isSecurityError
+          ? "浏览器阻止了不安全的 WebSocket 连接：HTTPS 页面不能连接 ws://，请改用 wss://"
+          : `无法创建 Gateway WebSocket：${err instanceof Error ? err.message : String(err)}`,
       };
       this.flushPending(new Error(error.message));
       this.notifyClose({
@@ -306,16 +321,22 @@ export class GatewayBrowserClient {
           ? this.pendingDeviceTokenRetry
           : !isNonRecoverableConnectError(connectError));
       this.notifyClose({ code: ev.code, reason, error: connectError, willRetry });
-      if (willRetry) this.scheduleReconnect();
+      if (willRetry) {
+        // 网关明确给了「多久之后再来」（starting / unavailable）就按它说的等，
+        // 否则退回指数退避。
+        const hinted = connectError?.retryAfterMs;
+        this.scheduleReconnect(typeof hinted === "number" && hinted > 0 ? hinted : undefined);
+      }
     });
     ws.addEventListener("error", () => {
       // 忽略，close 处理器会接管
     });
   }
 
-  private scheduleReconnect(): void {
+  /** @param startupDelayMs 网关建议的重试延迟（如「正在启动」时返回的 retryAfterMs）。 */
+  private scheduleReconnect(startupDelayMs?: number): void {
     if (this.closed) return;
-    const delay = this.backoffMs;
+    const delay = Math.min(startupDelayMs ?? this.backoffMs, MAX_RECONNECT_DELAY_MS);
     this.backoffMs = Math.min(this.backoffMs * 1.7, 15_000);
     this.clearConnectTimer();
     this.connectTimer = window.setTimeout(() => {
@@ -413,6 +434,7 @@ export class GatewayBrowserClient {
     if (this.connectSent) return;
     this.connectSent = true;
     this.clearConnectTimer();
+    const handshakeStartedAt = Date.now();
 
     const role = CONTROL_UI_OPERATOR_ROLE;
     const client = this.buildConnectClient();
@@ -482,8 +504,10 @@ export class GatewayBrowserClient {
         });
       }
       this.backoffMs = 800;
+      this.notifyConnectTiming(Date.now() - handshakeStartedAt, true);
       this.notifyHello(hello);
     } catch (err) {
+      this.notifyConnectTiming(Date.now() - handshakeStartedAt, false);
       if (!this.isActiveSocket(ws, generation)) return;
       const usedStoredToken =
         Boolean(selectedAuth.storedToken) &&
@@ -611,6 +635,22 @@ export class GatewayBrowserClient {
     }
   }
 
+  private notifyConnectTiming(ms: number, ok: boolean): void {
+    try {
+      this.opts.onConnectTiming?.({ ms, ok });
+    } catch {
+      // 诊断回调绝不许影响连接流程
+    }
+  }
+
+  private notifyRequestTiming(method: string, ms: number, ok: boolean): void {
+    try {
+      this.opts.onRequestTiming?.({ method, ms, ok });
+    } catch {
+      // 同上
+    }
+  }
+
   private notifyGap(info: { expected: number; received: number }): void {
     try {
       this.opts.onGap?.(info);
@@ -631,7 +671,17 @@ export class GatewayBrowserClient {
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       return Promise.reject(new Error("gateway not connected"));
     }
-    return this.requestOnSocket(this.ws, method, params);
+    const startedAt = Date.now();
+    return this.requestOnSocket<T>(this.ws, method, params).then(
+      (value) => {
+        this.notifyRequestTiming(method, Date.now() - startedAt, true);
+        return value;
+      },
+      (err: unknown) => {
+        this.notifyRequestTiming(method, Date.now() - startedAt, false);
+        throw err;
+      },
+    );
   }
 
   private requestOnSocket<T = unknown>(

@@ -3,10 +3,13 @@
  * 消息头像。
  *
  * Vue 版 `ui/src/pages/chat/chat-avatar.ts` 的 `renderChatAvatar()`：
- * 解析顺序与目标页完全一致 ——
- *   user      ：用户图片头像 > 用户文本头像 > 用户默认图标
+ *   user      ：用户图片头像 > **用户默认图标（Element Plus `Avatar` 图标）**
  *   assistant ：agent 图片头像 > agent 文本头像（emoji/字） > 助手默认图标
  *   tool/其他 ：角色默认图标
+ *
+ * ⚠️ user 与上游的一处**刻意差异**：上游会先取「用户文本头像 / 名称首字」再降级到图标，
+ * 但本项目没有用户身份配置（`resolveLocalUserName(null)` 恒为兜底文案「你」），
+ * 把「你」字当成头像既没有信息量又容易被误读成别人，所以 user 一律走 `Avatar` 图标。
  *
  * ## 站内头像（`/avatar/<agentId>`）怎么取
  *
@@ -23,6 +26,7 @@
  * 加载失败（破图 / 不可用）时按「文本头像 → 名称首字母 → 角色默认图标」降级。
  */
 import { computed, ref, watch } from "vue";
+import { Avatar } from "@element-plus/icons-vue";
 import { useSettingsStore } from "@/stores/settings";
 import {
   DEFAULT_ASSISTANT_NAME,
@@ -178,13 +182,15 @@ const fontSize = computed(() => {
       :alt="displayName"
       @error="imageBroken = true"
     />
+    <!-- 用户头像：统一用 Element Plus 的 `Avatar` 图标（图片优先，见上）。
+         图标走 currentColor（父级 `.chat-avatar` 的 `color: #fff`），
+         底色与 assistant 同一套蓝（见 `.chat-avatar--assistant, .chat-avatar--user`）。 -->
+    <el-icon v-else-if="kind === 'user'" class="chat-avatar__icon" aria-hidden="true">
+      <Avatar />
+    </el-icon>
     <span v-else-if="fallbackText" class="chat-avatar__text">{{ fallbackText }}</span>
     <svg v-else class="chat-avatar__icon" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
-      <template v-if="kind === 'user'">
-        <circle cx="12" cy="8" r="4" />
-        <path d="M20 21a8 8 0 1 0-16 0" />
-      </template>
-      <template v-else-if="kind === 'assistant'">
+      <template v-if="kind === 'assistant'">
         <path d="M12 2l2.4 7.2H22l-6 4.8 2.4 7.2L12 16l-6.4 5.2L8 14 2 9.2h7.6z" />
       </template>
       <template v-else-if="kind === 'tool'">
@@ -231,15 +237,22 @@ const fontSize = computed(() => {
   height: 60%;
 }
 
-/* 头像底色按角色区分，与目标页 chat-avatar 的配色语义对齐 */
-.chat-avatar--assistant {
-  background: linear-gradient(135deg, #60a5fa, #2563eb);
-  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.25);
+/* el-icon 里的 Element Plus 图标是 `<svg width="1em" height="1em">`，
+   字号驱动尺寸会和手写 svg 的「60% 盒子」对不上；直接让内部 svg 撑满盒子，
+   两种实现就同一视觉重量（`:deep` 因为 svg 属于子组件模板，不带本组件的 scope 属性）。 */
+.chat-avatar__icon.el-icon :deep(svg) {
+  width: 100%;
+  height: 100%;
 }
 
+/* 头像底色按角色区分，与目标页 chat-avatar 的配色语义对齐。
+   ⚠️ user 与 assistant **共用同一套蓝底**（产品要求：用户头像背景色与 agent 一致），
+   所以两者写在同一条规则里 —— 只留一处色值，改一边两边同步，不会再出现「改了蓝的
+   漏了另一个」；白色 `Avatar` / 助手图标落在此蓝上对比度 ≈ 3.6:1，清晰可辨。 */
+.chat-avatar--assistant,
 .chat-avatar--user {
-  background: linear-gradient(135deg, #94a3b8, #475569);
-  box-shadow: 0 2px 8px rgba(71, 85, 105, 0.22);
+  background: linear-gradient(135deg, #60a5fa, #2563eb);
+  box-shadow: 0 2px 8px rgba(37, 99, 235, 0.25);
 }
 
 .chat-avatar--tool {

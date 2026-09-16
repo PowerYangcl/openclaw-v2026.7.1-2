@@ -16,6 +16,8 @@ import {
   contextPercentOf,
   contextRemainingTokensOf,
   contextUsedTokensOf,
+  contextWindowDetailOf,
+  formatCompactTokenCount,
   normalizeContextWindow,
 } from "@/utils/contextUsage";
 
@@ -165,6 +167,65 @@ console.log("\n[5] contextPercentClassOf：配色阈值");
   ok("89% → ctx-warn", contextPercentClassOf(89) === "ctx-warn");
   ok("90% → ctx-danger", contextPercentClassOf(90) === "ctx-danger");
   ok("100% → ctx-danger", contextPercentClassOf(100) === "ctx-danger");
+}
+
+console.log("\n[6] formatCompactTokenCount / contextWindowDetailOf：标题行的紧凑格式");
+{
+  // 这组锁的是「弹层标题行长什么样」——旧版 getContextNoticeViewModel().detail 的格式：
+  // `56.2k / 204.8k · 27%`（截图）。改回 toLocaleString 全量会让这条全线飘红。
+  ok(
+    "0 / 999 原样显示",
+    formatCompactTokenCount(0) === "0" && formatCompactTokenCount(999) === "999",
+  );
+  ok(
+    "1_000 → 1k（尾数 .0 去零）",
+    formatCompactTokenCount(1_000) === "1k",
+    formatCompactTokenCount(1_000),
+  );
+  ok(
+    "27_541 → 27.5k",
+    formatCompactTokenCount(27_541) === "27.5k",
+    formatCompactTokenCount(27_541),
+  );
+  ok(
+    "204_800 → 204.8k（截图里上限的写法）",
+    formatCompactTokenCount(204_800) === "204.8k",
+    formatCompactTokenCount(204_800),
+  );
+  ok(
+    "1_048_576 → 1M",
+    formatCompactTokenCount(1_048_576) === "1M",
+    formatCompactTokenCount(1_048_576),
+  );
+  ok(
+    "999_499 → 999.5k（不提前进位）",
+    formatCompactTokenCount(999_499) === "999.5k",
+    formatCompactTokenCount(999_499),
+  );
+  ok(
+    "999_999 → 1M（绝不出现 1000k）",
+    formatCompactTokenCount(999_999) === "1M",
+    formatCompactTokenCount(999_999),
+  );
+  ok(
+    "1_500_000 → 1.5M",
+    formatCompactTokenCount(1_500_000) === "1.5M",
+    formatCompactTokenCount(1_500_000),
+  );
+  ok(
+    "标题行 detail = `27.5k / 1M`（截图口径）",
+    contextWindowDetailOf(SHOT.usage, SHOT.window) === "27.5k / 1M",
+    contextWindowDetailOf(SHOT.usage, SHOT.window),
+  );
+  ok(
+    "窗口未知时上限显示 0，不出现 NaN",
+    contextWindowDetailOf(SHOT.usage, null) === "27.5k / 0",
+    contextWindowDetailOf(SHOT.usage, null),
+  );
+  ok(
+    "与百分比同口径：已用不含 output（否则是 27.6k）",
+    contextWindowDetailOf(SHOT.usage, SHOT.window).startsWith("27.5k /"),
+  );
 }
 
 console.log(`\n==== ${pass} passed, ${fail} failed ====`);

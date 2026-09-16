@@ -35,6 +35,7 @@ import {
 import { resolveAgentAvatarValue, resolveAgentLabel } from "@/utils/avatar";
 import { readSidebarSnapshot, writeSidebarSnapshot } from "@/utils/sidebarSnapshot";
 import ChatAvatar from "@/components/ChatAvatar.vue";
+import RefreshButton from "@/components/RefreshButton.vue";
 
 withDefaults(defineProps<{ collapsed?: boolean }>(), { collapsed: false });
 const emit = defineEmits<{ (e: "toggle"): void }>();
@@ -276,19 +277,11 @@ watch(
       <section class="chat-side__section">
         <div class="chat-side__head">
           <span class="chat-side__head-text">对话</span>
-          <el-button
+          <RefreshButton
             class="chat-side__refresh"
-            text
             :loading="sessionsLoading"
-            title="刷新"
-            aria-label="刷新"
-            @click="loadSessions"
-          >
-            <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2">
-              <path d="M21 12a9 9 0 1 1-3-6.7" />
-              <path d="M21 3v6h-6" />
-            </svg>
-          </el-button>
+            @refresh="loadSessions"
+          />
         </div>
 
         <div class="chat-side__items">
@@ -442,10 +435,10 @@ watch(
 }
 
 .chat-side__head-text {
-  font-size: 11px;
+  font-size: 13px;
   font-weight: 600;
+  color: var(--wb-text-primary);
   letter-spacing: 0.04em;
-  color: var(--wb-text-tertiary);
   text-transform: none;
 }
 

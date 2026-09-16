@@ -38,9 +38,9 @@ export function formatSidebarTime(ts?: number | null): string {
   const diff = Date.now() - ts;
   if (diff < 60_000) return "刚刚";
   const minutes = Math.floor(diff / 60_000);
-  if (minutes < 60) return `${minutes}分`;
+  if (minutes < 60) return `${minutes}分钟`;
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}时`;
+  if (hours < 24) return `${hours}小时`;
   const days = Math.floor(hours / 24);
   if (days < 30) return `${days}天`;
   const date = new Date(ts);

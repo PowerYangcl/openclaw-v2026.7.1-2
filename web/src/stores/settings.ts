@@ -35,6 +35,10 @@ export type UiSettings = {
   gatewayUrl: string;
   token: string;
   sessionKey: string;
+  /**
+   * 主题：**默认 `light`**（`sanitizePrefs` 把缺失值 / 历史 `system` 一律归一为 light）。
+   * `system` 仅给将来的「跟随系统」开关预留，当前没有 UI 入口，落盘不会出现。
+   */
   themeMode: "light" | "dark" | "system";
   /** 当前选中的模型（格式："provider/modelId" 或空串代表默认） */
   selectedModel: string;
@@ -99,12 +103,17 @@ function readSession(): SessionPatch {
   };
 }
 
+/**
+ * 归一化 UI 偏好。
+ *
+ * **默认浅色**：没有落过盘的取值一律进 `light`（不再跟随系统）。
+ * ⚠️ `system` 一并归一为 `light` —— 界面上只有「浅色/深色」开关（`MainLayout.vue` 的
+ * toggle 只在 `light` ↔ `dark` 之间翻），`system` 没有入口，只可能是旧默认值遗留；
+ * 若原样保留，macOS 深色用户永远进不到浅色。想恢复「跟随系统」需要同时补 UI 入口。
+ */
 function sanitizePrefs(input: Partial<PrefsState>): PrefsState {
   return {
-    themeMode:
-      input.themeMode === "light" || input.themeMode === "dark" || input.themeMode === "system"
-        ? input.themeMode
-        : "system",
+    themeMode: input.themeMode === "dark" ? "dark" : "light",
     selectedModel: typeof input.selectedModel === "string" ? input.selectedModel : "",
   };
 }
@@ -202,6 +211,10 @@ export const useSettingsStore = defineStore("settings", () => {
     token: token.value,
     sessionKey: sessionKey.value,
   });
+
+  // 同理把 UI 偏好的历史遗留值洗回盘：读取时 `system` 已被归一为 `light`，
+  // 若只归一在内存里，localStorage 会一直留着那个再也读不出来的 `system`。
+  persistPrefs({ themeMode: themeMode.value, selectedModel: selectedModel.value });
 
   /**
    * 入口 token 变化即代表身份变化：重新派生会话 key，保证「换 token = 换会话」。

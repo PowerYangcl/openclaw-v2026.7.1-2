@@ -20,6 +20,11 @@
  * `round(已用 / 上下文窗口 * 100)`，上限截断到 100。
  * 拿不到窗口、或压根没有用量数据时返回 `null` ——
  * 宁可不显示（UI 走「— ctx」），也不给用户看一个假的 `0%`。
+ *
+ * ## 弹层里的数字格式
+ * 标题行 = `已用 / 上限`，两个数都用 **紧凑格式**（`27.5k / 1M`），
+ * 与旧版 `getContextNoticeViewModel().detail` 逐字一致 —— 见 `contextWindowDetailOf`。
+ * 截图里的 `56.2k / 204.8k · 27%` 就是这个格式（窗口 200k）。
  */
 
 /** 单次调用的 token 用量（与 `ChatView` 的 `TokenUsage` 结构一致）。 */
@@ -79,4 +84,51 @@ export function contextPercentClassOf(percent: number | null): string {
   if (percent >= 90) return "ctx-danger";
   if (percent >= 75) return "ctx-warn";
   return "";
+}
+
+/**
+ * 紧凑 token 计数（**逐字移植**自旧版 `ui/src/lib/format.ts:formatCompactTokenCount`）：
+ *
+ * ```text
+ * 999       → "999"       1_000     → "1k"        27_541    → "27.5k"
+ * 204_800   → "204.8k"    1_048_576 → "1M"        1_500_000 → "1.5M"
+ * ```
+ *
+ * 规则：>= 1M 进 M 档；>= 1k 进 k 档（先 `toFixed(1)`，若进位到 `1000.0` 再升到 M，
+ * 避免出现 `1000k`）；尾数 `x.0` 去零（`trimTrailingZero`，默认 true）。
+ * ⚠️ 与 `formatTokens`（`utils/format.ts`，k 档不带小数当 k>=10）**不是同一套规则**，别互相替换。
+ */
+export function formatCompactTokenCount(
+  tokens: number,
+  options: { thousandsSuffix?: string; millionsSuffix?: string; trimTrailingZero?: boolean } = {},
+): string {
+  const thousandsSuffix = options.thousandsSuffix ?? "k";
+  const millionsSuffix = options.millionsSuffix ?? "M";
+  const trimTrailingZero = options.trimTrailingZero ?? true;
+  const trim = (value: string) => (trimTrailingZero ? value.replace(/\.0$/, "") : value);
+  if (tokens >= 1_000_000) {
+    return `${trim((tokens / 1_000_000).toFixed(1))}${millionsSuffix}`;
+  }
+  if (tokens >= 1_000) {
+    const thousands = (tokens / 1_000).toFixed(1);
+    // 999_500..999_999 会进位成 "1000.0k" → 升到 M 档，而不是显示 1000k
+    if (Number(thousands) >= 1_000) {
+      return `${trim((tokens / 1_000_000).toFixed(1))}${millionsSuffix}`;
+    }
+    return `${trim(thousands)}${thousandsSuffix}`;
+  }
+  return String(tokens);
+}
+
+/**
+ * 弹层标题行右侧文案 = `已用 / 上限`（旧版 `getContextNoticeViewModel().detail`）。
+ * 口径与百分比同源（`contextUsedTokensOf`，**不含 output**），两个数都走紧凑格式：
+ * 27,541 / 1,048,576 → `27.5k / 1M`；56,200 / 204,800 → `56.2k / 204.8k`（截图）。
+ */
+export function contextWindowDetailOf(
+  usage: ContextTokenUsage | undefined | null,
+  contextWindow: number | null | undefined,
+): string {
+  const window = normalizeContextWindow(contextWindow);
+  return `${formatCompactTokenCount(contextUsedTokensOf(usage))} / ${formatCompactTokenCount(window)}`;
 }

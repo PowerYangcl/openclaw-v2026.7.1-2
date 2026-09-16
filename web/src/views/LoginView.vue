@@ -2,9 +2,11 @@
 import { onMounted, ref, watch } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import { ElMessage } from "element-plus";
+import { computed } from "vue";
 import { useGatewayStore } from "@/stores/gateway";
 import { useSettingsStore } from "@/stores/settings";
 import { entryLandingPath } from "@/utils/urlOverrides";
+import { formatConnectError } from "@/utils/connectError";
 
 const route = useRoute();
 const router = useRouter();
@@ -35,6 +37,17 @@ const form = ref({
   password: "",
 });
 const connecting = ref(false);
+
+/**
+ * 连接失败时展示的文案。
+ *
+ * 走 `formatConnectError` 是为了把 `AUTH_TOKEN_MISMATCH` 这类机器码翻译成人话 + 下一步动作；
+ * 同时把用户刚输入的 token / 密码传进去做脱敏 —— 网关报错可能把 URL 原样带回来，
+ * 不能把凭据回显在登录页上。
+ */
+const loginError = computed(() =>
+  formatConnectError(gateway.lastErrorInfo, [form.value.token, form.value.password]),
+);
 
 function submit(): void {
   const url = form.value.url.trim();
@@ -157,16 +170,14 @@ onMounted(() => {
       </el-form>
 
       <el-alert
-        v-if="gateway.lastError"
-        :title="gateway.lastError"
+        v-if="gateway.phase === 'failed' || gateway.lastError"
+        :title="loginError.title"
+        :description="loginError.detail"
         type="error"
         :closable="false"
         show-icon
         class="login-error"
       />
-      <div v-if="gateway.errorDetailCode" class="login-code mono">
-        错误码：{{ gateway.errorDetailCode }}
-      </div>
     </div>
   </div>
 </template>
