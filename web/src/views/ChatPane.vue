@@ -32,6 +32,7 @@ import { formatTime, formatDateTimeMinute } from "@/utils/format";
 import { sessionKeysMatch, qualifySessionKey } from "@/utils/sessionListSelection";
 import {
   clearChatMessageCache,
+  getChatHistoryCursor,
   getChatMessageCache,
   setChatMessageCache,
 } from "@/utils/chatMessageCache";
@@ -260,6 +261,87 @@ const sessionKey = computed<string>(() => props.sessionKey.trim() || settings.se
 const runState = computed(() => chatRunStateFor(sessionKey.value, agents.selectedAgentId));
 
 const messages = ref<ChatMessage[]>([]);
+
+/**
+ * 会话历史分页（完整历史可回溯）。
+ *
+ * `historyHasMore`      后端是否还有更早消息（`chat.history` 响应的 hasMore）。
+ * `historyNextOffset`   下一次「加载更早」要传的 offset（服务端游标）。
+ * `loadingOlderHistory` 是否正在加载更早（防滚动抖动重复请求）。
+ *
+ * @author yangchenglin11@jd.com
+ * @date 2026年9月16日 17:44:00
+ * @version feature_web
+ */
+const historyHasMore = ref(false);
+const historyNextOffset = ref<number | undefined>(undefined);
+const loadingOlderHistory = ref(false);
+
+/**
+ * 加载更早历史（会话分页「向上翻」）。
+ *
+ * 依赖后端 `chat.history` 的 offset 游标：每次请求 offset=historyNextOffset，
+ * 返回更早一页消息 → 按稳定 id 去重后前置插到 messages 顶部，并保持滚动位置
+ * 不跳动（插入后下一帧把 scrollTop 补回新增高度）。
+ *
+ * 触发：滚动到对话顶部附近自动调用（见 onThreadScroll）+ 顶部「加载更早」按钮。
+ *
+ * @author yangchenglin11@jd.com
+ * @date 2026年9月16日 17:44:00
+ * @version feature_web
+ */
+async function loadOlderHistory(): Promise<void> {
+  if (loadingOlderHistory.value) return;
+  if (!historyHasMore.value || historyNextOffset.value === undefined) return;
+  const el = threadRef.value;
+  const prevScrollHeight = el?.scrollHeight ?? 0;
+  const prevScrollTop = el?.scrollTop ?? 0;
+  loadingOlderHistory.value = true;
+  try {
+    const res = await gateway.request<{
+      messages?: unknown[];
+      hasMore?: boolean;
+      nextOffset?: number;
+    }>("chat.history", {
+      sessionKey: resolvedSessionKey(),
+      limit: 200,
+      offset: historyNextOffset.value,
+    });
+    const older = (res?.messages ?? [])
+      .map((item, index) => normalizeMessage(item, index))
+      .filter((item): item is ChatMessage => item !== null);
+    if (older.length > 0) {
+      // 按稳定 id 去重：offset 返回的边界条可能与已加载部分重叠，不能重复渲染
+      const known = new Set(messages.value.map((m) => m.id));
+      const unique = older.filter((m) => !known.has(m.id));
+      if (unique.length > 0) {
+        messages.value = [...unique, ...messages.value];
+      }
+    }
+    historyHasMore.value = res?.hasMore === true;
+    historyNextOffset.value =
+      typeof res?.nextOffset === "number" ? res.nextOffset : undefined;
+    // 游标随缓存一起更新，切回会话后还能继续翻更早历史
+    const cacheKey =
+      qualifySessionKey(sessionKey.value, agents.selectedAgentId) ??
+      resolvedSessionKey();
+    setChatMessageCache(cacheKey, messages.value, {
+      hasMore: res?.hasMore,
+      nextOffset: res?.nextOffset,
+    });
+    // 保持视口不跳动：等 DOM 重排后把 scrollTop 补上新增高度
+    await nextTick();
+    const after = threadRef.value;
+    if (after && prevScrollHeight > 0) {
+      const delta = after.scrollHeight - prevScrollHeight;
+      if (delta > 0) after.scrollTop = prevScrollTop + delta;
+    }
+  } catch {
+    // 静默：翻页失败不打断主对话，保留游标下次可重试
+  } finally {
+    loadingOlderHistory.value = false;
+  }
+}
 
 // 消息有变（发送 / 流式 / 删除）即刷新客户端缓存，保证切回本会话时秒回且含最新内容。
 //
@@ -1259,6 +1341,8 @@ function normalizeMessage(raw: unknown, index: number): ChatMessage | null {
 
 /** 距底多少像素内算「在近底」，超过则视为用户在看历史、暂停自动跟随（对齐旧版 scroll.ts:5）。 */
 const NEAR_BOTTOM_PX = 450;
+/** 距顶多少像素内算「在顶」，触发自动加载更早历史（对齐旧版「滚到顶翻页」习惯）。 */
+const NEAR_TOP_PX = 120;
 /** 是否跟随到底部：用户上滑看历史时置 false，新 token 不再把视口拽回底部。 */
 const followScroll = ref(true);
 
@@ -1267,6 +1351,10 @@ function onThreadScroll(): void {
   if (!el) return;
   const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
   followScroll.value = distanceFromBottom <= NEAR_BOTTOM_PX;
+  // 触顶自动加载更早历史：距顶很近且后端还有更早且未在加载中
+  if (el.scrollTop <= NEAR_TOP_PX && historyHasMore.value && !loadingOlderHistory.value) {
+    void loadOlderHistory();
+  }
 }
 
 function jumpToBottom(): void {
@@ -2059,6 +2147,10 @@ async function loadHistory(options?: { skipCache?: boolean }): Promise<void> {
   const cached = getChatMessageCache(cacheKey);
   if (cached) {
     messages.value = cached.filter((item) => !deleted.has(item.id));
+    // 恢复分页游标：缓存命中也能继续「加载更早」（直接用上次 offset，免联网探测）
+    const cursor = getChatHistoryCursor(cacheKey);
+    historyHasMore.value = cursor?.hasMore === true;
+    historyNextOffset.value = cursor?.nextOffset;
     await scrollToBottom(true);
     void fetchMissingSpendResults();
     void loadModelList();
@@ -2066,10 +2158,20 @@ async function loadHistory(options?: { skipCache?: boolean }): Promise<void> {
     return;
   }
   try {
-    const res = await gateway.request<{ messages?: unknown[]; sessionId?: string }>(
-      "chat.history",
-      { sessionKey: resolvedSessionKey(), limit: 200 },
-    );
+    const res = await gateway.request<{
+      messages?: unknown[];
+      sessionId?: string;
+      hasMore?: boolean;
+      nextOffset?: number;
+      totalMessages?: number;
+    }>("chat.history", {
+      sessionKey: resolvedSessionKey(),
+      limit: 200,
+    });
+    // 记录后端给出的分页游标：还有更早则允许「加载更早」继续翻页
+    historyHasMore.value = res?.hasMore === true;
+    historyNextOffset.value =
+      typeof res?.nextOffset === "number" ? res.nextOffset : undefined;
     // 先同步本次请求所属会话的「已删集合」，再据此过滤 —— 删除后刷新才不会再冒出来。
     loadDeletedMessageIds();
     const deleted = deletedMessageIds.value;
@@ -2092,7 +2194,11 @@ async function loadHistory(options?: { skipCache?: boolean }): Promise<void> {
       );
     await scrollToBottom();
     // 写入客户端缓存：切回本会话时秒回，避免重复联网（对齐旧版 session-message-cache）。
-    setChatMessageCache(cacheKey, messages.value);
+    // 同时带上分页游标，切回后仍能继续加载更早历史。
+    setChatMessageCache(cacheKey, messages.value, {
+      hasMore: res?.hasMore,
+      nextOffset: res?.nextOffset,
+    });
     await scrollToBottom(true);
     // 异步拉取历史消息的积分（不阻塞内容渲染）
     void fetchMissingSpendResults();
@@ -2751,6 +2857,10 @@ watch(
     releaseChatAttachmentPayloads(attachments.value);
     attachments.value = [];
     messages.value = [];
+    // 切换会话：重置历史分页游标，避免把上一个会话的翻页进度带到新会话
+    historyHasMore.value = false;
+    historyNextOffset.value = undefined;
+    loadingOlderHistory.value = false;
     // ⚠️ 运行态现在按会话放在组件外：切到的这个会话**正有一轮在跑**时不能清，
     // 否则会把「另一个窗格里正在进行的同一个会话的任务」一起打断。
     // 此时直接接管它的运行态（同一个 run，换个窗格接着显示）。
@@ -2954,6 +3064,17 @@ function formatCredits(value: number | null | undefined): string {
             </el-button>
           </div>
         </div>
+
+        <!-- 会话历史向上翻页：触顶自动加载之外，给一个显式按钮入口（也可点击触发） -->
+        <button
+          v-if="historyHasMore || loadingOlderHistory"
+          class="thread-load-earlier"
+          type="button"
+          :disabled="loadingOlderHistory"
+          @click="loadOlderHistory"
+        >
+          {{ loadingOlderHistory ? "正在加载更早消息…" : "加载更早消息" }}
+        </button>
 
         <template v-for="msg in visibleMessages" :key="msg.id">
           <!-- 用户消息：右侧蓝底气泡 -->
@@ -4056,6 +4177,30 @@ html.dark .credits-alert :deep(.el-alert__title) {
 
 .thread-jump-bottom:hover {
   background: var(--el-color-primary-light-8, #d9ecff);
+}
+
+/* 会话历史向上翻页入口（触顶自动加载之外的手动触发） */
+.thread-load-earlier {
+  display: block;
+  width: max-content;
+  margin: 0 auto 8px;
+  padding: 4px 12px;
+  border: 1px solid var(--el-border-color, #dcdfe6);
+  border-radius: 14px;
+  background: transparent;
+  color: var(--el-text-color-secondary, #909399);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.thread-load-earlier:hover:not(:disabled) {
+  border-color: var(--el-color-primary-light-5, #b3d8ff);
+  color: var(--el-color-primary, #409eff);
+}
+
+.thread-load-earlier:disabled {
+  cursor: default;
+  opacity: 0.7;
 }
 
 .chat-inner {
