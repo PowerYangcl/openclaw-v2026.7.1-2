@@ -129,7 +129,12 @@ export function getEntryIntent(): EntryIntent {
   return overrides.token || overrides.session ? "chat" : "overview";
 }
 
-/** 入口意图对应的落地路径，供路由 `/` 的 redirect 与登录后跳转复用。 */
+/**
+ * 入口意图对应的落地路径，供路由 `/` 的 redirect 与登录后跳转复用。
+ *
+ * 产品调整（2026-09-17）：落地页统一为 `/chat`，不再区分入口意图 —— 侧栏只保留「对话」，
+ * 概览页不再作为默认首页。`getEntryIntent()` 仍保留，用于描述这次访问的来源。
+ */
 export function entryLandingPath(): string {
-  return getEntryIntent() === "chat" ? "/chat" : "/overview";
+  return "/chat";
 }

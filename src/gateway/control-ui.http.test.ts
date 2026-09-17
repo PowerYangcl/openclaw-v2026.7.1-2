@@ -470,6 +470,53 @@ describe("handleControlUiHttpRequest", () => {
     });
   });
 
+  it.each([
+    { filename: "photo.png" },
+    { filename: "voice.ogg" },
+    { filename: "clip.mp4" },
+    { filename: "report.pdf" },
+  ])("forces $filename to download when ?download=1 is set", async ({ filename }) => {
+    await withAllowedAssistantMediaRoot({
+      prefix: "ui-media-force-download-",
+      fn: async (tmpRoot) => {
+        const filePath = path.join(tmpRoot, filename);
+        await fs.writeFile(filePath, Buffer.from("fixture"));
+        const { res, handled } = await runAssistantMediaRequest({
+          url: `/__openclaw__/assistant-media?source=${encodeURIComponent(filePath)}&token=test-token&download=1`,
+          method: "GET",
+          auth: { mode: "token", token: "test-token", allowTailscale: false },
+        });
+        expect(handled).toBe(true);
+        expect(res.statusCode).toBe(200);
+        expect(res["setHeader"]).toHaveBeenCalledWith(
+          "Content-Disposition",
+          `attachment; filename="${filename}"; filename*=UTF-8''${filename}`,
+        );
+      },
+    });
+  });
+
+  it("keeps inline disposition when download param is not exactly '1'", async () => {
+    await withAllowedAssistantMediaRoot({
+      prefix: "ui-media-download-param-",
+      fn: async (tmpRoot) => {
+        const filePath = path.join(tmpRoot, "photo.png");
+        await fs.writeFile(filePath, Buffer.from("fixture"));
+        const { res, handled } = await runAssistantMediaRequest({
+          url: `/__openclaw__/assistant-media?source=${encodeURIComponent(filePath)}&token=test-token&download=yes`,
+          method: "GET",
+          auth: { mode: "token", token: "test-token", allowTailscale: false },
+        });
+        expect(handled).toBe(true);
+        expect(res.statusCode).toBe(200);
+        expect(res["setHeader"]).toHaveBeenCalledWith(
+          "Content-Disposition",
+          `inline; filename="photo.png"; filename*=UTF-8''photo.png`,
+        );
+      },
+    });
+  });
+
   it("encodes Unicode and RFC 8187 delimiter characters in assistant media filenames", async () => {
     await withAllowedAssistantMediaRoot({
       prefix: "ui-media-filename-",

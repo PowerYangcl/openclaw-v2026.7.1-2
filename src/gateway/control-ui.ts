@@ -77,7 +77,11 @@ const CONTROL_UI_OPERATOR_READ_SCOPE = "operator.read";
 const CONTROL_UI_OPERATOR_ROLE = "operator";
 const controlUiAssistantMediaTicketSecret = randomBytes(32);
 
-function buildAssistantMediaContentDisposition(filename: string, mime?: string): string {
+function buildAssistantMediaContentDisposition(
+  filename: string,
+  mime?: string,
+  forceDownload?: boolean,
+): string {
   // Keep the RFC 6266 fallback ASCII; filename* carries the exact UTF-8 name.
   const fallback = filename.replace(/[^\x20-\x7e]|[%"\\]/g, "_") || "download";
   const extended = encodeURIComponent(filename).replace(
@@ -85,7 +89,11 @@ function buildAssistantMediaContentDisposition(filename: string, mime?: string):
     (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`,
   );
   const kind = kindFromMime(mime);
-  const inline = kind === "image" || kind === "audio" || kind === "video";
+  // 默认 image/audio/video 走 inline，是为了让 `<img src>` / `<audio src>` 能直接渲染。
+  // 但「点击附件链接」时不能让它就地渲染 —— 浏览器会把整个 SPA 页面顶掉换成那个文件。
+  // `?download=1` 让调用方显式要求 attachment；不带该参数时行为**完全不变**，
+  // 所以 `<img>`/`<audio>` 的 src 与其它客户端都不受影响。
+  const inline = !forceDownload && (kind === "image" || kind === "audio" || kind === "video");
   return `${inline ? "inline" : "attachment"}; filename="${fallback}"; filename*=UTF-8''${extended}`;
 }
 
@@ -602,6 +610,9 @@ export async function handleControlUiAssistantMediaRequest(
     return true;
   }
   const isMetaRequest = url.searchParams.get("meta") === "1";
+  // `?download=1`：强制 `Content-Disposition: attachment`（见 buildAssistantMediaContentDisposition）。
+  // 只影响响应头，不参与鉴权判定 —— 拿不到票据/令牌照样 401。
+  const forceDownload = url.searchParams.get("download") === "1";
   const hasValidMediaTicket =
     !isMetaRequest && verifyAssistantMediaTicket(url.searchParams.get("mediaTicket"), source);
   if (
@@ -665,7 +676,7 @@ export async function handleControlUiAssistantMediaRequest(
     res.setHeader("Content-Type", contentType);
     res.setHeader(
       "Content-Disposition",
-      buildAssistantMediaContentDisposition(filename, contentType),
+      buildAssistantMediaContentDisposition(filename, contentType, forceDownload),
     );
     res.setHeader("Cache-Control", "no-cache");
     res.setHeader("Content-Length", String(opened.stat.size));

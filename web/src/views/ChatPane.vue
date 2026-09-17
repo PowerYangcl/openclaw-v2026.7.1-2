@@ -62,6 +62,8 @@ import ChatIcon from "@/components/ChatIcon.vue";
 import {
   buildAssistantMediaUrl,
   extractAudioReferences,
+  isGatewayHostedMediaUrl,
+  withAssistantMediaDownload,
   type AudioReference,
 } from "@/utils/assistantMedia";
 import {
@@ -95,7 +97,6 @@ import {
   releaseChatAttachmentPayloads,
   type ChatAttachment,
 } from "@/utils/chatAttachments";
-import { openExternalUrlSafe } from "@/utils/openExternalUrl";
 import { PANE_DRAG_MIME } from "@/utils/splitLayout";
 import type {
   ChatMessage,
@@ -276,6 +277,14 @@ const messages = ref<ChatMessage[]>([]);
 const historyHasMore = ref(false);
 const historyNextOffset = ref<number | undefined>(undefined);
 const loadingOlderHistory = ref(false);
+/**
+ * 单条消息正文的字符上限。
+ *
+ * 网关默认只给 8000 字符（`DEFAULT_CHAT_HISTORY_TEXT_MAX_CHARS`），超了就在尾部追加
+ * `...(truncated)...` —— 长回复在历史里会被静默切掉。协议
+ * `ChatHistoryParamsSchema.maxChars` 允许到 50 万，这里由请求端显式放大。
+ */
+const CHAT_HISTORY_MAX_CHARS = 200_000;
 
 /**
  * 加载更早历史（会话分页「向上翻」）。
@@ -306,6 +315,7 @@ async function loadOlderHistory(): Promise<void> {
       sessionKey: resolvedSessionKey(),
       limit: 200,
       offset: historyNextOffset.value,
+      maxChars: CHAT_HISTORY_MAX_CHARS,
     });
     const older = (res?.messages ?? [])
       .map((item, index) => normalizeMessage(item, index))
@@ -538,8 +548,8 @@ const fileInputRef = ref<HTMLInputElement | null>(null);
 const photoInputRef = ref<HTMLInputElement | null>(null);
 const cameraInputRef = ref<HTMLInputElement | null>(null);
 
-/** 旧版 `canCompose`：未连接 / 正在发送时不允许再挂附件。 */
-const canAttach = computed(() => !sending.value);
+/** 旧版 `canCompose`：未连接 / 正在发送 / 积分不足时不允许再挂附件。 */
+const canAttach = computed(() => !sending.value && !insufficientCredits.value);
 
 async function addAttachmentFiles(files: Iterable<File>): Promise<void> {
   const list = Array.from(files);
@@ -626,27 +636,42 @@ const attachmentPreviewHrefs = computed<Map<string, string>>(() => {
   return map;
 });
 
+/**
+ * 渲染期统一出口：把「已解析的绝对地址」变成**可下载的链接地址**。
+ *
+ * ## 规则：只有能被强制成下载的地址才给 href
+ * - **网关托管的媒体**（`/__openclaw__/assistant-media?…`、`/media/…`）→ 追加 `download=1`，
+ *   网关据此回 `Content-Disposition: attachment`；点击**只下载，不动当前页面、不弹窗**
+ *   （没有这个标记时，图片 / 音视频会被浏览器就地渲染，整个聊天页被顶掉 —— 就是用户报的
+ *   「agent 回复的附件会自动打开」）。
+ * - `blob:` / `data:`（本地待发送附件、内联图片）→ 原样返回，靠锚点上的 `download`
+ *   属性生效（同源 / 内联场景浏览器认这个属性）。
+ * - **其余（远端第三方地址）→ 返回 `null`**：地址不在我们手里，改不了 disposition，
+ *   跨源下 `download` 属性也会被浏览器忽略 —— 给了 href 就一定会「打开」。
+ *   宁可不可点，也不让点击把聊天页面顶掉。
+ */
+function downloadHrefOrNull(resolvedUrl: string | null | undefined): string | null {
+  const safe = contentMediaSafeHref(resolvedUrl ?? "");
+  if (!safe) return null;
+  const hosted =
+    isGatewayHostedMediaUrl(safe, settings.gatewayHttpBase) || /^(?:data|blob):/i.test(safe);
+  if (!hosted) return null;
+  return withAssistantMediaDownload(safe, settings.gatewayHttpBase);
+}
+
+/** 锚点 `download` 的落盘文件名（远端地址浏览器会忽略它，只作同源兜底）。 */
+function downloadFileName(label: string | null | undefined, fallback = "附件"): string {
+  const name = typeof label === "string" ? label.trim() : "";
+  return name || fallback;
+}
+
 function previewHrefOf(attachment: ChatAttachment): string | null {
-  return attachmentPreviewHrefs.value.get(attachment.id) ?? null;
+  return downloadHrefOrNull(attachmentPreviewHrefs.value.get(attachment.id) ?? null);
 }
 
 function attachmentTooltip(attachment: ChatAttachment): string {
   const name = attachment.fileName ?? "附件";
-  return previewHrefOf(attachment) ? `点击预览 ${name}` : name;
-}
-
-/**
- * 点击附件预览。
- *
- * 分工：`href` 已经过白名单（中键 / 右键「在新标签页打开」走浏览器原生路径），
- * 左键这里用 `openExternalUrlSafe` 接管 —— `preventDefault` 防止锚点再导航一次，
- * 并发开 `noopener,noreferrer`。拿不到安全地址时直接 return（节点本身没有 href，无副作用）。
- */
-function onAttachmentPreviewClick(event: MouseEvent, attachment: ChatAttachment): void {
-  const href = previewHrefOf(attachment);
-  if (!href) return;
-  event.preventDefault();
-  openExternalUrlSafe(href, { allowDataImage: true });
+  return previewHrefOf(attachment) ? `点击下载 ${name}` : name;
 }
 
 /**
@@ -678,22 +703,13 @@ function historyMediaUrlOf(item: TranscriptMediaItem): string {
   return historyMediaUrls.value.get(item.key) ?? "";
 }
 
-function historyMediaTooltip(item: TranscriptMediaItem): string {
-  return historyMediaUrlOf(item) ? `点击预览 ${item.label}` : item.label;
+/** 历史附件的**下载**地址。`:src` 仍用 `historyMediaUrlOf` —— 必须保持 inline 才能出缩略图。 */
+function historyMediaHrefOf(item: TranscriptMediaItem): string | null {
+  return downloadHrefOrNull(historyMediaUrlOf(item));
 }
 
-/**
- * 点击历史附件。
- *
- * 与页内附件同一个套路（`onAttachmentPreviewClick`）：`href` 已经过
- * `buildAssistantMediaUrl` 绝对化成 `http(s)://`，浏览器原生行为（中键 / 右键）本来就安全，
- * 左键这里仍显式接管，保证 `noopener,noreferrer` 一律生效。
- */
-function onHistoryMediaClick(event: MouseEvent, item: TranscriptMediaItem): void {
-  const url = historyMediaUrlOf(item);
-  if (!url) return;
-  event.preventDefault();
-  openExternalUrlSafe(url);
+function historyMediaTooltip(item: TranscriptMediaItem): string {
+  return historyMediaHrefOf(item) ? `点击下载 ${item.label}` : item.label;
 }
 
 // ---------------------------------------------------------------------------
@@ -733,57 +749,34 @@ function contentMediaUrlOf(source: string): string {
   return contentMediaUrls.value.get(source) ?? "";
 }
 
-/**
- * 点击图片 → 新标签打开原图。
- *
- * `allowDataImage: true` 与上游 `renderMessageImages` 的 `openImage` 一致：
- * 图片块本来就可能是 `data:image/...`（`source.base64`），不放行就等于点了没反应；
- * 白名单仍会挡掉 `data:image/svg+xml` 等可执行形态（见 `utils/openExternalUrl.ts`）。
- *
- * 助手侧是裸 `<img>`，用户侧包在 `<a>` 里（href 也过白名单）—— 统一 `preventDefault`
- * 后交给白名单接管，保证 `noopener,noreferrer` 一律生效。
- */
-function onContentImageClick(event: MouseEvent, image: ContentImageBlock): void {
-  const url = contentMediaUrlOf(image.url);
-  if (!url) return;
-  event.preventDefault();
-  openExternalUrlSafe(url, { allowDataImage: true });
-}
-
 /** `<img alt>`：上游 `renderMessageImages` 用的是 `img.alt ?? "Attached image"`，这里同口径。 */
 function contentImageAlt(image: ContentImageBlock): string {
   return image.alt?.trim() || "附件图片";
 }
 
-/** `title`（悬停提示）：有 alt 就用 alt，否则提示可以点开看大图。 */
+/** `title`（悬停提示）：有 alt 就用 alt，否则提示可点击下载。 */
 function contentImageTooltip(image: ContentImageBlock): string {
-  return image.alt?.trim() || "点击查看大图";
+  return image.alt?.trim() || "点击下载图片";
 }
 
-/** 附件卡片（文档 / 视频）点击 → 交给白名单接管；音频走 `AudioPlayer` 不经过这里。 */
-/** 流式气泡里的图片点击：与消息气泡内图片同一套白名单 + 新标签打开。 */
-function onStreamingImageClick(event: MouseEvent, source: string): void {
-  const url = contentMediaUrlOf(source);
-  if (!url) return;
-  event.preventDefault();
-  openExternalUrlSafe(url, { allowDataImage: true });
-}
-
-function onContentAttachmentClick(event: MouseEvent, att: ContentAttachmentItem): void {
-  const href = contentAttachmentHref(att);
-  if (!href) return;
-  event.preventDefault();
-  openExternalUrlSafe(href, { allowDataImage: true });
-}
-
-/** 渲染期白名单：不安全（如 `data:image/svg+xml`）就**不给 href**，卡片退化成纯展示。 */
+/**
+ * 附件卡片（文档 / 视频）的**下载**地址；音频走 `AudioPlayer` 不经过这里。
+ *
+ * 不再有 click 处理器：`<a :href download>` 的原生导航就足够 —— 带 `download=1` 时
+ * 网关回 `attachment`，浏览器下载并**保留当前页面**，也就不需要（也不该有）`window.open`。
+ */
 function contentAttachmentHref(att: ContentAttachmentItem): string | null {
-  return contentMediaSafeHref(contentMediaUrlOf(att.url));
+  return downloadHrefOrNull(contentMediaUrlOf(att.url));
 }
 
-/** 图片同上的渲染期白名单（用户侧包 `<a>` 时用；助手侧是裸 `<img>` 不需要）。 */
+/** 图片同上：也用 `<a download>`，绝不走 JS 打开。 */
 function contentImageHref(image: ContentImageBlock): string | null {
-  return contentMediaSafeHref(contentMediaUrlOf(image.url));
+  return downloadHrefOrNull(contentMediaUrlOf(image.url));
+}
+
+/** 流式气泡里的图片（手上只有原始引用，没有 block）：同一套下载地址。 */
+function streamingImageHref(source: string): string | null {
+  return downloadHrefOrNull(contentMediaUrlOf(source));
 }
 
 /** 旧版 `handleChatAttachmentPaste`：输入框里 Ctrl+V 截图可直接变成附件。 */
@@ -991,6 +984,7 @@ const streaming = computed(() => sending.value);
  * 未连接 / 流式中（加入待执行任务）/ 带附件 / 普通。
  */
 const composerPlaceholder = computed<string>(() => {
+  if (insufficientCredits.value) return "积分不足，请充值后再发送消息";
   if (!gateway.connected) return "未连接到网关，无法发送消息";
   if (streaming.value) return "输入消息加入待执行任务（Enter 添加，Shift+Enter 换行）";
   if (attachments.value.length > 0)
@@ -2167,6 +2161,12 @@ async function loadHistory(options?: { skipCache?: boolean }): Promise<void> {
     }>("chat.history", {
       sessionKey: resolvedSessionKey(),
       limit: 200,
+      // ⚠️ 必须**显式**传 offset:0：不传 offset 时网关走 `readChatHistoryPage` 的
+      // 「无 offset 分支」，响应里根本没有 hasMore / nextOffset / totalMessages
+      // （`src/gateway/server-methods/chat.ts:3044-3070`）。拿不到 hasMore，
+      // historyHasMore 恒为 false ⇒「加载更早历史」既不会自动触发、点了也直接 return。
+      offset: 0,
+      maxChars: CHAT_HISTORY_MAX_CHARS,
     });
     // 记录后端给出的分页游标：还有更早则允许「加载更早」继续翻页
     historyHasMore.value = res?.hasMore === true;
@@ -2471,6 +2471,8 @@ async function steerPendingTask(item: PendingTask): Promise<void> {
 
 /** 非流式发送；流式阶段先加入待执行列表。 */
 async function submitComposer(): Promise<void> {
+  // 积分不足校验：剩余积分 <= 0 时禁止发送（按钮已禁用，这里兜底 Enter 路径）
+  if (!sending.value && insufficientCredits.value) return;
   if (sending.value) {
     enqueuePendingTask();
   } else {
@@ -2911,6 +2913,15 @@ function formatCredits(value: number | null | undefined): string {
   if (value >= 10000) return `${(value / 1000).toFixed(1)}`;
   return value.toLocaleString("zh-CN");
 }
+
+/**
+ * 剩余积分展示：服务端可能返回负数（透支）——按需求负数与 0 统一显示 0。
+ * 只用于展示层，`latestBalance` / `insufficientCredits` 判定仍用原始值。
+ */
+function formatBalance(value: number | null | undefined): string {
+  if (typeof value !== "number" || !Number.isFinite(value)) return "-";
+  return formatCredits(Math.max(0, value));
+}
 </script>
 
 <template>
@@ -3083,9 +3094,11 @@ function formatCredits(value: number | null | undefined): string {
               <div class="bubble bubble-user">
                 <!-- 已发送的附件：图片直接出缩略图，其他文件出文件名卡片（旧版
                      renderChatAttachmentMessages / renderAssistantAttachments 的消息侧对应物）。
-                     点击预览：走 `<a>` + 白名单 href（旧版 chat-message.ts:2175-2202 的
+                     点击**只下载**：走 `<a download>` + 白名单 href（旧版 chat-message.ts:2175-2202 的
                      `chat-assistant-attachment-card__link`），拿不到安全地址时
-                     **不渲染 href**，节点退化成纯展示（不出现「能点但没反应」）。 -->
+                     **不渲染 href**，节点退化成纯展示（不出现「能点但没反应」）。
+                     刻意**没有** click 处理器 / `window.open` —— 网关对 image/audio/video 回
+                     `Content-Disposition: inline`，一旦 JS 打开就会把整个聊天页顶掉。 -->
                 <div v-if="msg.attachments?.length" class="bubble-user__attachments">
                   <a
                     v-for="att in msg.attachments"
@@ -3093,11 +3106,9 @@ function formatCredits(value: number | null | undefined): string {
                     class="bubble-user__attachment"
                     :class="{ 'bubble-user__attachment--previewable': !!previewHrefOf(att) }"
                     :href="previewHrefOf(att) ?? undefined"
-                    target="_blank"
-                    rel="noopener noreferrer"
+                    :download="downloadFileName(att.fileName)"
                     :title="attachmentTooltip(att)"
                     :aria-label="attachmentTooltip(att)"
-                    @click="onAttachmentPreviewClick($event, att)"
                   >
                     <img
                       v-if="isImageAttachment(att) && getChatAttachmentPreviewUrl(att)"
@@ -3119,13 +3130,11 @@ function formatCredits(value: number | null | undefined): string {
                     v-for="media in msg.historyMedia"
                     :key="media.key"
                     class="bubble-user__attachment"
-                    :class="{ 'bubble-user__attachment--previewable': !!historyMediaUrlOf(media) }"
-                    :href="historyMediaUrlOf(media) || undefined"
-                    target="_blank"
-                    rel="noopener noreferrer"
+                    :class="{ 'bubble-user__attachment--previewable': !!historyMediaHrefOf(media) }"
+                    :href="historyMediaHrefOf(media) || undefined"
+                    :download="downloadFileName(media.label)"
                     :title="historyMediaTooltip(media)"
                     :aria-label="historyMediaTooltip(media)"
-                    @click="onHistoryMediaClick($event, media)"
                   >
                     <img
                       v-if="media.kind === 'image' && historyMediaUrlOf(media)"
@@ -3148,11 +3157,9 @@ function formatCredits(value: number | null | undefined): string {
                       v-if="contentImageHref(image)"
                       class="bubble-user__attachment bubble-user__attachment--previewable"
                       :href="contentImageHref(image) ?? undefined"
-                      target="_blank"
-                      rel="noopener noreferrer"
+                      :download="downloadFileName(image.alt, '附件图片')"
                       :title="contentImageTooltip(image)"
                       :aria-label="contentImageTooltip(image)"
-                      @click="onContentImageClick($event, image)"
                     >
                       <img
                         class="bubble-user__image"
@@ -3169,11 +3176,9 @@ function formatCredits(value: number | null | undefined): string {
                       v-if="att.kind !== 'audio' && contentAttachmentHref(att)"
                       class="bubble-user__attachment bubble-user__attachment--previewable"
                       :href="contentAttachmentHref(att) ?? undefined"
-                      target="_blank"
-                      rel="noopener noreferrer"
+                      :download="downloadFileName(att.label)"
                       :title="att.label"
                       :aria-label="att.label"
-                      @click="onContentAttachmentClick($event, att)"
                     >
                       <span class="bubble-user__file">
                         <ChatIcon class="bubble-user__file-icon" name="paperclip" />
@@ -3234,8 +3239,8 @@ function formatCredits(value: number | null | undefined): string {
                   size="small"
                   @click="toggleThinking(msg.id)"
                 >
-                  <span class="thinking-fold-icon" :class="{ open: expandedThinkingIds.has(msg.id) }">▸</span>
                   <span>思考过程</span>
+                  <span class="thinking-fold-icon" :class="{ open: expandedThinkingIds.has(msg.id) }"><el-icon><ArrowRightBold /></el-icon></span>
                 </el-button>
                 <div v-if="expandedThinkingIds.has(msg.id)" class="thinking-fold-body">
                   {{ msg.thinking }}
@@ -3251,16 +3256,23 @@ function formatCredits(value: number | null | undefined): string {
                    `:empty { display:none }` 兜住「有块但都解析不出地址」的空容器。 -->
               <div v-if="msg.contentImages?.length" class="content-media__images">
                 <template v-for="(image, i) in msg.contentImages" :key="`${msg.id}-img-${i}`">
-                  <img
+                  <!-- 包一层 <a>：图片也算「附件」，点击只**下载**（`download=1` 让网关回
+                       attachment）。以前是裸 <img> + JS 打开，那样会把整个聊天页顶掉。 -->
+                  <a
                     v-if="contentMediaUrlOf(image.url)"
-                    class="content-media__image"
-                    :src="contentMediaUrlOf(image.url)"
-                    :alt="contentImageAlt(image)"
+                    class="content-media__image-link"
+                    :href="contentImageHref(image) ?? undefined"
+                    :download="downloadFileName(image.alt, '附件图片')"
                     :title="contentImageTooltip(image)"
-                    :width="image.width"
-                    :height="image.height"
-                    @click="onContentImageClick($event, image)"
-                  />
+                  >
+                    <img
+                      class="content-media__image"
+                      :src="contentMediaUrlOf(image.url)"
+                      :alt="contentImageAlt(image)"
+                      :width="image.width"
+                      :height="image.height"
+                    />
+                  </a>
                 </template>
               </div>
 
@@ -3274,11 +3286,9 @@ function formatCredits(value: number | null | undefined): string {
                   class="content-media__card"
                   :class="{ 'content-media__card--previewable': !!contentAttachmentHref(att) }"
                   :href="contentAttachmentHref(att) ?? undefined"
-                  target="_blank"
-                  rel="noopener noreferrer"
+                  :download="downloadFileName(att.label)"
                   :title="att.label"
                   :aria-label="att.label"
-                  @click="onContentAttachmentClick($event, att)"
                 >
                   <ChatIcon class="content-media__card-icon" name="paperclip" />
                   <span class="content-media__card-name">{{ att.label }}</span>
@@ -3296,14 +3306,14 @@ function formatCredits(value: number | null | undefined): string {
               <!-- 消息元信息行：积分 + 上下文占用，两者都拿不到时不渲染 -->
               <div v-if="hasMessageMeta(msg)" class="content-credits">
                 <template v-if="msg.spendResult">
-                  <span class="credits-item">
+                  <!-- <span class="credits-item">
                     <span class="credits-label">消耗积分</span>
                     <span class="credits-value spend">{{ formatCredits(msg.spendResult.spend) }}</span>
                   </span>
-                  <span class="credits-divider" />
+                  <span class="credits-divider" /> -->
                   <span class="credits-item">
                     <span class="credits-label">剩余积分</span>
-                    <span class="credits-value balance">{{ formatCredits(msg.spendResult.balance) }}</span>
+                    <span class="credits-value balance">{{ formatBalance(msg.spendResult.balance) }}</span>
                   </span>
                   <span v-if="msg.provider && msg.model" class="credits-divider" />
                   <span v-if="msg.provider && msg.model" class="credits-item credits-item-model" :title="`${msg.provider}/${msg.model}`">
@@ -3498,8 +3508,8 @@ function formatCredits(value: number | null | undefined): string {
                  「有思考内容时多一段正文」的区别。 -->
             <div v-if="streamingThinking" class="thinking-fold">
               <div class="thinking-fold-head open">
-                <span class="thinking-fold-icon open">▸</span>
                 <span class="thinking"><i class="dot" /><i class="dot" /><i class="dot" /> 思考中</span>
+                <span class="thinking-fold-icon open"><el-icon><ArrowRightBold /></el-icon></span>
               </div>
               <div class="thinking-fold-body thinking-fold-body-live">
                 {{ streamingThinking }}<span class="caret" />
@@ -3517,15 +3527,20 @@ function formatCredits(value: number | null | undefined): string {
               <!-- 流式过程中正文里出现的媒体：`MEDIA:` 行剥离后立刻渲染，
                    交互（播放 / 预览 / 下载）与落库后的消息气泡完全同一套。 -->
               <div v-if="streamingMediaImages.length" class="content-media__images">
-                <img
+                <a
                   v-for="(image, i) in streamingMediaImages"
                   :key="`streaming-img-${i}`"
-                  class="content-media__image"
-                  :src="contentMediaUrlOf(image.url)"
-                  :alt="image.label"
+                  class="content-media__image-link"
+                  :href="streamingImageHref(image.url) ?? undefined"
+                  :download="downloadFileName(image.label, '附件图片')"
                   :title="image.label"
-                  @click="onStreamingImageClick($event, image.url)"
-                />
+                >
+                  <img
+                    class="content-media__image"
+                    :src="contentMediaUrlOf(image.url)"
+                    :alt="image.label"
+                  />
+                </a>
               </div>
               <template v-for="(att, i) in streamingMediaAttachments" :key="`streaming-att-${i}`">
                 <AudioPlayer v-if="att.kind === 'audio'" :source="att.url" :label="att.label" />
@@ -3534,11 +3549,9 @@ function formatCredits(value: number | null | undefined): string {
                   class="content-media__card"
                   :class="{ 'content-media__card--previewable': !!contentAttachmentHref(att) }"
                   :href="contentAttachmentHref(att) ?? undefined"
-                  target="_blank"
-                  rel="noopener noreferrer"
+                  :download="downloadFileName(att.label)"
                   :title="att.label"
                   :aria-label="att.label"
-                  @click="onContentAttachmentClick($event, att)"
                 >
                   <ChatIcon class="content-media__card-icon" name="paperclip" />
                   <span class="content-media__card-name">{{ att.label }}</span>
@@ -3551,14 +3564,14 @@ function formatCredits(value: number | null | undefined): string {
                   <span>积分计算中</span>
                 </span>
                 <template v-else-if="streamingSpend">
-                  <span class="credits-item">
+                  <!-- <span class="credits-item">
                     <span class="credits-label">消耗积分</span>
                     <span class="credits-value spend">{{ formatCredits(streamingSpend.spend) }}</span>
                   </span>
-                  <span class="credits-divider" />
+                  <span class="credits-divider" /> -->
                   <span class="credits-item">
                     <span class="credits-label">剩余积分</span>
-                    <span class="credits-value balance">{{ formatCredits(streamingSpend.balance) }}</span>
+                    <span class="credits-value balance">{{ formatBalance(streamingSpend.balance) }}</span>
                   </span>
                   <span v-if="effectiveModelParts" class="credits-divider" />
                   <span v-if="effectiveModelParts" class="credits-item credits-item-model" :title="`${effectiveModelParts.provider}/${effectiveModelParts.model}`">
@@ -3716,11 +3729,9 @@ function formatCredits(value: number | null | undefined): string {
               v-if="isImageAttachment(att) && getChatAttachmentPreviewUrl(att)"
               class="chat-attachment-thumb__image-link"
               :href="previewHrefOf(att) ?? undefined"
-              target="_blank"
-              rel="noopener noreferrer"
+              :download="downloadFileName(att.fileName)"
               :title="attachmentTooltip(att)"
               :aria-label="attachmentTooltip(att)"
-              @click="onAttachmentPreviewClick($event, att)"
             >
               <img :src="getChatAttachmentPreviewUrl(att) ?? ''" alt="附件预览" />
             </a>
@@ -3728,11 +3739,9 @@ function formatCredits(value: number | null | undefined): string {
               v-else
               class="chat-attachment-file"
               :href="previewHrefOf(att) ?? undefined"
-              target="_blank"
-              rel="noopener noreferrer"
+              :download="downloadFileName(att.fileName)"
               :title="attachmentTooltip(att)"
               :aria-label="attachmentTooltip(att)"
-              @click="onAttachmentPreviewClick($event, att)"
             >
               <ChatIcon class="chat-attachment-file__icon" name="paperclip" />
               <span class="chat-attachment-file__text">
@@ -3762,6 +3771,7 @@ function formatCredits(value: number | null | undefined): string {
           v-model="input"
           class="composer-input"
           rows="1"
+          :disabled="insufficientCredits"
           :placeholder="composerPlaceholder"
           @keydown="onKeydown"
           @paste="onInputPaste"
@@ -3956,7 +3966,7 @@ function formatCredits(value: number | null | undefined): string {
               v-else
               type="primary"
               class="send-button send-button-primary"
-              :disabled="!input.trim() && attachments.length === 0"
+              :disabled="insufficientCredits || (!input.trim() && attachments.length === 0)"
               title="发送（Enter）"
               aria-label="发送"
               @click="submitComposer"
@@ -4529,6 +4539,10 @@ html.dark .credits-alert :deep(.el-alert__title) {
   display: inline-block;
   transition: transform 0.2s var(--wb-ease);
   color: var(--wb-text-tertiary);
+}
+
+.thinking-fold-icon .el-icon {
+  margin-top: 0 !important;
 }
 
 .thinking-fold-icon.open {
@@ -5212,6 +5226,12 @@ html.dark .credits-alert :deep(.el-alert__title) {
   overflow-y: hidden;
 }
 
+.composer-input:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+  background: transparent;
+}
+
 .composer-input::placeholder {
   color: var(--wb-text-tertiary);
 }
@@ -5450,7 +5470,7 @@ html.dark .credits-alert :deep(.el-alert__title) {
 }
 
 .chat-attachment-thumb__image-link[href] {
-  cursor: zoom-in;
+  cursor: pointer;
 }
 
 .chat-attachment-thumb img {
@@ -5477,7 +5497,7 @@ html.dark .credits-alert :deep(.el-alert__title) {
 }
 
 .chat-attachment-file[href] {
-  cursor: zoom-in;
+  cursor: pointer;
 }
 
 /* 双类选择器：ChatIcon 自带的 `.chat-icon` 单类规则会与这里同特异性，
@@ -5560,7 +5580,7 @@ html.dark .credits-alert :deep(.el-alert__title) {
 }
 
 .bubble-user__attachment--previewable {
-  cursor: zoom-in;
+  cursor: pointer;
 }
 
 /* 可点提示：只做极轻的高亮描边，不改变气泡排版 */
@@ -5619,6 +5639,12 @@ html.dark .credits-alert :deep(.el-alert__title) {
   display: none;
 }
 
+/* 图片外层链接：`display: contents` ⇒ 不生成盒子，`<img>` 仍是 `.content-media__images`
+   的直接 flex 项，布局与「加链接之前」完全一致（只多一个带 href 的可点祖先）。 */
+.content-media__image-link {
+  display: contents;
+}
+
 .content-media__image {
   display: block;
   max-width: 320px;
@@ -5626,7 +5652,7 @@ html.dark .credits-alert :deep(.el-alert__title) {
   border: 1px solid var(--wb-border);
   border-radius: var(--wb-radius-sm);
   object-fit: contain;
-  cursor: zoom-in;
+  cursor: pointer;
 }
 
 .content-media__image:hover {
@@ -5690,9 +5716,9 @@ html.dark .credits-alert :deep(.el-alert__title) {
   cursor: default;
 }
 
-/* 与图片、用户侧附件同一套「可点开预览」手感 */
+/* 与图片、用户侧附件同一套「可下载」手感 */
 .content-media__card--previewable {
-  cursor: zoom-in;
+  cursor: pointer;
 }
 
 .content-media__card--previewable:hover {
@@ -5709,7 +5735,7 @@ html.dark .credits-alert :deep(.el-alert__title) {
 }
 
 .content-media__card-name {
-  /* 跟卡片本体走（zoom-in / default），不然 hover 到文字上会闪回 pointer */
+  /* 跟卡片本体走（pointer / default），不然 hover 到文字上会闪回别的光标 */
   cursor: inherit;
   /* 自成一个居中盒：内容再长也只是横向省略号，不会把行高顶高 */
   display: block;

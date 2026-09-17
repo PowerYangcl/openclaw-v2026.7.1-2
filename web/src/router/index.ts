@@ -85,7 +85,7 @@ const routes: RouteRecordRaw[] = [
   },
   // Terminal: full-screen (outside MainLayout), mirrors ui/ ?view=terminal.
   // { path: "/terminal", name: "terminal", component: () => import("@/views/TerminalView.vue"), meta: { title: "终端", icon: "Terminal", layout: "blank" } },
-  { path: "/:pathMatch(.*)*", redirect: "/overview" },
+  { path: "/:pathMatch(.*)*", redirect: "/chat" },
 ];
 
 export const router = createRouter({

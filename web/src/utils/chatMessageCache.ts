@@ -76,7 +76,11 @@ export function setChatMessageCache(
   cursor?: { hasMore?: boolean; nextOffset?: number },
 ): void {
   const existing = cache.get(key);
-  const hasMore = cursor?.hasMore === true || existing?.hasMore === true || false;
+  // ⚠️ 显式传入的 hasMore **优先**：只更新消息（不传 cursor）时沿用旧游标；
+  // 但翻到最后一页时 `loadOlderHistory` 会显式传 `hasMore: false`，这里必须能把它落下去，
+  // 否则游标永远停在「还有更早」，切回会话后会反复发起注定为空的翻页请求。
+  const hasMore =
+    cursor?.hasMore !== undefined ? cursor.hasMore === true : existing?.hasMore === true || false;
   const nextOffset =
     typeof cursor?.nextOffset === "number"
       ? cursor.nextOffset

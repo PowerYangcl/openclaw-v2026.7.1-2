@@ -410,6 +410,76 @@ function isOffsetInsideFence(spans: readonly FenceSpan[], offset: number): boole
 // ---------------------------------------------------------------------------
 
 /**
+ * 行内 `MEDIA:<引用>` 的识别（`- **PDF 版**：MEDIA:/root/x.pdf`）。
+ *
+ * ## 为什么需要这一档
+ * `src/media/parse.ts:544` 与上游一致，只认**行首独占行**的 `MEDIA:` —— 那是**投递语义**
+ * （避免正文里提一句 `MEDIA:` 就触发投递）。但模型经常把引用内联在列表项 / 加粗标题后面：
+ * ```
+ * - **PDF 版**：MEDIA:/root/openclaw/media/outbound/x.pdf
+ * ```
+ * 这时服务端不投递、客户端也解不出来 ⇒ 用户既没有卡片，正文里还留着一行 `MEDIA:` 脏文本。
+ *
+ * ## 保守策略：只认「整段就是一条引用」，绝不猜路径边界
+ * 行内形态没法像行首那样用「整行」界定路径终点。取舍是**宁可不出卡片**，
+ * 也不能生成指向错误路径的卡片，所以要求：
+ * 1. 该行**只有一个** `MEDIA:`（多引用不动，不猜切割点）；
+ * 2. `MEDIA:` 之后（去掉尾部中文句读 / markdown 强调闭合符）**整段**就是一条合法引用；
+ * 3. 该引用**必须带已知扩展名或是 http(s) 地址** —— 否则 `MEDIA:/some/path 这样写`
+ *    这类正文说明会被误判（`isLikelyLocalPath` 只看是否以 `/` 开头，太宽）；
+ * 4. 位置**不在行内 code span 里** —— `` `MEDIA:/x.mp3` `` 是讲解举例，不是投递。
+ *
+ * 不满足则返回 `null`，调用方原样保留该行（与修复前行为一致，不会更差）。
+ */
+/**
+ * 引用末尾是否像一个**文件**（`…​.pdf`、`…​.docx`）。
+ *
+ * ⚠️ 不能复用 `mimeTypeForMediaPath` 来做这个判断：`MIME_BY_EXT` 是「能给出 mimeType 的
+ * 扩展名」表，天生覆盖不全（docx / doc / xlsx 都不在表里），拿它判「是不是文件」会把
+ * Word / Excel 产物漏掉。
+ */
+function hasFileExtensionTail(candidate: string): boolean {
+  const withoutQuery = candidate.split(/[?#]/)[0] ?? "";
+  const fileName = withoutQuery.split(/[\\/]/).pop() ?? "";
+  return /\.[A-Za-z0-9]{1,8}$/.test(fileName);
+}
+
+function splitInlineMediaReference(line: string): { prefix: string; reference: string } | null {
+  const matches = Array.from(line.matchAll(MEDIA_TOKEN_RE));
+  if (matches.length !== 1) return null;
+  const match = matches[0]!;
+  const start = match.index ?? 0;
+  if (start <= 0) return null; // 行首形态走主路径
+  const prefix = line.slice(0, start);
+  if (!prefix.trim()) return null; // 前缀只有空白 = 行首形态
+  // 行内 code span 排除：模型讲解这套约定时，正文里会写 `` `MEDIA:/x.mp3` `` —— 反引号是
+  // **行内代码**（围栏 ``` 在主循环更前面就拦掉了，这里只剩单个反引号对），里面的路径是
+  // 举例、不是投递，解成卡片会凭空多一个指向不存在文件的幽灵卡片。判据：`MEDIA:` 之前
+  // 出现**奇数个**反引号 ⇒ 当前位置在 code span 内部。
+  if ((prefix.match(/`/g)?.length ?? 0) % 2 === 1) return null;
+
+  const payload = match[1] ?? "";
+  const unwrapped = unwrapQuoted(payload);
+  const trimmed = (unwrapped ?? payload).trim();
+  if (!trimmed) return null;
+
+  // 尾部容忍中文句读与 markdown 强调 / 代码闭合符（`MEDIA:/x.pdf**`、`MEDIA:/x.pdf。`）
+  const tail = trimmed.replace(/[。．，、；;:,：*_`]+$/, "");
+  if (!tail) return null;
+  const candidate = normalizeMediaSource(cleanCandidate(tail));
+  if (!isValidMedia(candidate, { allowSpaces: true })) return null;
+  if (!isRenderableMediaReference(candidate)) return null;
+  // 上游 `MEDIA_TOKEN_RE` 的 payload 正则 `[^\n]+` 是**贪婪**的：同一行出现两处 `MEDIA:` 时，第一个
+  // match 会把第二个 `MEDIA:` 连同后缀一起吞进 payload（`/root/a.pdf 和 MEDIA:/root/b.pdf`），
+  // 此时 matches.length 仍然等于 1 —— 上面那道检查拦不住。补一道：候选里不允许再出现 `MEDIA:`。
+  if (/media:/i.test(candidate)) return null;
+  // 必须能看出「这是个文件」：末段带扩展名，或是远端 http(s) 地址
+  if (!hasFileExtensionTail(candidate) && !HTTP_URL_PREFIX_RE.test(candidate)) return null;
+
+  return { prefix: cleanLineText(prefix), reference: candidate };
+}
+
+/**
  * 从正文里抽出 `MEDIA:<引用>` 行。
  *
  * 返回 `text`（已剥离可渲染行）与 `media`（可渲染引用，已去重）。不可渲染的**相对引用**
@@ -439,8 +509,19 @@ export function splitMediaMarkers(text: unknown): MediaMarkerSplit {
       keptLines.push(line);
       continue;
     }
+    // ② 行内 `MEDIA:`（`- **PDF 版**：MEDIA:/x.pdf`）—— 上游只认行首，客户端放宽一档。
+    // 见 splitInlineMediaReference：只在「整段就是一条引用」时才吃，不猜边界。
     if (!line.trimStart().toUpperCase().startsWith("MEDIA:")) {
-      keptLines.push(line);
+      const inline = splitInlineMediaReference(line);
+      if (!inline) {
+        keptLines.push(line);
+        continue;
+      }
+      if (inline.prefix) keptLines.push(inline.prefix);
+      if (!seen.has(inline.reference)) {
+        seen.add(inline.reference);
+        media.push(inline.reference);
+      }
       continue;
     }
 

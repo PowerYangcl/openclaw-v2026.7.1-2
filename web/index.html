@@ -5,8 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Gcs Agent</title>
     <meta name="description" content="OpenClaw Web Control UI — Vue 3 + Element Plus + Tailwind 4." />
-    <!-- Inline favicon: 32x32 SVG with the OpenClaw glyph (matches the legacy UI iconography). -->
-    <link rel="shortcut icon" href="//www.jdcloud.com/static/img/favicon.ico" type="image/x-icon">
+    <!-- Favicon: JD Cloud icon, self-hosted at web/public/favicon.ico. The Gateway serves this
+         HTML with `img-src 'self' data: blob:` (src/gateway/control-ui-csp.ts), so any remote or
+         protocol-relative icon URL (e.g. //www.jdcloud.com/...) is blocked by CSP — keep it local. -->
+    <link rel="icon" href="/favicon.ico" sizes="any" />
     <script>
       // Mirror the gateway-injected attributes onto window before Vue mounts, so the SPA can
       // resolve API base paths and detect terminal-enabled without FOUC. The Gateway rewrites

@@ -401,5 +401,86 @@ console.log("\n[12] mp3 / pdf / html 三条链路同口径：流式正文提取 
     ok(`${name} ⇒ 归类 ${kind}`, att?.kind === kind, att);
   }
 }
+console.log("\n[13] 行内 `MEDIA:` —— 模型把引用写在列表项里（预发实测：附件不出、正文还留脏文本）");
+{
+  // 现场原文（预发截图）：`MEDIA:` 不在行首，而是跟在 `- **PDF 版**：` 之后。
+  // 上游 src/media/parse.ts:544 只认行首（那是投递语义），客户端渲染层放宽一档。
+  const source = [
+    "PDF 和 Word 都生成好了，直接下载：",
+    "",
+    "- **PDF 版**：MEDIA:/root/openclaw/media/outbound/resume-assistant/简历模板.pdf",
+    "- **Word 版**：MEDIA:/root/openclaw/media/outbound/resume-assistant/简历模板.docx",
+  ].join("\n");
+  const split = splitMediaMarkers(source);
+  ok("行内引用被识别（修复前 media 为空数组）", split.media.length === 2, split.media);
+  ok("PDF 路径完整", split.media[0]?.endsWith("简历模板.pdf") === true, split.media[0]);
+  ok("Word 路径完整", split.media[1]?.endsWith("简历模板.docx") === true, split.media[1]);
+  ok("正文不再残留 MEDIA:", !split.text.includes("MEDIA:"), JSON.stringify(split.text));
+  ok(
+    "列表项前缀保留为可见文本",
+    split.text.includes("- **PDF 版**：") && split.text.includes("- **Word 版**："),
+    JSON.stringify(split.text),
+  );
+  // ⚠️ MIME_BY_EXT 不含 docx/doc/xlsx，别拿它当「是不是文件」的判断（踩过）。
+  const docx = split.media[1] !== undefined ? inferMediaAttachment(split.media[1]) : null;
+  ok("docx 仍归类为 document ⇒ 出下载卡片", docx?.kind === "document", docx);
+}
+
+console.log("\n[14] 行内 `MEDIA:` 的边界：宁可不出卡片，也绝不指向错误路径");
+{
+  const mustNotRender: Array<[string, string]> = [
+    ["后跟说明文字", "- **PDF 版**：MEDIA:/root/x.pdf 这个文件你收好"],
+    ["只有目录没有文件", "- 说明：MEDIA:/root/openclaw/media/outbound 是产物目录"],
+    ["一行两个引用（上游正则贪婪会合并成一条）", "- 产物：MEDIA:/root/a.pdf 和 MEDIA:/root/b.pdf"],
+    ["围栏内的示例", "```\nMEDIA:/root/x.pdf\n```"],
+  ];
+  for (const [name, raw] of mustNotRender) {
+    const split = splitMediaMarkers(raw);
+    ok(`${name} ⇒ 不出卡片`, split.media.length === 0, split.media);
+  }
+
+  const mustRender: Array<[string, string]> = [
+    ["中文句号结尾", "- **PDF 版**：MEDIA:/root/openclaw/media/outbound/x.pdf。"],
+    ["markdown 加粗闭合", "- **PDF 版**：MEDIA:/root/openclaw/media/outbound/x.pdf**"],
+    ["含空格的本地路径", "- 文件：MEDIA:/tmp/openclaw/test image.png"],
+    ["行内 docx", "- **Word 版**：MEDIA:/root/openclaw/media/outbound/x.docx"],
+  ];
+  for (const [name, raw] of mustRender) {
+    const split = splitMediaMarkers(raw);
+    ok(`${name} ⇒ 出卡片`, split.media.length === 1, split.media);
+    ok(`${name} ⇒ 正文无 MEDIA: 残留`, !split.text.includes("MEDIA:"), JSON.stringify(split.text));
+  }
+}
+
+console.log("\n[15] 行内 `MEDIA:` 的反例：不是投递、只是「在讲这个约定」");
+{
+  // 真实场景（本仓库会话里实测 24 处裸 `MEDIA:`，全属这一类）：模型在讲解 MEDIA 约定 /
+  // 回显源码时，正文里会出现 `` `MEDIA:/x.mp3` ``。反引号 = 行内 code ⇒ 举例，不是投递。
+  // 不加这道守卫的话，行内分支会把它解成卡片，凭空多出一个指向不存在文件的幽灵卡片。
+  const mustNotRender: Array<[string, string]> = [
+    [
+      "单个行内 code span 包住引用",
+      "正文里写 `MEDIA:/root/openclaw/media/outbound/x.mp3` 就会投递",
+    ],
+    ["行内 code 只包住 media 字面量", "行首独占一行的 `MEDIA:` 会被剥走，正文不留痕"],
+    ["行内 code + 中文说明结尾", "注意 `MEDIA:/root/x.pdf` 这行的写法。"],
+  ];
+  for (const [name, raw] of mustNotRender) {
+    const split = splitMediaMarkers(raw);
+    ok(`${name} ⇒ 不出卡片`, split.media.length === 0, split.media);
+    ok(`${name} ⇒ 正文原样保留`, split.text.includes("MEDIA:"), JSON.stringify(split.text));
+  }
+
+  // 反引号是**成对**的 ⇒ 当前位置不在 code span 内，照常解析（守卫不能误伤）
+  const paired = "`--output` 参数：MEDIA:/root/openclaw/media/outbound/x.pdf";
+  const pairedSplit = splitMediaMarkers(paired);
+  ok("成对反引号（不在 code 内）⇒ 照常出卡片", pairedSplit.media.length === 1, pairedSplit.media);
+  ok(
+    "成对反引号 ⇒ 正文保留参数名、去掉引用",
+    pairedSplit.text.includes("`--output` 参数：") && !pairedSplit.text.includes("MEDIA:"),
+    JSON.stringify(pairedSplit.text),
+  );
+}
+
 console.log(`\n==== ${pass} passed, ${fail} failed ====`);
 process.exit(fail === 0 ? 0 : 1);

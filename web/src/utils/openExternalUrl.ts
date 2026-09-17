@@ -103,7 +103,7 @@ export function openExternalUrlSafe(
     return null;
   }
 
-  const opened = window.open(safeUrl, "_blank", "noopener,noreferrer");
+  const opened = window.open(safeUrl, "_self", "noopener,noreferrer");
   if (opened) {
     opened.opener = null;
   }

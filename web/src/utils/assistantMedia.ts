@@ -214,6 +214,45 @@ export function buildAssistantMediaUrl(params: {
   });
 }
 
+/** `?download=1` 的查询键名（与 `src/gateway/control-ui.ts` 的解析保持一致）。 */
+export const ASSISTANT_MEDIA_DOWNLOAD_QUERY = "download";
+
+/**
+ * 这个地址是不是「我们自己网关托管的媒体」。
+ *
+ * 只有托管的地址才谈得上换 disposition —— 远端第三方地址（agent 引用的公网图片等）
+ * 的响应头我们改不了，`download` 属性在跨源下也会被浏览器忽略。
+ */
+export function isGatewayHostedMediaUrl(url: string, base?: string | null): boolean {
+  const trimmed = typeof url === "string" ? url.trim() : "";
+  if (!trimmed) return false;
+  if (trimmed.includes(ASSISTANT_MEDIA_PATH)) return true;
+  const absoluteBase = typeof base === "string" ? base.replace(/\/+$/, "") : "";
+  return absoluteBase.length > 0 && trimmed.startsWith(`${absoluteBase}/`);
+}
+
+/**
+ * 把「网关托管的媒体地址」改写成**强制下载**的地址（附件链接专用）。
+ *
+ * ## 为什么需要它
+ * 网关的 `/__openclaw__/assistant-media` 默认按 MIME 给 disposition：
+ * image / audio / video → `inline`，其余 → `attachment`
+ * （`src/gateway/control-ui.ts: buildAssistantMediaContentDisposition`）。
+ * 于是**点一下附件链接**时，浏览器对图片 / 音视频会**就地渲染** —— 整个 SPA 页面
+ * 被顶掉换成那个文件，用户视角就是「附件自己打开了 / 聊天界面没了」。
+ * 加上 `?download=1` 后网关改回 `attachment`，浏览器只下载、**不动当前页面、不弹窗**。
+ *
+ * 远端地址（改不了 disposition）原样返回；调用方用 `isGatewayHostedMediaUrl`
+ * 判断能不能渲染成链接。
+ */
+export function withAssistantMediaDownload(url: string, base?: string | null): string {
+  const trimmed = typeof url === "string" ? url.trim() : "";
+  if (!trimmed) return "";
+  if (!isGatewayHostedMediaUrl(trimmed, base)) return trimmed;
+  const sep = trimmed.includes("?") ? "&" : "?";
+  return `${trimmed}${sep}${ASSISTANT_MEDIA_DOWNLOAD_QUERY}=1`;
+}
+
 export type AssistantMediaAvailability =
   | { status: "ready"; ticket?: string }
   | { status: "unavailable"; reason: string }
