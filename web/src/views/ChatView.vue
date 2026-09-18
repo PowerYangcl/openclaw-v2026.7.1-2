@@ -7,36 +7,61 @@
  * ```
  * .chat-layout
  *   ├─ ChatSidebar
- *   └─ ChatPane(chrome="none")        ← 会话 key 直接来自路由 / settings
+ *   ├─ (.chat-backdrop   ← 仅手机端且抽屉打开时)
+ *   └─ .chat-main
+ *        ├─ ChatPaneTabs（仅窄屏 + 拆分态）
+ *        └─ ChatPane(chrome="none")        ← 会话 key 直接来自路由 / settings
  * ```
  * 拆分视图：
  * ```
  * .chat-layout
  *   ├─ ChatSidebar
- *   └─ .chat-split-view
- *        ├─ .chat-split-view__column   (flex: columnWeight)
- *        │    ├─ ChatPane(chrome="pane")
- *        │    ├─ ResizableDivider(horizontal)
- *        │    └─ ChatPane(chrome="pane")
- *        ├─ ResizableDivider(vertical)
- *        └─ .chat-split-view__column …
+ *   └─ .chat-main
+ *        ├─ ChatPaneTabs（仅窄屏 + 拆分态）
+ *        └─ .chat-split-view
+ *             ├─ .chat-split-view__column   (flex: columnWeight)
+ *             │    ├─ ChatPane(chrome="pane")
+ *             │    ├─ ResizableDivider(horizontal)
+ *             │    └─ ChatPane(chrome="pane")
+ *             ├─ ResizableDivider(vertical)
+ *             └─ .chat-split-view__column …
  * ```
  *
- * 布局模型（列 / 窗格 / 权重）由 `@/utils/splitLayout` 提供，逐行移植自旧版
- * `ui/src/pages/chat/split-layout.ts`；容器的渲染顺序与旧版 `chat-page.ts` 一致。
+ * ## 三档视口语义（改手机端适配前请先读这段）
+ *
+ * | 宽度 | 侧栏 | 窗格 | 顶部 chrome |
+ * | --- | --- | --- | --- |
+ * | > 1099px | 常驻列（可收成 44px 图标条） | 全部并排渲染 | 无切换器（点窗格即切换） |
+ * | 769–1099px | 常驻列 | **只渲染活动窗格** | 拆分态加一条窗格切换器 |
+ * | ≤768px（含矮横屏） | **覆盖式抽屉**（`.chat-backdrop` + 平移进出） | 只渲染活动窗格 | 同上，且目录按钮变成「打开抽屉」 |
+ *
+ * ⚠️ 三处判据必须同步，否则会出现「按钮点了没反应」或「CSS 已按手机排版、JS 还按桌面算」：
+ * `NARROW_SPLIT_QUERY`（本文件）、`MOBILE_QUERY`（本文件）、
+ * `ChatPane.vue` 的 `allowSplit`，以及 `src/styles/layout.mobile.css` 的 `@media`。
+ *
+ * ## 布局模型（列 / 窗格 / 权重）
+ * 由 `@/utils/splitLayout` 提供，逐行移植自旧版 `ui/src/pages/chat/split-layout.ts`；
+ * 容器的渲染顺序与旧版 `chat-page.ts` 一致。
  *
  * ## 职责边界
- * - **本文件**：持有「当前会话 key」「布局」「二级目录折叠态」，负责路由同步与持久化；
- * - **ChatPane.vue**：只渲染一个会话，不读路由、不写全局会话 key（见其文件头说明）。
+ * - **本文件**：持有「当前会话 key」「布局」「二级目录折叠态 / 抽屉态」「视口档位」，
+ *   负责路由同步与持久化；
+ * - **ChatPane.vue**：只渲染一个会话，不读路由、不写全局会话 key（见其文件头说明）；
+ * - **ChatPaneTabs.vue**：窄屏窗格切换器，纯展示 + 事件上抛。
  *
  * ## 与旧版的差异（有意为之）
- * 旧版把布局存进 `settings.chatSplitLayout`（网关侧 UI 设置）；本项目没有该字段，
- * 改用 localStorage（`openclaw.web.chatSplitLayout.v1`），与 `sidebarSnapshot` /
- * `chat-side-collapsed` 等既有本地状态的存放方式保持一致。
+ * 1. 旧版把布局存进 `settings.chatSplitLayout`（网关侧 UI 设置）；本项目没有该字段，
+ *    改用 localStorage（`openclaw.web.chatSplitLayout.v1`），与 `sidebarSnapshot` /
+ *    `chat-side-collapsed` 等既有本地状态的存放方式保持一致。
+ * 2. 旧版窄屏**没有**窗格切换器（`ui/src/pages/chat/chat-controls.ts` 里零个 `pane` 引用），
+ *    一旦处于拆分态，非活动窗格在窄屏就彻底不可达；本文件补上 `ChatPaneTabs`。
+ * 3. 旧版窄屏把侧栏留在常规流里（236px 常驻），390px 手机上对话区只剩 154px；
+ *    本项目在 ≤768px 把它改成覆盖式抽屉。
  */
-import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch, type Ref } from "vue";
 import { useRoute, useRouter } from "vue-router";
 import ChatSidebar from "@/components/ChatSidebar.vue";
+import ChatPaneTabs from "@/components/ChatPaneTabs.vue";
 import ResizableDivider from "@/components/ResizableDivider.vue";
 import ChatPane from "@/views/ChatPane.vue";
 import { useSettingsStore } from "@/stores/settings";
@@ -78,13 +103,45 @@ function readSideCollapsed(): boolean {
 
 const sideCollapsed = ref<boolean>(readSideCollapsed());
 
+/**
+ * 手机端二级目录抽屉是否打开。
+ *
+ * 桌面端不使用（侧栏是常驻的一列），所以初值恒为 `false`；视口切回桌面时会被
+ * `watch(mobile, ...)` 复位，避免「拉宽后又缩窄 → 抽屉自动弹开」。
+ */
+const drawerOpen = ref(false);
+
+/**
+ * 二级目录的开关。
+ *
+ * 两种形态：桌面端 = 「收起成 44px 图标条」（持久化），手机端 = 「推出/收起覆盖式抽屉」
+ * （不持久化 —— 抽屉开着刷新页面没有意义）。
+ */
 function toggleSide(): void {
+  if (mobile.value) {
+    drawerOpen.value = !drawerOpen.value;
+    return;
+  }
   sideCollapsed.value = !sideCollapsed.value;
   try {
     window.localStorage.setItem(SIDE_COLLAPSED_KEY, sideCollapsed.value ? "1" : "0");
   } catch {
     // 隐私模式下 localStorage 不可用，忽略
   }
+}
+
+function closeDrawer(): void {
+  drawerOpen.value = false;
+}
+
+/** 点了目录里的某个智能体 → 关掉抽屉，让用户立刻看到对话（否则还得再点一次遮罩）。 */
+function onSidebarSelect(): void {
+  closeDrawer();
+}
+
+/** Esc 关抽屉：与 Element Plus 各弹层的行为保持一致。 */
+function onWindowKeydown(event: KeyboardEvent): void {
+  if (event.key === "Escape" && drawerOpen.value) closeDrawer();
 }
 
 /**
@@ -152,11 +209,36 @@ function applyLayout(next: ChatSplitLayout | undefined): void {
  */
 const NARROW_SPLIT_QUERY = "(max-width: 1099px)";
 const narrow = ref(false);
-let mediaQuery: MediaQueryList | null = null;
 
-function handleViewportChange(event: MediaQueryListEvent): void {
-  narrow.value = event.matches;
+/**
+ * 手机形态（≤768px，含「矮横屏」）。
+ *
+ * ⚠️ 这个字符串必须与 `src/styles/layout.mobile.css` 的 `@media` 条件**逐字一致**：
+ * JS 与 CSS 判断漂移就会出现「CSS 已按手机排版、JS 还以为是桌面」（或反过来）——
+ * 典型症状是抽屉已经变成覆盖层、但布局层还在按并排两列算宽度。
+ * 矮横屏（宽 ≤932px 且高 ≤500px）单独列出，因为那时纵向比横向更紧张。
+ */
+const MOBILE_QUERY =
+  "(max-width: 768px), (max-width: 932px) and (max-height: 500px) and (orientation: landscape)";
+const mobile = ref(false);
+
+/** 媒体查询的清理函数（`onBeforeUnmount` 统一调用，避免监听器泄漏）。 */
+const mediaQueryDisposers: Array<() => void> = [];
+
+function bindMediaQuery(query: string, target: Ref<boolean>): void {
+  const mediaQuery = window.matchMedia(query);
+  target.value = mediaQuery.matches;
+  const onChange = (event: MediaQueryListEvent): void => {
+    target.value = event.matches;
+  };
+  mediaQuery.addEventListener("change", onChange);
+  mediaQueryDisposers.push(() => mediaQuery.removeEventListener("change", onChange));
 }
+
+/** 视口回到桌面宽度时把抽屉收掉：不这么做，`drawerOpen` 会残留成「真」。 */
+watch(mobile, (isMobile) => {
+  if (!isMobile) closeDrawer();
+});
 
 /** 活动窗格；单窗格模式下为 null。 */
 const activePane = computed<ChatSplitPane | null>(() => {
@@ -166,6 +248,18 @@ const activePane = computed<ChatSplitPane | null>(() => {
 
 /** 单窗格模式下是否展示「打开拆分视图」入口（窄屏没有意义）。 */
 const allowOpenSplit = computed(() => !narrow.value);
+
+/** 布局里的全部窗格（按渲染顺序）；单窗格模式下为空。 */
+const layoutPanes = computed<ChatSplitPane[]>(() => (layout.value ? panesOf(layout.value) : []));
+
+/**
+ * 是否渲染顶部窗格切换器。
+ *
+ * 只有「窄屏 **且** 处于拆分态」才需要：窄屏下只渲染活动窗格，
+ * 没有切换器另一个窗格就不可达（旧版 `ui/` 正好缺这个东西）。
+ * 桌面拆分态不需要 —— 两个窗格都摆在眼前，点一下就是切换。
+ */
+const showPaneTabs = computed(() => narrow.value && layoutPanes.value.length > 1);
 
 /**
  * 路由 / settings 的会话变化 → 同步到**活动窗格**（拆分态）或单窗格。
@@ -332,124 +426,164 @@ function handleClosePane(paneId: string): void {
 }
 
 onMounted(() => {
-  mediaQuery = window.matchMedia(NARROW_SPLIT_QUERY);
-  narrow.value = mediaQuery.matches;
-  mediaQuery.addEventListener("change", handleViewportChange);
+  bindMediaQuery(NARROW_SPLIT_QUERY, narrow);
+  bindMediaQuery(MOBILE_QUERY, mobile);
+  window.addEventListener("keydown", onWindowKeydown);
 });
 
 onBeforeUnmount(() => {
-  mediaQuery?.removeEventListener("change", handleViewportChange);
-  mediaQuery = null;
+  for (const dispose of mediaQueryDisposers) dispose();
+  mediaQueryDisposers.length = 0;
+  window.removeEventListener("keydown", onWindowKeydown);
 });
 </script>
 
 <template>
   <div class="chat-layout">
-    <!-- 二级目录：只有智能体列表一段（点击切换该 agent 的代表会话） -->
-    <ChatSidebar :collapsed="sideCollapsed" @toggle="toggleSide" />
-
-    <!-- 单窗格模式：直接把当前会话交给唯一的窗格 -->
-    <ChatPane
-      v-if="!layout"
-      pane-id="single"
-      class="chat-split-view__pane chat-split-view__pane--single"
-      :session-key="currentSessionKey"
-      :active="true"
-      chrome="none"
-      :allow-split="allowOpenSplit"
-      :side-collapsed="sideCollapsed"
-      @focus-pane="handleFocusPane"
-      @session-change="handlePaneSessionChange"
-      @open-split="openSplitView"
-      @toggle-side="toggleSide"
+    <!-- 二级目录：只有智能体列表一段（点击切换该 agent 的代表会话）。
+         手机端（`mobile`）它不再是常驻的一列，而是 `position: fixed` 的覆盖式抽屉
+         （样式在 ChatSidebar.vue 里，因为要覆盖它自己的宽度，必须同文件内定顺序）——
+         390px 宽的屏幕上，236px 的常驻侧栏会把对话区压到 154px，完全没法用。 -->
+    <ChatSidebar
+      :collapsed="mobile ? false : sideCollapsed"
+      :drawer="mobile"
+      :open="drawerOpen"
+      @toggle="toggleSide"
+      @select="onSidebarSelect"
     />
 
-    <!-- 拆分视图 -->
-    <div
-      v-else
-      class="chat-split-view"
-      :class="{ 'chat-split-view--narrow': narrow }"
-      @dragover="onSplitDragOver"
-      @dragleave="onSplitDragLeave"
-      @drop="onSplitDrop"
-    >
-      <!-- 窄屏：只渲染活动窗格，**不套列 / 不渲染任何分隔条**
-           （旧版 renderSplitLayout 的 narrow 分支）——若仍走列结构，
-           窗格宽度会是它所在列的权重，而不是整行宽。 -->
+    <!-- 抽屉遮罩：点它关闭。比要求用户去点抽屉里的「关闭」宽容得多，
+         手机上尤其重要（抽屉本身也可能很长）。 -->
+    <div v-if="mobile && drawerOpen" class="chat-backdrop" @click="closeDrawer" />
+
+    <!-- 对话主区：顶部（窄屏拆分态）挂窗格切换器，下面是窗格 / 拆分容器。
+         桌面端不渲染切换器，这一层只是个透明的 flex 列，布局与改动前完全一致。 -->
+    <div class="chat-main">
+      <!-- 窄屏 + 拆分态：只渲染活动窗格，所以必须给一条切换入口，否则另一个窗格不可达。
+           桌面拆分态不需要 —— 两个窗格都摆在眼前，点一下就是切换。 -->
+      <ChatPaneTabs
+        v-if="showPaneTabs"
+        :panes="layoutPanes"
+        :active-pane-id="layout?.activePaneId ?? ''"
+        @select="handleFocusPane"
+      />
+
+      <!-- 单窗格模式：直接把当前会话交给唯一的窗格 -->
       <ChatPane
-        v-if="narrow && activePane"
-        class="chat-split-view__pane chat-split-view__pane--solo"
-        :pane-id="activePane.id"
-        :session-key="activePane.sessionKey"
+        v-if="!layout"
+        pane-id="single"
+        class="chat-split-view__pane chat-split-view__pane--single"
+        :session-key="currentSessionKey"
         :active="true"
         chrome="none"
-        :allow-split="false"
+        :allow-split="allowOpenSplit"
         :side-collapsed="sideCollapsed"
+        :side-drawer="mobile"
         @focus-pane="handleFocusPane"
         @session-change="handlePaneSessionChange"
+        @open-split="openSplitView"
         @toggle-side="toggleSide"
       />
 
-      <template v-for="(column, columnIndex) in layout.columns" :key="column.id">
-        <div
-          v-if="!narrow"
-          class="chat-split-view__column"
-          :style="{ flex: `${layout.columnWeights[columnIndex] ?? 1} 1 0` }"
-        >
-          <template v-for="(pane, paneIndex) in column.panes" :key="pane.id">
-            <ChatPane
-              class="chat-split-view__pane"
-              :class="{
-                'is-drop-h': dropTarget?.paneId === pane.id && dropTarget.edge === 'right',
-                'is-drop-v': dropTarget?.paneId === pane.id && dropTarget.edge === 'down',
-              }"
-              :style="{ flex: `${column.paneWeights[paneIndex] ?? 1} 1 0` }"
-              :pane-id="pane.id"
-              @pane-drag-start="handlePaneDragStart"
-              @pane-drag-end="handlePaneDragEnd"
-              :session-key="pane.sessionKey"
-              :active="pane.id === layout.activePaneId"
-              chrome="pane"
-              :allow-split="false"
-              :side-collapsed="sideCollapsed"
-              @focus-pane="handleFocusPane"
-              @session-change="handlePaneSessionChange"
-              @open-split="openSplitView"
-              @split-right="handleSplitRight"
-              @split-down="handleSplitDown"
-              @close-pane="handleClosePane"
-              @toggle-side="toggleSide"
-            />
-            <!-- 同列内相邻两窗格之间的横向分隔条（旧版 orientation="horizontal"） -->
-            <ResizableDivider
-              v-if="paneIndex < column.panes.length - 1"
-              orientation="horizontal"
-              :split-ratio="
-                (column.paneWeights[paneIndex] ?? 1) /
-                ((column.paneWeights[paneIndex] ?? 1) + (column.paneWeights[paneIndex + 1] ?? 1))
-              "
-              :min-ratio="0.15"
-              :max-ratio="0.85"
-              label="调整上下拆分比例"
-              @resize="
-                (payload) => layout && applyLayout(resizePanes(layout, column.id, paneIndex, payload.splitRatio))
-              "
-            />
-          </template>
-        </div>
-        <!-- 列与列之间的竖向分隔条（窄屏整列都不渲染，这里一并关掉） -->
-        <ResizableDivider
-          v-if="!narrow && columnIndex < layout.columns.length - 1"
-          :split-ratio="
-            (layout.columnWeights[columnIndex] ?? 1) /
-            ((layout.columnWeights[columnIndex] ?? 1) + (layout.columnWeights[columnIndex + 1] ?? 1))
-          "
-          :min-ratio="0.15"
-          :max-ratio="0.85"
-          label="调整左右拆分比例"
-          @resize="(payload) => layout && applyLayout(resizeColumns(layout, columnIndex, payload.splitRatio))"
+      <!-- 拆分视图 -->
+      <div
+        v-else
+        class="chat-split-view"
+        :class="{ 'chat-split-view--narrow': narrow }"
+        @dragover="onSplitDragOver"
+        @dragleave="onSplitDragLeave"
+        @drop="onSplitDrop"
+      >
+        <!-- 窄屏：只渲染活动窗格，**不套列 / 不渲染任何分隔条**
+             （旧版 renderSplitLayout 的 narrow 分支）——若仍走列结构，
+             窗格宽度会是它所在列的权重，而不是整行宽。
+
+             `chrome="pane"`（旧版同样是 `chrome="pane"`）：窄屏也必须保留窗格头，
+             否则会话下拉和「关闭窗格」一起消失，用户被困在多窗格状态里出不来。
+             旧版口径见 `ui/src/pages/chat/chat-page.ts:374-375`
+             「keep session switching and close available」。
+             拆分回调一律不传（`allow-pane-split=false` 让两个拆分按钮也不渲染）：
+             窄屏拆出来的新窗格肉眼不可见，按钮点了等于没反应。 -->
+        <ChatPane
+          v-if="narrow && activePane"
+          class="chat-split-view__pane chat-split-view__pane--solo"
+          :pane-id="activePane.id"
+          :session-key="activePane.sessionKey"
+          :active="true"
+          chrome="pane"
+          :allow-split="false"
+          :allow-pane-split="false"
+          :side-collapsed="sideCollapsed"
+          :side-drawer="mobile"
+          @focus-pane="handleFocusPane"
+          @session-change="handlePaneSessionChange"
+          @close-pane="handleClosePane"
+          @toggle-side="toggleSide"
         />
-      </template>
+
+        <template v-for="(column, columnIndex) in layout.columns" :key="column.id">
+          <div
+            v-if="!narrow"
+            class="chat-split-view__column"
+            :style="{ flex: `${layout.columnWeights[columnIndex] ?? 1} 1 0` }"
+          >
+            <template v-for="(pane, paneIndex) in column.panes" :key="pane.id">
+              <ChatPane
+                class="chat-split-view__pane"
+                :class="{
+                  'is-drop-h': dropTarget?.paneId === pane.id && dropTarget.edge === 'right',
+                  'is-drop-v': dropTarget?.paneId === pane.id && dropTarget.edge === 'down',
+                }"
+                :style="{ flex: `${column.paneWeights[paneIndex] ?? 1} 1 0` }"
+                :pane-id="pane.id"
+                @pane-drag-start="handlePaneDragStart"
+                @pane-drag-end="handlePaneDragEnd"
+                :session-key="pane.sessionKey"
+                :active="pane.id === layout.activePaneId"
+                chrome="pane"
+                :allow-split="false"
+                :allow-pane-split="true"
+                :side-collapsed="sideCollapsed"
+                :side-drawer="mobile"
+                @focus-pane="handleFocusPane"
+                @session-change="handlePaneSessionChange"
+                @open-split="openSplitView"
+                @split-right="handleSplitRight"
+                @split-down="handleSplitDown"
+                @close-pane="handleClosePane"
+                @toggle-side="toggleSide"
+              />
+              <!-- 同列内相邻两窗格之间的横向分隔条（旧版 orientation="horizontal"） -->
+              <ResizableDivider
+                v-if="paneIndex < column.panes.length - 1"
+                orientation="horizontal"
+                :split-ratio="
+                  (column.paneWeights[paneIndex] ?? 1) /
+                  ((column.paneWeights[paneIndex] ?? 1) + (column.paneWeights[paneIndex + 1] ?? 1))
+                "
+                :min-ratio="0.15"
+                :max-ratio="0.85"
+                label="调整上下拆分比例"
+                @resize="
+                  (payload) => layout && applyLayout(resizePanes(layout, column.id, paneIndex, payload.splitRatio))
+                "
+              />
+            </template>
+          </div>
+          <!-- 列与列之间的竖向分隔条（窄屏整列都不渲染，这里一并关掉） -->
+          <ResizableDivider
+            v-if="!narrow && columnIndex < layout.columns.length - 1"
+            :split-ratio="
+              (layout.columnWeights[columnIndex] ?? 1) /
+              ((layout.columnWeights[columnIndex] ?? 1) + (layout.columnWeights[columnIndex + 1] ?? 1))
+            "
+            :min-ratio="0.15"
+            :max-ratio="0.85"
+            label="调整左右拆分比例"
+            @resize="(payload) => layout && applyLayout(resizeColumns(layout, columnIndex, payload.splitRatio))"
+          />
+        </template>
+      </div>
     </div>
   </div>
 </template>
@@ -461,6 +595,38 @@ onBeforeUnmount(() => {
   height: 100%;
   min-height: 0;
   overflow: hidden;
+}
+
+/**
+ * 对话主区：`[窗格切换器?] + [窗格 | 拆分容器]`。
+ *
+ * 这一层是给窄屏顶部标签条准备的槽位 —— 标签条必须和下面的窗格**同一列**，
+ * 否则它会横跨到侧栏上方。桌面端不渲染标签条，这层就是一条透明的 flex 列，
+ * 布局与改造前完全一致（拆分容器仍是 `flex: 1 1 0`，只是在列方向上生长）。
+ */
+.chat-main {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/**
+ * 抽屉遮罩。只在手机端且抽屉打开时存在（模板里的 `v-if`），所以无需 `@media` 包住。
+ *
+ * `z-index` 与抽屉（`ChatSidebar.vue` 里的 `70`）配套：遮罩 60 < 抽屉 70，
+ * 两者都远低于 Element Plus 弹层（`el-message` 等从 2000 起）。
+ *
+ * ⚠️ 不要给 `.chat-layout` 或任何祖先加 `transform` / `filter` —— 那会让
+ * `position: fixed` 相对那个祖先定位（containing block 变了），遮罩就不再铺满视口。
+ */
+.chat-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: rgba(15, 23, 42, 0.45);
 }
 
 /* ============== 拆分视图容器 ============== */

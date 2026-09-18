@@ -29,7 +29,7 @@ import { computed, ref, watch } from "vue";
 import { Avatar } from "@element-plus/icons-vue";
 import { useSettingsStore } from "@/stores/settings";
 import {
-  DEFAULT_ASSISTANT_NAME,
+  resolveAgentDisplayName,
   resolveAvatarImageSrc,
   resolveAssistantTextAvatar,
   resolveLocalUserAvatarText,
@@ -91,9 +91,15 @@ const kind = computed<AvatarKind>(() => {
   return "other";
 });
 
+/**
+ * 文本头像/alt 用的名字。
+ *
+ * assistant 角色名走**统一解析链**：`name` 是网关泛化默认名 `Assistant` 时不算名字，
+ * 改用 `agentId`（预发 8 个 agent 有 7 个没配身份，以前会一起显示成 `Assistant`）。
+ */
 const displayName = computed(() =>
   props.role?.toLowerCase() === "assistant"
-    ? props.name?.trim() || DEFAULT_ASSISTANT_NAME
+    ? resolveAgentDisplayName({ agentId: props.agentId, name: props.name })
     : props.name?.trim() || "",
 );
 

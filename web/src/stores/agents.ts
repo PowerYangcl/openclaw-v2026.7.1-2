@@ -17,7 +17,8 @@ import { computed, ref } from "vue";
 import type { AgentIdentityResult, AgentsListResult, GatewayAgentRow } from "@/api/types";
 import { useGatewayStore } from "@/stores/gateway";
 import { useSettingsStore } from "@/stores/settings";
-import { DEFAULT_ASSISTANT_NAME, normalizeAgentLabel } from "@/utils/avatar";
+import { resolveAgentDisplayName } from "@/utils/avatar";
+import { resolveSessionDisplayName } from "@/utils/sessionDisplay";
 import { DEFAULT_AGENT_ID, normalizeAgentId, parseAgentSessionKey } from "@/utils/sessionKey";
 import { readSidebarSnapshot, writeSidebarSnapshot } from "@/utils/sidebarSnapshot";
 
@@ -98,14 +99,20 @@ export const useAgentsStore = defineStore("agents", () => {
     () => identities.value[selectedAgentId.value] ?? null,
   );
 
-  /** 对话页展示的助手名称：运行时身份 > agent 行 > 全兜底。 */
-  const assistantName = computed<string>(() => {
-    const runtimeName = selectedIdentity.value?.name?.trim();
-    if (runtimeName) return runtimeName;
-    const row = selectedAgent.value;
-    const label = row ? normalizeAgentLabel(row).trim() : "";
-    return label || DEFAULT_ASSISTANT_NAME;
-  });
+  /**
+   * 对话页展示的助手名称。
+   *
+   * 链：运行时身份（跳过网关泛化默认名 `Assistant`）> agent 行的 name/identity.name > **agent id**。
+   * ⚠️ 泛化默认名不算名字：预发 8 个 agent 里有 7 个没有配置身份，网关统一回 `Assistant`，
+   * 旧实现直接采信 ⇒ 侧栏与窗格标题出现 7 个同名 `Assistant`。
+   */
+  const assistantName = computed<string>(() =>
+    resolveAgentDisplayName({
+      agentId: selectedAgentId.value,
+      agent: selectedAgent.value,
+      identity: selectedIdentity.value,
+    }),
+  );
 
   /**
    * 对话页展示的助手头像**原始值**（图片路径 / URL / emoji / 文字）。
@@ -134,6 +141,99 @@ export const useAgentsStore = defineStore("agents", () => {
 
   /** 当前 agent 的 id（用于把 fs 路径回退成 `/avatar/<agentId>`）。 */
   const assistantAvatarAgentId = computed<string>(() => selectedAgentId.value);
+
+  // ---------------------------------------------------------------------------
+  // 按 agentId 取身份 —— 拆分视图「多 agent 同时对话」的地基
+  //
+  // 上面那组 `assistant*` / `selectedAgentId` 都**绑定全局选中 agent**（派生自
+  // `settings.sessionKey`），只适用于「整个页面只有一个对话」的单窗格场景。
+  // 拆分视图下必须能「按任意 agentId 取身份」，否则所有窗格会一起显示活动窗格的
+  // agent。下面这组函数就是为此提供的，语义与对应 computed 完全一致。
+  // ---------------------------------------------------------------------------
+
+  /** 指定 agent 的运行时身份（未加载 / 未知 agent 时为 `null`）。 */
+  function identityForAgent(agentId: string): AgentIdentityResult | null {
+    return identities.value[normalizeAgentId(agentId)] ?? null;
+  }
+
+  /**
+   * 从会话 key 推导它归属的 agentId。
+   *
+   * 拆分视图下每个窗格的会话 key 自带 `agent:<id>:` 前缀（`agent:cel4:main`），
+   * 所以**每个窗格都能独立算出自己的 agent**。
+   *
+   * ⚠️ 绝不能改用 `selectedAgentId`：它派生自全局 `settings.sessionKey`，只代表
+   * **活动窗格**；用它会让所有窗格一起显示活动窗格的 agent —— 这正是「窗格之间
+   * 互相影响」的根因（左窗格明明是 `agent:cel4:main`，标题和头像却是学习辅导员）。
+   *
+   * 会话 key 没有 agent 前缀时（裸 `main` / `id-<hash8>`）回落到网关默认 agent，
+   * 与 `selectedAgentId` 的回落口径保持一致。
+   */
+  function agentIdForSession(sessionKey: string | null | undefined): string {
+    const raw = typeof sessionKey === "string" ? sessionKey.trim() : "";
+    // 回落链里**不要**放裸 sessionKey：它是会话 key 不是 agentId（同 selectedAgentId 的说明）。
+    const fallback = defaultId.value.trim() || DEFAULT_AGENT_ID;
+    return normalizeAgentId(parseAgentSessionKey(raw)?.agentId ?? fallback);
+  }
+
+  /**
+   * 指定 agent 的展示名（链与 `assistantName` 完全一致，见其注释）：
+   * 运行时身份（非泛化）> agent 行 > **agent id**。
+   */
+  function nameForAgent(agentId: string): string {
+    const id = normalizeAgentId(agentId);
+    return resolveAgentDisplayName({
+      agentId: id,
+      agent: agentById(id),
+      identity: identityForAgent(id),
+    });
+  }
+
+  /**
+   * 指定 agent 的头像**原始值**（图片路径 / URL / emoji / 文字）。
+   *
+   * 与 `assistantAvatar` 一样刻意不预先判定「图片还是文字」：网关返回的图片头像
+   * 可能是 `/avatar/<agentId>`，也可能是未转换的 fs 路径，统一交给 `ChatAvatar`
+   * 按最终形态判定（它内建了完整降级链）。
+   */
+  function avatarForAgent(agentId: string): string {
+    const id = normalizeAgentId(agentId);
+    const runtime = identityForAgent(id);
+    const row = agentById(id);
+    return (
+      (runtime?.avatar ?? "").trim() ||
+      (runtime?.emoji ?? "").trim() ||
+      (row?.identity?.avatar ?? "").trim() ||
+      (row?.emoji ?? "").trim() ||
+      ""
+    );
+  }
+
+  /** 指定 agent 的头像归因状态（`local` 表示由网关 `/avatar/<agentId>` 提供）。 */
+  function avatarStatusForAgent(agentId: string): string | null {
+    return identityForAgent(agentId)?.avatarStatus?.trim() || null;
+  }
+
+  /**
+   * 会话 key → 窗格头下拉里的展示名。
+   *
+   * `resolveSessionDisplayName` 对 `agent:<id>:main` 这类**没有 label / displayName**
+   * 的会话会原样返回 key，下拉里就显示成 `agent:cel4:main` 这种不可读的裸 key。
+   * 这里在它之上补一层兜底：**只有当拿到的是裸 key 时**才去掉 `agent:<id>:` 前缀、
+   * 把主会话收敛成「主会话」。网关给了 label / displayName 的会话完全不受影响。
+   */
+  function sessionDisplayNameFor(
+    sessionKey: string,
+    row?: Parameters<typeof resolveSessionDisplayName>[1],
+  ): string {
+    const name = resolveSessionDisplayName(sessionKey, row);
+    if (name !== sessionKey) return name;
+    const parsed = parseAgentSessionKey(sessionKey);
+    if (!parsed) return name;
+    const rest = parsed.rest.trim();
+    if (!rest || rest === "main" || rest === mainKey.value) return "主会话";
+    return rest;
+  }
 
   /**
    * 加载 agent 列表（幂等；`force` 时强制刷新）。
@@ -265,6 +365,13 @@ export const useAgentsStore = defineStore("agents", () => {
     assistantAvatar,
     assistantAvatarStatus,
     assistantAvatarAgentId,
+    // 拆分视图用：按 agentId 取身份（见各自函数上的说明）
+    agentIdForSession,
+    identityForAgent,
+    nameForAgent,
+    avatarForAgent,
+    avatarStatusForAgent,
+    sessionDisplayNameFor,
     ensureLoaded,
     ensureIdentity,
     ensureIdentities,

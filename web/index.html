@@ -2,12 +2,42 @@
 <html lang="zh-CN" data-openclaw-control-ui-base-path="/" data-openclaw-terminal-enabled="false">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!--
+      `viewport-fit=cover`：让页面顶到 iPhone 的刘海/圆角安全区，配合 CSS 的
+      `env(safe-area-inset-*)` 自己留边（见 src/styles/layout.mobile.css）。
+      没它的话 `safe-area-inset-*` 恒为 0，底部输入框会被 Home 指示条压住。
+      `interactive-widget=resizes-content`：软键盘弹出时收缩**布局视口**（而不是只缩
+      视觉视口），这样 100dvh 的对话页会跟着变矮、输入框自然上移；缺省值
+      `resizes-visual` 会让输入框被键盘盖住。
+      与旧版 `ui/index.html` 完全一致。
+    -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content"
+    />
     <title>Gcs Agent</title>
     <meta name="description" content="OpenClaw Web Control UI — Vue 3 + Element Plus + Tailwind 4." />
-    <!-- Favicon: JD Cloud icon, self-hosted at web/public/favicon.ico. The Gateway serves this
-         HTML with `img-src 'self' data: blob:` (src/gateway/control-ui-csp.ts), so any remote or
-         protocol-relative icon URL (e.g. //www.jdcloud.com/...) is blocked by CSP — keep it local. -->
+    <!--
+      PWA / 图标。三条约定（与旧版 ui/ + `src/gateway/control-ui.ts` 对齐）：
+
+      1. **写成根绝对路径**（`/xxx.png`）：网关 `rewriteControlUiIndexHtmlPublicAssetHrefs`
+         会把 `CONTROL_UI_ROOT_PUBLIC_ASSETS` 里的资产改成 `<basePath>/xxx`，子路径部署
+         靠它生效。vite 构建时会把这几条按 `base` 改写成 `./xxx`（web 的 base 默认 `./`），
+         而 web 的路由只有单段（`/chat`），相对路径在「根部署」与「子路径部署」下都能解析对。
+      2. **只在这里列 manifest + apple-touch-icon，绝不挂 `favicon.svg` / `favicon-32.png` 的
+         `<link rel="icon">`**：这两个是 ui 的 OpenClaw 吉祥物图标，而 web 刻意用的是
+         JD Cloud 红标 `favicon.ico`（见下）。Chrome 会优先选中 SVG/32px 的 icon 链接，
+         一挂上去桌面标签页图标就会从 JD Cloud 变成吉祥物 —— 那是可见的品牌回归。
+         ⇒ web **不随包发布** `favicon.svg` / `favicon-32.png`（这两个名字仍留在网关白名单里，
+         因为白名单是 ui/web 共用的；对 web 而言请求它们会干净 404，见 `control-ui.ts:177`）。
+         `apple-touch-icon.png` 则**必须保留**：manifest 的 `icons` 是空的，它是 iOS
+         「添加到主屏幕」唯一的图标来源。
+      3. **只用同源地址**：网关下发的 HTML 带 `img-src 'self' data: blob:`（见
+         `src/gateway/control-ui-csp.ts`），任何远程或协议相对的图标 URL（如
+         `//www.jdcloud.com/...`）都会被 CSP 拦掉。
+    -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
     <link rel="icon" href="/favicon.ico" sizes="any" />
     <script>
       // Mirror the gateway-injected attributes onto window before Vue mounts, so the SPA can

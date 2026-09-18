@@ -1,7 +1,10 @@
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
 import { fileURLToPath, URL } from "node:url";
 import tailwindcss from "@tailwindcss/vite";
 import vue from "@vitejs/plugin-vue";
-import { defineConfig, loadEnv, type Plugin } from "vite";
+import { defineConfig, loadEnv, type Plugin, type UserConfig } from "vite";
 
 // OpenClaw Web Control UI — Vite config.
 //
@@ -58,12 +61,119 @@ function noCacheHtmlMeta(): Plugin {
 
 const GATEWAY_TARGET = process.env.VITE_GATEWAY_HTTP_URL ?? "http://127.0.0.1:18789";
 
-export default defineConfig(({ mode }) => {
+// ---------------------------------------------------------------------------
+// PWA / Service Worker —— 构建期版本号
+//
+// 与旧版 `ui/` 完全同口径（`ui/vite.config.ts` 的 resolveControlUiBuildId +
+// controlUiServiceWorkerBuildIdPlugin），这样两套 UI 的缓存版本号可互相比较：
+//   1. define 把 buildId 编译进 `window.__OPENCLAW_CONTROL_UI_BUILD_ID__`（见 main.ts）；
+//   2. closeBundle 把 `public/sw.js` 里的占位符替换成同一个 buildId 再写回 dist。
+//
+// 为什么必须「写回 dist/sw.js」而不是让 vite 直接拷 public：
+//   publicDir 是**原样拷贝**，拷出来的 sw.js 里还是字面量占位符，缓存名会退化成 `dev`。
+//   旧版靠这个 closeBundle 插件补上；占位符丢失时**必须抛错**，否则缓存永不轮换、
+//   用户永远拿到旧 chunk（这类问题只在线上出现，本地开发根本复现不了）。
+// ---------------------------------------------------------------------------
+
+const here = fileURLToPath(new URL(".", import.meta.url));
+const repoRoot = path.resolve(here, "..");
+
+function normalizeBuildId(input: string): string {
+  const normalized = input.trim().replace(/[^a-zA-Z0-9._-]+/g, "-");
+  return normalized.slice(0, 96) || "dev";
+}
+
+function readPackageVersion(): string {
+  try {
+    const raw = fs.readFileSync(path.join(repoRoot, "package.json"), "utf8");
+    const parsed = JSON.parse(raw) as { version?: unknown };
+    return typeof parsed.version === "string" && parsed.version.trim()
+      ? parsed.version.trim()
+      : "dev";
+  } catch {
+    return "dev";
+  }
+}
+
+function readGitShortSha(): string | null {
+  try {
+    const raw = execFileSync("git", ["-C", repoRoot, "rev-parse", "--short=12", "HEAD"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+    return raw.trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+function resolveControlUiBuildId(): string {
+  const explicit =
+    process.env.OPENCLAW_CONTROL_UI_BUILD_ID?.trim() || process.env.OPENCLAW_VERSION?.trim();
+  if (explicit) {
+    return normalizeBuildId(explicit);
+  }
+  const version = readPackageVersion();
+  const gitSha = readGitShortSha();
+  return normalizeBuildId(gitSha ? `${version}-${gitSha}` : version);
+}
+
+/**
+ * 把 buildId 写进构建产物里的 `sw.js`（覆盖 publicDir 拷出来的占位符版本）。
+ *
+ * 读取的是 `public/sw.js` 源文件而不是 dist 里的副本：dist 里那份可能已经是替换过的，
+ * 再替换会找不到占位符 —— 而「找不到占位符」是必须报错的信号，不能靠碰运气。
+ */
+function controlUiServiceWorkerBuildIdPlugin(buildId: string): Plugin {
+  let outDir = "";
+  return {
+    name: "control-ui:service-worker-build-id",
+    apply: "build",
+    configResolved(config) {
+      outDir = path.isAbsolute(config.build.outDir)
+        ? config.build.outDir
+        : path.resolve(config.root, config.build.outDir);
+    },
+    closeBundle() {
+      const swPath = path.join(outDir, "sw.js");
+      const publicSwPath = path.join(here, "public/sw.js");
+      const source = fs.readFileSync(publicSwPath, "utf8");
+      const placeholder = '"__OPENCLAW_CONTROL_UI_BUILD_ID__"';
+      const updated = source.replace(placeholder, JSON.stringify(buildId));
+      if (updated === source) {
+        throw new Error(`Control UI service worker build id placeholder missing in ${swPath}`);
+      }
+      fs.mkdirSync(outDir, { recursive: true });
+      fs.writeFileSync(swPath, updated);
+    },
+  };
+}
+
+/**
+ * ⚠️ 回调**必须显式标注 `: UserConfig`**，不要靠 `defineConfig` 推导。
+ *
+ * 本仓同时存在两份 vite（仓库根 `vite@8.1.3`、`web/node_modules/vite@6.4.3`），
+ * 而 `@vitejs/plugin-vue` / `@tailwindcss/vite` 返回的 `Plugin<Api>` 与 `vite` 自己导出的
+ * `Plugin<any>` 在交叉比较时会让 TS 报 `TS2321 Excessive stack depth`（`vite.config.ts`
+ * 里的历史遗留报错就是它，会直接卡住 `npm run build` 的 `vue-tsc` 步骤）。
+ * 把返回类型写死成 `UserConfig` 就绕开了整条重载推导路径 —— 旧版 `ui/vite.config.ts`
+ * 用的也是这个办法（`export default function X(): UserConfig`）。
+ */
+export default defineConfig(({ mode }): UserConfig => {
   const env = loadEnv(mode, process.cwd(), "");
   const basePath = env.VITE_BASE_PATH || env.OPENCLAW_CONTROL_UI_BASE_PATH || "./";
+  const controlUiBuildId = resolveControlUiBuildId();
 
   return {
-    plugins: [vue(), tailwindcss(), noCacheHtmlMeta()],
+    plugins: [
+      vue(),
+      tailwindcss(),
+      noCacheHtmlMeta(),
+      controlUiServiceWorkerBuildIdPlugin(controlUiBuildId),
+    ],
+    define: {
+      OPENCLAW_CONTROL_UI_BUILD_ID: JSON.stringify(controlUiBuildId),
+    },
     resolve: {
       alias: {
         "@": fileURLToPath(new URL("./src", import.meta.url)),

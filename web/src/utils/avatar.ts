@@ -74,17 +74,66 @@ export function normalizeAgentLabel(agent: AgentLike): string {
 }
 
 /**
- * agent 的展示名：**运行时身份优先**。
+ * 网关的**泛化默认名**。
+ *
+ * `resolveAssistantIdentity`（`src/gateway/assistant-identity.ts:103-105`）在某个 agent
+ * 既没有配置身份、也没有工作区身份文件时，会回落到全局默认名 `Assistant`
+ * （`DEFAULT_ASSISTANT_IDENTITY`）。它**不是**任何 agent 的真实名字：把它当名字用，
+ * 侧栏与窗格标题里所有 agent 会一起显示成 `Assistant`
+ * （用户预发实测：8 行 = `[年间, Assistant × 7]`）。
+ */
+export function isGenericAssistantName(value: string | null | undefined): boolean {
+  const trimmed = typeof value === "string" ? value.trim() : "";
+  return trimmed === DEFAULT_ASSISTANT_NAME;
+}
+
+/**
+ * agent 展示名的**唯一**解析链（侧栏行 / 窗格标题 / 输入框占位符 / 消息头像共用）。
+ *
+ * 优先级：
+ *   ① `identity.name`（运行时身份，来自 `agent.identity.get`）——**跳过泛化默认名**；
+ *   ② 调用方直接给出的名字（侧栏行名、组件的 `name` prop）；
+ *   ③ `agents.list` 行自带的 `name` > `identity.name`；
+ *   ④ **该 agent 自己的 id**（没有任何名字时的兜底命名）；
+ *   ⑤ 前面都空（理论上不会）：运行时名 → 全局默认名。
+ *
+ * 为什么必须有 ④：网关只认配置里声明的名字，没配就只能给泛化默认名；
+ * 展示层宁可用 id（`thesis-writing-mentor`）也不能让一批 agent 同名，
+ * 否则用户无法分辨谁是谁，也无法判断窗格绑定的是哪个 agent。
+ */
+export function resolveAgentDisplayName(params: {
+  agentId?: string | null;
+  /** 调用方已解析出的名字（侧栏行名 / 组件 prop），可为空。 */
+  name?: string | null;
+  agent?: AgentLike | null;
+  identity?: AgentIdentityLike;
+}): string {
+  const runtimeName = typeof params.identity?.name === "string" ? params.identity.name.trim() : "";
+  if (runtimeName && !isGenericAssistantName(runtimeName)) return runtimeName;
+  const explicit = typeof params.name === "string" ? params.name.trim() : "";
+  if (explicit && !isGenericAssistantName(explicit)) return explicit;
+  const own = params.agent ? normalizeAgentLabel(params.agent) : "";
+  if (own) return own;
+  // ⚠️ 这里**不能**用 `normalizeAgentId()`：它对空值会回落成 `main`
+  // （`utils/sessionKey.ts:39-41`），于是「谁都不是」的输入会被错标成默认 agent。
+  const id = typeof params.agentId === "string" ? params.agentId.trim() : "";
+  if (id) return id;
+  return explicit || runtimeName || DEFAULT_ASSISTANT_NAME;
+}
+
+/**
+ * agent 的展示名：**运行时身份优先**，但泛化默认名不算名字。
  *
  * 必要性：`agents.list` 的行里常常没有 `name`（实测本机只有 `id/workspace/model`），
  * 真正的名字来自 `agent.identity.get`（本机 `main` → `"年间"`）。只调
  * `normalizeAgentLabel(agent)` 会退化成裸 id —— 侧栏显示 `main`、聊天页头显示 `年间`，
  * 同一实体两个名字。
  */
-export function resolveAgentLabel(agent: AgentLike, agentIdentity?: AgentIdentityLike): string {
-  const runtimeName = typeof agentIdentity?.name === "string" ? agentIdentity.name.trim() : "";
-  if (runtimeName) return runtimeName;
-  return normalizeAgentLabel(agent);
+export function resolveAgentLabel(
+  agent: AgentLike | null | undefined,
+  agentIdentity?: AgentIdentityLike,
+): string {
+  return resolveAgentDisplayName({ agentId: agent?.id, agent, identity: agentIdentity });
 }
 
 /**
@@ -208,7 +257,10 @@ export function looksLikeFilesystemPath(value: string | null | undefined): boole
  * @example resolveGatewayHttpBase("ws://127.0.0.1:18789") === "http://127.0.0.1:18789"
  * @example resolveGatewayHttpBase("wss://host/openclaw/") === "https://host/openclaw"
  */
-export function resolveGatewayHttpBase(gatewayUrl: string | null | undefined): string {
+export function resolveGatewayHttpBase(
+  gatewayUrl: string | null | undefined,
+  pageHref?: string | null,
+): string {
   const raw = typeof gatewayUrl === "string" ? gatewayUrl.trim() : "";
   if (!raw) return "";
   const match = /^(wss?|https?):\/\/([^/?#]+)(\/[^?#]*)?/i.exec(raw);
@@ -217,8 +269,78 @@ export function resolveGatewayHttpBase(gatewayUrl: string | null | undefined): s
   const host = match[2]!;
   // 保留 base path（网关可挂在子路径下），去掉尾部斜杠
   const path = (match[3] ?? "").replace(/\/+$/, "");
-  const httpScheme = scheme === "wss" || scheme === "https" ? "https" : "http";
-  return `${httpScheme}://${host}${path}`;
+  let httpScheme = scheme === "wss" || scheme === "https" ? "https" : "http";
+  let resolvedHost = host;
+
+  // 混合内容兜底：页面是 HTTPS 而推导结果是 HTTP 时，头像 / 附件下载会被浏览器拦
+  // （控制台 "was loaded over an insecure connection ... should be served over HTTPS"）。
+  // 只在**同源**时升级 —— 跨源明文网关是用户显式指定的，升级会直接连不上；
+  // 而同源却降级成 http，只可能是网关地址里写死了 ws://（登录页手输 / 入口链接带入）。
+  const page = parsePageOrigin(pageHref ?? defaultPageHref());
+  if (
+    httpScheme === "http" &&
+    page &&
+    page.protocol === "https:" &&
+    sameHostname(host, page.host)
+  ) {
+    httpScheme = "https";
+    // 未显式给端口或给的是 80：直接用页面 origin（TLS 终止在 LB 上时端口就是 443）。
+    // 显式给了非 80 端口（如 18789）说明网关就在这个端口上，保留。
+    const port = portOfHost(host);
+    resolvedHost = port && port !== "80" ? host : page.host;
+  }
+
+  return `${httpScheme}://${resolvedHost}${path}`;
+}
+
+/** 测试/SSR 下没有 `window`，返回 null 表示「不参与升级判断」。 */
+function defaultPageHref(): string | null {
+  try {
+    return typeof window === "undefined" ? null : window.location.href;
+  } catch {
+    return null;
+  }
+}
+
+/** 取页面的协议与 host（含端口）；无法解析时返回 null。 */
+function parsePageOrigin(
+  href: string | null | undefined,
+): { protocol: string; host: string } | null {
+  const value = typeof href === "string" ? href.trim() : "";
+  if (!value) return null;
+  try {
+    const url = new URL(value);
+    return { protocol: url.protocol, host: url.host };
+  } catch {
+    return null;
+  }
+}
+
+/** `[::1]:18789` / `host:80` / `host` → 主机名部分（比较用，小写不敏感）。 */
+function hostnameOfHost(host: string): string {
+  const value = host.trim();
+  if (value.startsWith("[")) {
+    const end = value.indexOf("]");
+    return end >= 0 ? value.slice(0, end + 1) : value;
+  }
+  const colon = value.lastIndexOf(":");
+  return colon >= 0 ? value.slice(0, colon) : value;
+}
+
+function portOfHost(host: string): string {
+  const value = host.trim();
+  if (value.startsWith("[")) {
+    const end = value.indexOf("]");
+    return end >= 0 && value[end + 1] === ":" ? value.slice(end + 2) : "";
+  }
+  const parts = value.split(":");
+  return parts.length === 2 ? (parts[1] ?? "") : "";
+}
+
+function sameHostname(a: string, b: string): boolean {
+  const left = hostnameOfHost(a).toLowerCase();
+  const right = hostnameOfHost(b).toLowerCase();
+  return left.length > 0 && left === right;
 }
 
 /**

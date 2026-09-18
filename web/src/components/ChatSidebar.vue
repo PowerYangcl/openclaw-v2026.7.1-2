@@ -37,8 +37,30 @@ import { readSidebarSnapshot, writeSidebarSnapshot } from "@/utils/sidebarSnapsh
 import ChatAvatar from "@/components/ChatAvatar.vue";
 import RefreshButton from "@/components/RefreshButton.vue";
 
-withDefaults(defineProps<{ collapsed?: boolean }>(), { collapsed: false });
-const emit = defineEmits<{ (e: "toggle"): void }>();
+withDefaults(
+  defineProps<{
+    collapsed?: boolean;
+    /**
+     * 手机形态：把侧栏渲染成**覆盖式抽屉**，而不是并排的一列。
+     * 此时宽度不再由 `.chat-side` 的 `236px` 决定，而是 `min(86vw, 300px)`；
+     * 关闭态整块平移出屏幕左侧。
+     */
+    drawer?: boolean;
+    /** 抽屉是否已推出（仅在 `drawer` 为真时有意义）。 */
+    open?: boolean;
+  }>(),
+  { collapsed: false, drawer: false, open: false },
+);
+const emit = defineEmits<{
+  (e: "toggle"): void;
+  /**
+   * 用户点了某个智能体（= 要切到它的代表会话）。
+   *
+   * 侧栏自己就会切会话（走 `settings.sessionKey`），这个事件纯粹是给手机端抽屉用的：
+   * 布局层收到后把抽屉关掉，否则用户点完 agent 还得再点一次遮罩才能看到对话。
+   */
+  (e: "select", agentId: string): void;
+}>();
 
 const gateway = useGatewayStore();
 const settings = useSettingsStore();
@@ -185,11 +207,14 @@ function agentAvatarStatus(agent: (typeof agents.agents)[number]): string | null
 }
 
 /**
- * agent 展示名：**运行时身份优先**（`agent.identity.get` 的 `name`）。
+ * agent 展示名：走 `resolveAgentDisplayName` 的唯一解析链 ——
+ * 运行时身份（**跳过网关泛化默认名 `Assistant`**）> 行自带的 name/identity.name > **agent id**。
  *
- * `agents.list` 的行里常常没有 `name`（本机实测只有 `id/workspace/model`），
- * 只调 `normalizeAgentLabel(agent)` 会退化成裸 id —— 侧栏显示 `main`、
- * 而聊天页头显示 `年间`，同一个实体两个名字。
+ * 两头都要防：
+ * - `agents.list` 的行里常常没有 `name`（本机实测只有 `id/workspace/model`），真正的名字来自
+ *   `agent.identity.get`（本机 `main` → `"年间"`）；只认行字段会让侧栏显示 `main` 而页头显示 `年间`。
+ * - 反过来，网关对**没配身份**的 agent 会统一回 `Assistant`（`assistant-identity.ts:103-105`），
+ *   直接采信会让一批 agent 同名 —— 用户预发实测 `domRows = [年间, Assistant × 7]`，此时按 id 命名。
  */
 function agentLabel(agent: (typeof agents.agents)[number]): string {
   return resolveAgentLabel(agent, agents.identities[normalizeAgentId(agent.id)] ?? null);
@@ -205,6 +230,7 @@ function selectAgent(agentId: string): void {
   const next = preferredSessionForAgent(agentId);
   void agents.ensureIdentity(agentId);
   selectSession(next);
+  emit("select", agentId);
 }
 
 /**
@@ -255,8 +281,14 @@ watch(
 </script>
 
 <template>
-  <!-- 收起态：只保留对话主图标（点击展开二级目录） -->
-  <aside v-if="collapsed" class="chat-side chat-side--collapsed">
+  <!-- 收起态：只保留对话主图标（点击展开二级目录）。
+       `collapsed` 与 `drawer` 互斥（抽屉里必须展开，收成 44px 的竖条再装在覆盖层里没有意义），
+       调用方负责不要同时传。 -->
+  <aside
+    v-if="collapsed"
+    class="chat-side chat-side--collapsed"
+    :class="{ 'chat-side--drawer': drawer, 'is-open': drawer && open }"
+  >
     <el-button
       class="chat-side__rail-btn"
       text
@@ -268,7 +300,11 @@ watch(
     </el-button>
   </aside>
 
-  <aside v-else class="chat-side">
+  <aside
+    v-else
+    class="chat-side"
+    :class="{ 'chat-side--drawer': drawer, 'is-open': drawer && open }"
+  >
     <div class="chat-side__scroll">
       <!-- 智能体列表（renderAgentRow）—— 侧栏**唯一**的一段列表。
            曾经并列的「最近会话」段已删除：展示层把每个 agent 收敛成一条会话后，
@@ -282,6 +318,18 @@ watch(
             :loading="sessionsLoading"
             @refresh="loadSessions"
           />
+          <!-- 抽屉态的关闭按钮：抽屉会盖住顶栏（`Menu` 按钮也在那），
+               没有它就只能靠点遮罩或按 Esc 关闭 —— 手机上点遮罩区域不一定好按。 -->
+          <el-button
+            v-if="drawer"
+            class="chat-side__drawer-close"
+            text
+            title="关闭目录"
+            aria-label="关闭对话目录"
+            @click="emit('toggle')"
+          >
+            <el-icon><Close /></el-icon>
+          </el-button>
         </div>
 
         <div class="chat-side__items">
@@ -662,6 +710,74 @@ watch(
 @keyframes chat-side-spin {
   to {
     transform: rotate(360deg);
+  }
+}
+
+/* ===========================================================================
+   手机端：覆盖式抽屉（`drawer` prop）
+   ===========================================================================
+
+   为什么规则写在本组件而不是 `layouts/mobile.css`：抽屉要覆盖 `.chat-side` 自己的
+   `width: 236px`，而这两种选择器特异性相同 —— 谁生效只能靠**同文件内的先后顺序**保证。
+   写进本文件的 scoped 样式，顺序是确定的（本块在 `.chat-side` 之后）；
+   写到全局文件则要跟 SFC 的注入顺序赛跑。
+
+   ⚠️ 绝对不能靠 `!important` 硬压，也不能忘掉 `flex-shrink: 0`：
+   本组件是 `.chat-layout` 的 flex 子项，`position: fixed` 已经让它脱离 flex 流，
+   但 `width` 仍会参与 flex 基准计算，所以下面显式给宽度。
+   =========================================================================== */
+
+@media (max-width: 768px), (max-width: 932px) and (max-height: 500px) and (orientation: landscape) {
+  .chat-side--drawer {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    /* 高于对话内容与窗格切换器（它们都在常规流里，z-index 为 auto） */
+    z-index: 70;
+    width: min(86vw, 300px);
+    height: 100%;
+    /* 抽屉贴左边缘 ⇒ 按安全区让开刘海 / 圆角 / Home 指示条 */
+    padding-top: var(--wb-safe-top, 0px);
+    padding-left: var(--wb-safe-left, 0px);
+    padding-bottom: var(--wb-safe-bottom, 0px);
+    box-shadow: 0 12px 40px rgba(15, 23, 42, 0.22);
+    /* 关闭态整块移到屏幕左侧；`position: fixed` 的元素不影响文档滚动宽度，
+       所以不会因此冒出横向滚动条。 */
+    transform: translateX(-100%);
+    visibility: hidden;
+    /* visibility 的过渡加 0s 延迟的写法：打开时立即可见，关闭时等位移动画走完再隐藏。
+       这样关闭态下抽屉里的按钮不会被 Tab 键聚焦、也不吃点击。 */
+    transition:
+      transform 0.22s var(--wb-ease),
+      visibility 0s linear 0.22s;
+    will-change: transform;
+  }
+
+  .chat-side--drawer.is-open {
+    transform: translateX(0);
+    visibility: visible;
+    transition:
+      transform 0.22s var(--wb-ease),
+      visibility 0s;
+  }
+
+  /* 抽屉内所有可点行都抬到 ≥44px：手机上 32px 的行高很难点准 */
+  .chat-side--drawer .agent-row.el-button {
+    min-height: var(--wb-touch-target, 44px);
+  }
+
+  .chat-side__drawer-close.el-button {
+    flex: 0 0 auto;
+    width: var(--wb-touch-target, 44px);
+    height: var(--wb-touch-target, 44px);
+    margin: 0;
+    padding: 0;
+    color: var(--wb-text-secondary);
+  }
+
+  .chat-side__drawer-close.el-button :deep(.el-icon) {
+    font-size: 18px;
   }
 }
 </style>

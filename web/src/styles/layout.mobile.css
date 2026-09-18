@@ -1,0 +1,125 @@
+/**
+ * web Control UI —— 手机端 / 窄屏适配层
+ *
+ * ## 分层约定（和旧版 ui 的唯一结构差异，理由见下）
+ *
+ * 旧版 `ui/src/styles/layout.mobile.css` 是 951 行的**单一文件**，因为它对应的
+ * `ui/src` 用的是普通 CSS + Lit 模板，样式本来就是全局的。
+ * web 是 Vue SFC：组件样式默认 scoped，把「某个组件的手机端规则」写到全局文件里会
+ * 遇到两件麻烦事 —— ① 需要在选择器上手动抬特异性去压 scoped 规则；② 全局文件与
+ * SFC 的注入顺序由打包结果决定，不保证可以稳定覆盖。
+ *
+ * 所以本文件只放**真正全局的东西**：
+ *   - 设计 token（安全区、触控目标尺寸、视口高度）
+ *   - `html` / `body` / `#app` / `el-main` 这一层外壳
+ *   - 无法归属到单个组件的横切规则（如统一关闭移动端点击高亮、禁用整页橡皮筋）
+ * 组件自己的手机端规则写在各自 SFC 的 `<style>` 里、用同样的 `@media` 包住
+ * （`ChatView.vue` / `ChatPane.vue` / `ChatSidebar.vue` / `ChatPaneTabs.vue`）。
+ *
+ * ## 断点矩阵（对齐旧版 `ui/src/styles/layout.mobile.css` 的 @media 落点）
+ *
+ * | 断点 | 旧版 ui 做了什么 | web 对应物 |
+ * | --- | --- | --- |
+ * | ≤1320px | 收紧部分栅格间距 | 暂不需要（web 无多列表格页） |
+ * | ≤1100px | 左导航 → slide-over 抽屉 | **窄屏窗格语义**：只渲染活动窗格 + 窗格切换器 |
+ * | ≤768px（含短横屏） | 手机形态：控件收纳、44px 触控、16px 输入 | web 的手机形态（本文件的 768 段 + 各 SFC） |
+ * | ≤400px | 进一步压缩内边距 | 同左 |
+ *
+ * ⚠️ 「窄屏窗格语义」用的是 `max-width: 1099px`，必须与两条 JS 判据保持一致：
+ *   - `ChatView.vue` 的 `NARROW_SPLIT_QUERY`
+ *   - `ChatPane.vue` composer 拆分入口的 `allowSplit`
+ * 三者任一漂移，就会出现「按钮点了没反应」或「切了标签但布局没变」。
+ *
+ * 短横屏（`max-width: 932px` 且 `max-height: 500px` 且 landscape）单独成段，
+ * 因为此时纵向空间比宽度更紧张：要压的是窗格头/输入区的高度，而不是宽度。
+ */
+
+:root {
+  /**
+   * 安全区（刘海 / 圆角 / Home 指示条）。
+   *
+   * 依赖 `index.html` 的 `viewport-fit=cover`；没有它时 `env()` 恒为 0。
+   * 非 iOS / 非全面屏环境 `env()` 也返回 0 —— 用 `0px` 作兜底，
+   * 这样下面所有 `calc(... + var(--wb-safe-*))` 在桌面端等价于没有该项。
+   */
+  --wb-safe-top: env(safe-area-inset-top, 0px);
+  --wb-safe-right: env(safe-area-inset-right, 0px);
+  --wb-safe-bottom: env(safe-area-inset-bottom, 0px);
+  --wb-safe-left: env(safe-area-inset-left, 0px);
+
+  /** 移动端最小触控目标（iOS HIG 建议 44pt）。 */
+  --wb-touch-target: 44px;
+
+  /** 对话页横向内边距；≤400px 的段里会被覆盖成更小的值。 */
+  --wb-gutter-x: 14px;
+
+  /**
+   * 软键盘遮挡补偿量（px）。由 `src/utils/keyboardInset.ts` 在运行时持续写入，
+   * 这里给 0px 兜底 —— JS 还没跑（或环境没有 `visualViewport`）时
+   * `var(--wb-keyboard-inset)` 必须是个合法长度，否则整条 `calc()` 失效、
+   * composer 的底部内边距会直接掉成 0。
+   */
+  --wb-keyboard-inset: 0px;
+}
+
+/* ===========================================================================
+   ≤768px：手机形态的外壳
+   =========================================================================== */
+
+@media (max-width: 768px), (max-width: 932px) and (max-height: 500px) and (orientation: landscape) {
+  /**
+   * 禁用整页橡皮筋 / 下拉刷新。
+   *
+   * 对话页内部（`.chat-thread`）自己就是滚动容器，整页再跟着弹会导致
+   * 「上滑看历史 → 整页被拽下去 → 松手后回弹」的错位感，也容易误触发 iOS 的下拉刷新。
+   */
+  html,
+  body {
+    overscroll-behavior-y: none;
+  }
+
+  /**
+   * 点击高亮：移动端 Safari/Chrome 默认会给可点元素糊一层半透明灰，
+   * 叠在气泡、标签、按钮上很难看，统一关掉 —— 交互反馈由各自的 `:active` 样式负责。
+   */
+  body {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /**
+   * `el-main` 是 layout 里的滚动容器，但对话页只有 `.chat-layout` 一个子节点，
+   * 且它自身 `height: 100%` + 内部独立滚动 ⇒ 这里必须不留滚动条，
+   * 否则会出现「外层能滚 1~2px、内层也在滚」的双滚动容器，
+   * 在手机上表现为输入框偶尔被顶出视口。
+   */
+  .layout-main {
+    overflow: hidden;
+  }
+
+  /**
+   * 输入类元素字号必须 ≥16px：iOS Safari 在聚焦字号 <16px 的输入框时会**自动放大整页**，
+   * 且缩放后不会自动还原，用户会看到一个横向被裁掉的界面。
+   * `!important` 是为了压住 Element Plus 的行内字号与各组件各自设的值。
+   */
+  input,
+  textarea,
+  select,
+  .el-textarea__inner,
+  .el-input__inner {
+    font-size: 16px !important;
+  }
+}
+
+/* ===========================================================================
+   ≤400px：小屏再压一档
+   =========================================================================== */
+
+@media (max-width: 400px) {
+  :root {
+    /**
+     * 窄机身（iPhone SE / 老安卓）把横向内边距收紧，
+     * 让消息气泡和窗格标签多留出可读宽度。
+     */
+    --wb-gutter-x: 10px;
+  }
+}

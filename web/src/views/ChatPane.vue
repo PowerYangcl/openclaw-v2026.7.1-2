@@ -37,7 +37,9 @@ import {
   setChatMessageCache,
 } from "@/utils/chatMessageCache";
 import { chatRunStateFor } from "@/utils/chatRunState";
-import { resolveSessionDisplayName } from "@/utils/sessionDisplay";
+import { readModelOverride, writeModelOverride } from "@/utils/modelOverrides";
+import { formatFriendlyError, localizeChatError } from "@/utils/chatErrorCopy";
+import { saveUrlViaBlob, shouldSaveViaBlob } from "@/utils/downloadSave";
 import {
   contextPercentClassOf,
   contextPercentOf,
@@ -165,18 +167,41 @@ const props = withDefaults(
     /** 是否展示 composer 里的「打开拆分视图」入口（窄屏 / 已在拆分态时为 false）。 */
     allowSplit?: boolean;
     /**
+     * 是否展示**窗格头**里的「向下拆分 / 向右拆分」按钮。默认 `false`。
+     *
+     * 与 `allowSplit` 是两件事，不能合并：
+     *   - `allowSplit` 管 composer 里的「打开拆分视图」（单窗格 → 拆分态的入口）；
+     *   - `allowPaneSplit` 管窗格头的两个拆分按钮（拆分态 → 再拆一个窗格）。
+     * 拆分态下 `allowSplit` 必须是 `false`（已经在拆分了，再给一个「打开拆分」是错的），
+     * 而 `allowPaneSplit` 必须是 `true`；窄屏则两个都是 `false` —— 因为窄屏只渲染活动窗格，
+     * 拆出来的新窗格肉眼不可见，按钮点了「什么也没发生」（旧版 `ui/`
+     * `chat-page.ts:373-392` 的 `canSplit = !this.narrow` 就是这条口径，但它只把回调置空、
+     * 按钮仍然渲染出来，于是窄屏会看到两个点了没反应的按钮，这里顺手修掉）。
+     */
+    allowPaneSplit?: boolean;
+    /**
      * 二级目录是否收起。
      *
      * 折叠按钮原本就在本组件的 `.chat-top-left` 里；拆分视图下如果每个窗格都渲染一遍，
      * 会出现 N 个同样的按钮。所以状态与按钮都上提到布局层：只有**活动窗格**渲染它。
      */
     sideCollapsed?: boolean;
+    /**
+     * 手机形态：二级目录是**覆盖式抽屉**，本组件里的目录按钮改成「打开抽屉」的语义。
+     *
+     * 图标必须跟着换：手机端 `sideCollapsed` 被布局层忽略（抽屉里始终展开），
+     * 继续用 `DArrowLeft/DArrowRight`（收起/展开）会给出错误的动作暗示。
+     * 这么做也省掉了「手机顶部再加一行汉堡按钮」—— 这个按钮的位置本来就对。
+     */
+    sideDrawer?: boolean;
   }>(),
   {
     active: false,
     chrome: "none",
     allowSplit: false,
+    allowPaneSplit: false,
     sideCollapsed: false,
+    sideDrawer: false,
   },
 );
 
@@ -198,17 +223,50 @@ const settings = useSettingsStore();
 const agents = useAgentsStore();
 
 /**
- * 消息气泡旁的助手头像与名称。
+ * 本窗格渲染的会话 key：**完全由父级 prop 决定**（见文件头「为什么叫窗格」）。
  *
- * 对齐上游 `chat-pane.ts` 的 `state.assistantName = config.current.assistantIdentity.name`
- * 与 `chat-message.ts` 的 `renderChatAvatar(role, { name, avatar }, ...)`：
- * 名称取当前 agent 的身份名，头像取 agent 图片头像 / emoji / 文本头像，
- * 最终由 `ChatAvatar` 按「图片 → 文本 → 首字母 → 角色图标」降级渲染。
+ * 刻意用 `||` 而不是 `??`：prop 可能是空串（布局层尚未就绪），
+ * 而网关的 `chat.history` / `chat.send` 都要求 sessionKey 至少 1 个字符。
+ *
+ * ⚠️ 定义位置必须早于 `paneAgentId` / `assistant*`：那两组全部由它派生，而下面
+ * `paneAgentId` 上的 `watch(..., { immediate: true })` 会在 setup 期间**立即求值** ——
+ * 挪到后面会直接撞上 TDZ（Cannot access 'sessionKey' before initialization）。
  */
-const assistantName = computed(() => agents.assistantName);
-const assistantAvatar = computed(() => agents.assistantAvatar);
-const assistantAvatarStatus = computed(() => agents.assistantAvatarStatus);
-const assistantAvatarAgentId = computed(() => agents.assistantAvatarAgentId);
+const sessionKey = computed<string>(() => props.sessionKey.trim() || settings.sessionKey || "main");
+
+/**
+ * 本窗格归属的 agentId（**per-pane，不是全局**）。
+ *
+ * 拆分视图下每个窗格的会话 key 自带 `agent:<id>:` 前缀（如 `agent:cel4:main`），
+ * 所以每个窗格都能独立算出自己的 agent —— 这是「多 agent 同时对话、互不影响」的地基。
+ *
+ * ⚠️ 绝不能改用 `agents.selectedAgentId`：它派生自全局 `settings.sessionKey`，
+ * 只代表**活动窗格**；用它会让所有窗格一起显示活动窗格的 agent
+ * （症状：左窗格明明是 `agent:cel4:main` 的会话，标题和头像却是学习辅导员）。
+ */
+const paneAgentId = computed<string>(() => agents.agentIdForSession(sessionKey.value));
+
+// 本窗格 agent 的运行时身份（名称/头像的最终来源）：窗格一出现就补齐一次，之后走 store 缓存。
+watch(paneAgentId, (id) => void agents.ensureIdentity(id), { immediate: true });
+
+// 窗格换 agent（下拉按组选择 / 左侧目录点击）→ 该 agent 的默认模型要重取。
+// 刻意**不加** immediate：首屏统一由 onMounted 触达（此时下面那些 ref 才初始化完）。
+watch(paneAgentId, () => void loadDefaultModel());
+
+/**
+ * 消息气泡旁的助手头像与名称 —— 取**本窗格 agent**，不是全局选中的 agent。
+ *
+ * 对齐上游 `chat-pane.ts`：每个 pane 有自己独立的 state，`assistantName` 由
+ * `chat-state.ts` 的 `loadPageAssistantIdentity` **按 pane 会话**拉取
+ * （`agent.identity.get { sessionKey }`）；渲染点见 `chat-message.ts` 的
+ * `renderChatAvatar(role, { name, avatar }, ...)`。名称取该 agent 的身份名，
+ * 头像取 agent 图片头像 / emoji / 文本头像，最终由 `ChatAvatar` 按
+ * 「图片 → 文本 → 首字母 → 角色图标」降级渲染。
+ */
+const assistantName = computed(() => agents.nameForAgent(paneAgentId.value));
+const assistantAvatar = computed(() => agents.avatarForAgent(paneAgentId.value));
+const assistantAvatarStatus = computed(() => agents.avatarStatusForAgent(paneAgentId.value));
+const assistantAvatarAgentId = computed(() => paneAgentId.value);
 
 /**
  * 助手正文里的音频引用 → 播放器。
@@ -240,14 +298,6 @@ function audioRefsFor(msg: ChatMessage): AudioReference[] {
 const userName = resolveLocalUserName(null);
 
 /**
- * 本窗格渲染的会话 key：**完全由父级 prop 决定**（见文件头「为什么叫窗格」）。
- *
- * 刻意用 `||` 而不是 `??`：prop 可能是空串（布局层尚未就绪），
- * 而网关的 `chat.history` / `chat.send` 都要求 sessionKey 至少 1 个字符。
- */
-const sessionKey = computed<string>(() => props.sessionKey.trim() || settings.sessionKey || "main");
-
-/**
  * 本会话「进行中的那一轮」的运行态 —— **存在组件外面，按会话分桶**
  * （见 `utils/chatRunState`）。
  *
@@ -259,7 +309,7 @@ const sessionKey = computed<string>(() => props.sessionKey.trim() || settings.se
  * 下面 5 个 `computed` 只是它的读写代理 —— 保留 `x.value` 的写法，
  * 组件里 50 多处既有引用与模板**一行都不用改**。
  */
-const runState = computed(() => chatRunStateFor(sessionKey.value, agents.selectedAgentId));
+const runState = computed(() => chatRunStateFor(sessionKey.value, paneAgentId.value));
 
 const messages = ref<ChatMessage[]>([]);
 
@@ -332,9 +382,7 @@ async function loadOlderHistory(): Promise<void> {
     historyNextOffset.value =
       typeof res?.nextOffset === "number" ? res.nextOffset : undefined;
     // 游标随缓存一起更新，切回会话后还能继续翻更早历史
-    const cacheKey =
-      qualifySessionKey(sessionKey.value, agents.selectedAgentId) ??
-      resolvedSessionKey();
+    const cacheKey = qualifySessionKey(sessionKey.value, paneAgentId.value) ?? resolvedSessionKey();
     setChatMessageCache(cacheKey, messages.value, {
       hasMore: res?.hasMore,
       nextOffset: res?.nextOffset,
@@ -365,7 +413,7 @@ async function loadOlderHistory(): Promise<void> {
 watch(
   messages,
   (list) => {
-    const key = qualifySessionKey(sessionKey.value, agents.selectedAgentId) ?? resolvedSessionKey();
+    const key = qualifySessionKey(sessionKey.value, paneAgentId.value) ?? resolvedSessionKey();
     // 存快照而不是活数组：`loadHistory` 命中缓存时会 `cached.filter(...)` 换成新数组，
     // 缓存若仍指向旧数组，之后的 push 就再也同步不进缓存了。
     setChatMessageCache(key, [...list]);
@@ -665,6 +713,43 @@ function downloadFileName(label: string | null | undefined, fallback = "附件")
   return name || fallback;
 }
 
+/**
+ * 附件下载点击（捕获阶段委托，原理见 `utils/downloadSave.ts` 文件头）。
+ *
+ * 明文 HTTP 站点下浏览器会**拦掉下载**（控制台 "should be served over HTTPS" +
+ * 下载气泡「无法从网站上提取文件」），这不是网关返回的错。这里只在
+ * `shouldSaveViaBlob` 认定的场景（非安全上下文 + 同源 http 地址）接管点击，
+ * 改成 fetch → `blob:` 落盘；其余场景原样走 `<a href download>` 原生导航 ——
+ * **不**改成 `window.open` / `location`，那会把 SPA 顶掉（见 `downloadHrefOrNull`）。
+ */
+async function onPaneDownloadClick(evt: MouseEvent): Promise<void> {
+  const target = evt.target as Element | null;
+  const anchor = target?.closest?.("a[download]") as HTMLAnchorElement | null;
+  if (!anchor) return;
+  const href = anchor.getAttribute("href") ?? "";
+  const fallback = shouldSaveViaBlob({
+    url: href,
+    secureContext: window.isSecureContext,
+    pageOrigin: window.location.origin,
+  });
+  if (!fallback) return;
+  evt.preventDefault();
+  const name = anchor.getAttribute("download") || "附件";
+  try {
+    await saveUrlViaBlob(href, name);
+  } catch (err) {
+    console.warn("[chat-pane] blob 下载兜底失败", err);
+    ElMessage({
+      message:
+        `下载失败：${name}\n` +
+        "当前站点是明文 HTTP，浏览器可能拦截文件下载；请改用 HTTPS 访问，或在下载气泡里点「保留」。",
+      type: "error",
+      duration: 6500,
+      grouping: true,
+    });
+  }
+}
+
 function previewHrefOf(attachment: ChatAttachment): string | null {
   return downloadHrefOrNull(attachmentPreviewHrefs.value.get(attachment.id) ?? null);
 }
@@ -856,7 +941,7 @@ function hydratePendingTasks(key: string): void {
 
 /** 队列持久化的分桶 key：与消息缓存同源（规范会话 key），保证拆分视图多个窗格共享同一份。 */
 function pendingTasksKey(): string {
-  return qualifySessionKey(sessionKey.value, agents.selectedAgentId) ?? resolvedSessionKey();
+  return qualifySessionKey(sessionKey.value, paneAgentId.value) ?? resolvedSessionKey();
 }
 
 /** 队列项提交失败：保留在队列里并标记，供 UI 提供「重试 / 移除」。 */
@@ -943,9 +1028,34 @@ function splitModelKey(key: string): { provider: string; model: string } | null 
  */
 const effectiveDefaultModel = ref<{ provider: string; model: string } | null>(null);
 
+/**
+ * 本窗格的模型覆盖 key —— **规范会话 key**（与消息缓存 / 待执行队列同源）。
+ *
+ * 用规范 key 而不是原始 prop：裸 `id-<hash8>` 与 `agent:main:id-<hash8>` 必须落到
+ * 同一个桶，否则「同一会话的两个窗格」会各选各的模型。
+ */
+const modelOverrideKey = computed<string>(
+  () => qualifySessionKey(sessionKey.value, paneAgentId.value) || sessionKey.value,
+);
+
+/**
+ * 透传给 ModelSelector 的 v-model：用 computed 显式桥接本地覆盖表 / Pinia store，
+ * 确保外部 setter 调用能可靠地反向回流到组件 props。
+ *
+ * 读：本窗格会话的覆盖 > 全局偏好（`settings.selectedModel`，作为新窗格的初始值）。
+ * 写：**只落本窗格会话的覆盖**，不再动全局偏好 —— 否则拆分视图下 A 窗格把模型
+ * 从 DeepSeek 切成 GLM，B 窗格会跟着一起变。对齐旧版
+ * `ui/src/lib/sessions/index.ts` 的 `modelOverrides`：以会话 key 为键，
+ * 同一会话共享、不同会话互不影响。
+ */
+const selectedModelRef = computed<string>({
+  get: () => readModelOverride(modelOverrideKey.value) ?? settings.selectedModel,
+  set: (value: string) => writeModelOverride(modelOverrideKey.value, value),
+});
+
 /** 用户显式选中的模型；空串 = 使用默认模型。 */
 const selectedModelParts = computed<{ provider: string; model: string } | null>(() =>
-  splitModelKey(settings.selectedModel),
+  splitModelKey(selectedModelRef.value),
 );
 
 /**
@@ -963,14 +1073,6 @@ const defaultModelKey = computed<string>(() =>
     : "",
 );
 
-/**
- * 透传给 ModelSelector 的 v-model：用 computed 显式桥接 Pinia store，
- * 确保外部 setter 调用能可靠地反向回流到组件 props。
- */
-const selectedModelRef = computed<string>({
-  get: () => settings.selectedModel,
-  set: (value: string) => settings.setSelectedModel(value),
-});
 
 // 切换模型时，模型的 contextWindow 可能不同（200k ↔ 16k），重拉一次
 watch(selectedModelRef, () => {
@@ -989,7 +1091,9 @@ const composerPlaceholder = computed<string>(() => {
   if (streaming.value) return "输入消息加入待执行任务（Enter 添加，Shift+Enter 换行）";
   if (attachments.value.length > 0)
     return `输入消息，Enter 发送（已附加 ${attachments.value.length} 个文件）`;
-  return `输入消息，Enter 发送，Shift+Enter 换行`;
+  // 对齐旧版 chat-composer.ts:1899 的 `t("chat.composer.placeholder", { name })`
+  //（zh-CN.ts:1608 = "给 {name} 发消息"）：名字取**本窗格** agent，不是全局选中的那个。
+  return `给 ${assistantName.value} 发消息`;
 });
 const creditsCalculating = computed(
   () => sending.value && Boolean(streamingText.value) && !streamingSpend.value,
@@ -1395,7 +1499,7 @@ function resolvedSessionKey(): string {
  */
 function isEventForCurrentSession(sessionKeyValue: unknown): boolean {
   if (typeof sessionKeyValue !== "string" || !sessionKeyValue.trim()) return true;
-  return sessionKeysMatch(sessionKeyValue, sessionKey.value, agents.selectedAgentId);
+  return sessionKeysMatch(sessionKeyValue, sessionKey.value, paneAgentId.value);
 }
 
 /**
@@ -1471,8 +1575,14 @@ async function loadDefaultModel(): Promise<void> {
       defaultId?: string;
       agents?: Array<{ id?: string; model?: { primary?: string } }>;
     }>("agents.list", {});
-    const agents = Array.isArray(res?.agents) ? res.agents : [];
-    const agent = agents.find((item) => item?.id === res?.defaultId) ?? agents[0];
+    const list = Array.isArray(res?.agents) ? res.agents : [];
+    // 取**本窗格 agent** 的默认模型：拆分视图下不同窗格属于不同 agent，用网关
+    // `defaultId` 那条会让「默认模型」标签与积分行显示成别的 agent 的模型。
+    // ⚠️ 局部变量刻意不叫 `agents` —— 那会 shadow 掉上面的 store 单例（原来是这么写的）。
+    const agent =
+      list.find((item) => item?.id === paneAgentId.value) ??
+      list.find((item) => item?.id === res?.defaultId) ??
+      list[0];
     const primary = typeof agent?.model?.primary === "string" ? agent.model.primary : "";
     const parts = splitModelKey(primary);
     if (parts) {
@@ -1518,7 +1628,7 @@ async function loadContextWindow(): Promise<void> {
     sessionRows.value = res?.sessions ?? [];
     const key = resolvedSessionKey();
     const current = sessionRows.value.find((row) =>
-      sessionKeysMatch(row.key, key, agents.selectedAgentId),
+      sessionKeysMatch(row.key, key, paneAgentId.value),
     );
     next = positiveNumber(current?.contextTokens) ?? positiveNumber(res?.defaults?.contextTokens);
   } catch {
@@ -1541,27 +1651,56 @@ async function loadContextWindow(): Promise<void> {
 const sessionRows = ref<SessionsListResult["sessions"]>([]);
 
 /**
- * 下拉候选：网关返回的会话列表；当前会话若不在列表里（还没落库的空会话），
- * 手动补到最前面 —— 否则 `<select>` 会因为 `value` 没有对应 option 而显示成第一项，
- * 用户看到的就是「窗格头显示的会话和实际会话对不上」（旧版同样做了这个补位）。
+ * 窗格头下拉的候选：跨 agent 的**全部会话，按 agent 分组**（模板里渲染成 `<optgroup>`）。
+ *
+ * 产品口径：窗格内换 agent 有**两条**路 ——
+ *   ① 本下拉按组选择（选出别的 agent 的会话 = 本窗格换 agent）；
+ *   ② 点击左侧目录（那条走 `settings.sessionKey`，布局层只改**活动窗格**）。
+ * 两条都必须支持，所以这里**不做**「按本窗格 agent 过滤」。旧版
+ * `chat-pane.ts:726 renderPaneHeader` 是过滤的，但那时窗格换 agent 另有独立控件
+ * （`onAgentChange`），本项目的产品口径是把 agent 选择收进这一个下拉。
+ *
+ * 分组顺序：本窗格 agent 排最前（当前选中项最容易被找到）。
  */
-const paneSessionOptions = computed<Array<{ key: string; label: string }>>(() => {
-  const rows = sessionRows.value;
-  const key = sessionKey.value;
-  const current = rows.find((row) => sessionKeysMatch(row.key, key, agents.selectedAgentId));
-  const options = (current ? rows : [{ key, updatedAt: null } as (typeof rows)[number], ...rows]).map(
-    (row) => ({
-      key: row.key,
-      label: resolveSessionDisplayName(row.key, rows.find((item) => item.key === row.key) ?? row),
-    }),
-  );
-  // 同一个 key 可能出现两次（补位 + 列表里已有），去重并保序
+const paneSessionGroups = computed<
+  Array<{ agentId: string; label: string; options: Array<{ key: string; label: string }> }>
+>(() => {
   const seen = new Set<string>();
-  return options.filter((option) => (seen.has(option.key) ? false : (seen.add(option.key), true)));
+  const byAgent = new Map<string, Array<{ key: string; label: string }>>();
+
+  for (const row of sessionRows.value) {
+    const key = typeof row?.key === "string" ? row.key.trim() : "";
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    const agentId = agents.agentIdForSession(key);
+    const options = byAgent.get(agentId) ?? [];
+    options.push({ key, label: agents.sessionDisplayNameFor(key, row) });
+    byAgent.set(agentId, options);
+  }
+
+  // 当前会话若还没落库（网关列表里没有），补到它所属 agent 的组里 —— 否则
+  // 下拉的 model-value 找不到对应 option，会显示成组里第一项，用户看到的就是
+  // 「窗格头显示的会话和实际会话对不上」（旧版同样做了这个补位）。
+  const currentKey = sessionKey.value.trim();
+  if (currentKey && !seen.has(currentKey)) {
+    const agentId = paneAgentId.value;
+    const options = byAgent.get(agentId) ?? [];
+    options.unshift({ key: currentKey, label: agents.sessionDisplayNameFor(currentKey) });
+    byAgent.set(agentId, options);
+  }
+
+  const ids = [...byAgent.keys()].sort((a, b) =>
+    a === paneAgentId.value ? -1 : b === paneAgentId.value ? 1 : 0,
+  );
+  return ids.map((agentId) => ({
+    agentId,
+    label: agents.nameForAgent(agentId),
+    options: byAgent.get(agentId) ?? [],
+  }));
 });
 
-function onPaneSessionSelect(event: Event): void {
-  const next = (event.target as HTMLSelectElement).value?.trim();
+function onPaneSessionSelect(value: string | number | boolean | undefined): void {
+  const next = typeof value === "string" ? value.trim() : "";
   if (!next || next === sessionKey.value) return;
   emit("sessionChange", props.paneId, next);
 }
@@ -1766,141 +1905,6 @@ function hoverCopyTitleOf(msg: ChatMessage): string {
   if (state === "copied") return "已复制";
   if (state === "error") return "复制失败，请手动选择文本复制";
   return canCopyMessage(msg) ? "复制这条消息" : "无可复制内容";
-}
-
-// ── chat 错误友好化 ──
-//
-// 网关 `state: "error"` 事件透传的 `errorMessage` 是英文原句（来自上游
-// `agents/embedded-agent-helpers/sanitize-user-facing-text.ts` 的分类表），
-// 例如 "LLM request failed: network connection error."，
-// 再被上游 `reply/agent-runner-execution.ts:3474` 包装成
-// "⚠️ Agent failed before reply: <inner>.\nLogs: openclaw logs --follow"。
-// 直接 toast 给中文用户既难看也猜不出下一步。这里做一层规则化的中文映射，
-// 落点（title+detail+retryable）与上游 sanitizeUserFacingText 的英文类目一一对应，
-// 优先按上游已分类的句子匹配；命中失败时再剥离 "Agent failed before reply" 前缀和
-// "Logs: ..." 后缀，把剩余部分继续匹配（兜底）；都匹配不上则原文展示。
-
-type FriendlyError = { title: string; detail: string; retryable: boolean };
-
-/**
- * 把上游英文 chat 错误文案映射成中文用户友好提示。
- * 返回 `{title, detail, retryable}`，调用方按需拼接 toast 文案。
- */
-function localizeChatError(raw: string): FriendlyError {
-  if (!raw) return { title: "生成失败", detail: "", retryable: true };
-
-  // 上游已经本地化的锁竞争提示（见 server-chat.ts:220 buildChatErrorMessage）
-  if (/当前会话正在处理中/.test(raw)) {
-    return { title: "当前会话正在处理中，请稍后", detail: "", retryable: false };
-  }
-
-  // 规则表：英文片段 → 中文提示。每条都对应上游 sanitizeUserFacingText 的一个分支。
-  // 顺序敏感 —— 更具体的（带前缀）放在前面，避免 "network" 这类宽泛词先匹配。
-  const rules: Array<{ re: RegExp; title: string; detail: string; retryable: boolean }> = [
-    {
-      re: /LLM request failed: connection refused by the provider endpoint\./i,
-      title: "模型提供方拒绝连接",
-      detail: "可能服务未启动或地址错误，请稍后重试",
-      retryable: true,
-    },
-    {
-      re: /LLM request failed: DNS lookup for the provider endpoint failed\./i,
-      title: "域名解析失败",
-      detail: "无法解析模型提供方地址，请检查网络/DNS 设置",
-      retryable: true,
-    },
-    {
-      re: /LLM request failed: the provider endpoint is unreachable from this host\./i,
-      title: "模型提供方不可达",
-      detail: "当前主机无法访问该端点，请检查网络或代理",
-      retryable: true,
-    },
-    {
-      re: /LLM request failed: network connection (was interrupted|error)\./i,
-      title: "网络连接失败",
-      detail: "模型提供方的连接已断开，请稍后重试",
-      retryable: true,
-    },
-    {
-      re: /LLM request failed: provider reported a network error\./i,
-      title: "模型提供方上报网络错误",
-      detail: "请稍后重试",
-      retryable: true,
-    },
-    {
-      re: /LLM request failed: proxy or tunnel configuration blocked the provider request\./i,
-      title: "代理配置阻断了请求",
-      detail: "请检查代理或隧道设置",
-      retryable: false,
-    },
-    {
-      re: /LLM request timed out\./i,
-      title: "请求超时",
-      detail: "模型提供方响应超时，请重试",
-      retryable: true,
-    },
-    {
-      re: /LLM request rate limited\./i,
-      title: "请求频率超限",
-      detail: "请稍后重试或降低调用频率",
-      retryable: true,
-    },
-    {
-      re: /LLM request unauthorized\./i,
-      title: "鉴权失败",
-      detail: "API 密钥无效或已过期，请联系管理员",
-      retryable: false,
-    },
-    {
-      re: /LLM request failed: provider rejected the request schema or tool payload\./i,
-      title: "模型提供方拒绝了请求结构",
-      detail: "通常是消息体或工具定义与服务端契约不一致，可尝试开启新会话重试",
-      retryable: true,
-    },
-    {
-      re: /LLM request failed: provider returned an invalid streaming response\. Please try again\./i,
-      title: "流式响应异常",
-      detail: "模型提供方返回了无效的流式响应，请重试",
-      retryable: true,
-    },
-    {
-      re: /LLM request failed with an unknown error\./i,
-      title: "模型提供方返回未知错误",
-      detail: "请稍后重试，问题持续请联系管理员",
-      retryable: true,
-    },
-    {
-      re: /LLM request failed\./i,
-      // 兜底分类：failover-matches.test.ts:187 把裸 "LLM request failed." 视为 timeout
-      title: "生成失败",
-      detail: "请求未在预期时间内完成，请重试",
-      retryable: true,
-    },
-  ];
-  for (const r of rules) {
-    if (r.re.test(raw)) return r;
-  }
-
-  // 兜底：剥掉 "⚠️ Agent failed before reply: ..." / "Logs: ..." 这类包装，
-  // 对内层继续匹配一次（可能在 inner 上命中一个更具体的分类）。
-  const stripped = raw
-    .replace(/^⚠️\s*/, "")
-    .replace(/Agent failed before reply[:：]\s*/i, "")
-    .replace(/\.\s*Logs:.*$/s, "")
-    .replace(/\.\s*Please try again.*$/i, "")
-    .trim();
-  if (stripped && stripped !== raw) {
-    for (const r of rules) {
-      if (r.re.test(stripped)) return r;
-    }
-    return { title: "助手在回复前失败", detail: stripped, retryable: true };
-  }
-  return { title: "生成失败", detail: raw, retryable: true };
-}
-
-/** 把 FriendlyError 拍平成单行 toast 文案：title 在前，detail 换行接在后。 */
-function formatFriendlyError(e: FriendlyError): string {
-  return e.detail ? `${e.title}\n${e.detail}` : e.title;
 }
 
 // ── 删除消息（移植自上游 renderDeleteButton） ──
@@ -2133,7 +2137,7 @@ async function loadHistory(options?: { skipCache?: boolean }): Promise<void> {
   // 先同步已删集合（本地、便宜），后面缓存命中也要用。
   loadDeletedMessageIds();
   const deleted = deletedMessageIds.value;
-  const cacheKey = qualifySessionKey(sessionKey.value, agents.selectedAgentId) ?? resolvedSessionKey();
+  const cacheKey = qualifySessionKey(sessionKey.value, paneAgentId.value) ?? resolvedSessionKey();
   // 缓存命中：直接秒回，不联网（对齐旧版 session-message-cache）。
   // ⚠️ skipCache 时先清缓存，确保一定走服务端请求 —— 用户点刷新按钮就是为了拿最新数据，
   // 缓存里的消息缺少服务端附件（historyMedia / contentAttachments），刷新才有机会补回。
@@ -2350,6 +2354,29 @@ function markSteeredRunProducing(): void {
   void scrollToBottom();
 }
 
+/**
+ * 「发送 / 引导」失败时的统一提示。
+ *
+ * ⚠️ **别退回** `ElMessage.error(\`发送失败：${err.message}\`)`：RPC 被拒时 `err.message` 是网关的
+ * **英文原文**（例：`Agent "cet4" no longer exists in configuration`），而 `localizeChatError`
+ * 才是全站唯一的中文文案来源 —— `chat` 事件的 `state: "error"` 路径已经在用它（见 `handleEvent`）。
+ * 两条路径共用同一个函数，才不会出现「同一条错误在事件路径显示中文、在发送路径显示英文」。
+ *
+ * `retryable` 复用 `state: "error"` 那套语义，只用来决定 toast 停留时长（中文两行，3s 偏短）。
+ */
+function notifyActionFailure(action: string, err: unknown): void {
+  const raw = err instanceof Error ? err.message : String(err);
+  const friendly = localizeChatError(raw);
+  ElMessage({
+    message: friendly.detail
+      ? `${action}：${friendly.title}\n${friendly.detail}`
+      : `${action}：${friendly.title}`,
+    type: "error",
+    duration: friendly.retryable ? 4500 : 6500,
+    grouping: true,
+  });
+}
+
 async function send(textOverride?: string): Promise<boolean> {
   const text = (textOverride ?? input.value).trim();
   if (sending.value) return false;
@@ -2361,8 +2388,9 @@ async function send(textOverride?: string): Promise<boolean> {
   // 旧版同样允许「只有附件、没有文字」的发送。
   if (!text && !apiAttachments) return false;
 
+  const localMessageId = `local-${Date.now()}`;
   messages.value.push({
-    id: `local-${Date.now()}`,
+    id: localMessageId,
     role: "user",
     text,
     ts: Date.now(),
@@ -2407,7 +2435,15 @@ async function send(textOverride?: string): Promise<boolean> {
     sending.value = false;
     streamingText.value = "";
     streamingThinking.value = "";
-    ElMessage.error(`发送失败：${err instanceof Error ? err.message : String(err)}`);
+    // ⚠️ 请求发出**之前**已经清空了输入框、并乐观推了一条本地用户气泡（见函数前半段）。
+    // 失败时这两件事都必须还原，否则会出现：
+    //   ① 聊天记录里躺着一条「看起来发过了、其实从没发出去」的消息（UI 在说谎）；
+    //   ② 用户刚打的字没了 —— 于是「重试」根本无从谈起。
+    // 这与本文件 `steer()` 的失败处理是同一套约定（它已经会剔除 steeredMessage）。
+    // 输入框只在仍为空时回填：等待期间用户又打了新内容的话，别覆盖掉。
+    if (textOverride === undefined && !input.value) input.value = text;
+    messages.value = messages.value.filter((message) => message.id !== localMessageId);
+    notifyActionFailure("发送失败", err);
     return false;
   }
 }
@@ -2454,7 +2490,9 @@ async function steer(textOverride?: string): Promise<void> {
       (message) => message.id !== steeredMessage.id,
     );
     steerCount.value = Math.max(0, steerCount.value - 1);
-    ElMessage.error(`引导失败：${err instanceof Error ? err.message : String(err)}`);
+    // 与 `send()` 同一约定：输入框是在请求前清掉的，失败要还回去（仍为空时才回填）。
+    if (textOverride === undefined && !input.value) input.value = text;
+    notifyActionFailure("引导失败", err);
     throw err;
   }
 }
@@ -2881,6 +2919,9 @@ watch(
     void loadHistory();
     // 上下文窗口可能随会话变化（每个会话有自己的 contextTokens）
     void loadContextWindow();
+    // 换会话可能连带换 agent（窗格头下拉按组选别的 agent 时就是这条路）
+    // → 该 agent 的默认模型要跟着重取
+    void loadDefaultModel();
   },
 );
 
@@ -2933,6 +2974,7 @@ function formatBalance(value: number | null | undefined): string {
     :data-pane-id="paneId"
     :class="{ 'chat-pane--active': active && chrome === 'pane' }"
     @pointerdown.capture="emit('focusPane', paneId)"
+    @click.capture="onPaneDownloadClick"
     @dragover="onAttachDragOver"
     @drop="onAttachDrop"
   >
@@ -2947,38 +2989,55 @@ function formatBalance(value: number | null | undefined): string {
     >
       <label class="chat-pane__session-label">
         <span class="sr-only">窗格会话</span>
-        <select
+        <el-select
           class="chat-pane__session-select"
+          :model-value="sessionKey"
+          :data-session-key="sessionKey"
           aria-label="窗格会话"
-          :value="sessionKey"
+          popper-class="chat-pane__session-select-popper"
           @change="onPaneSessionSelect"
         >
-          <option v-for="row in paneSessionOptions" :key="row.key" :value="row.key">
-            {{ row.label }}
-          </option>
-        </select>
+          <el-option-group
+            v-for="group in paneSessionGroups"
+            :key="group.agentId"
+            :label="group.label"
+          >
+            <el-option
+              v-for="option in group.options"
+              :key="option.key"
+              :label="option.label"
+              :value="option.key"
+            />
+          </el-option-group>
+        </el-select>
       </label>
       <div class="chat-pane__actions">
-        <el-tooltip content="向下拆分" placement="bottom">
-          <el-button
-            text
-            class="chat-pane__action"
-            aria-label="向下拆分"
-            @click="emit('splitDown', paneId)"
-          >
-            <ChatIcon name="panelBottomOpen" />
-          </el-button>
-        </el-tooltip>
-        <el-tooltip content="向右拆分" placement="bottom">
-          <el-button
-            text
-            class="chat-pane__action"
-            aria-label="向右拆分"
-            @click="emit('splitRight', paneId)"
-          >
-            <ChatIcon name="panelRightOpen" />
-          </el-button>
-        </el-tooltip>
+        <!-- 两个拆分按钮只在 `allowPaneSplit` 时渲染（窄屏 / 单窗格不渲染，
+             理由见 props 里 `allowPaneSplit` 的说明）。「关闭窗格」**始终保留**：
+             窄屏下它是关掉多余窗格、回到单窗格的唯一入口（对齐 ui
+             `chat-page.ts:374-375` 的「keep session switching and close available」）。 -->
+        <template v-if="allowPaneSplit">
+          <el-tooltip content="向下拆分" placement="bottom">
+            <el-button
+              text
+              class="chat-pane__action"
+              aria-label="向下拆分"
+              @click="emit('splitDown', paneId)"
+            >
+              <ChatIcon name="panelBottomOpen" />
+            </el-button>
+          </el-tooltip>
+          <el-tooltip content="向右拆分" placement="bottom">
+            <el-button
+              text
+              class="chat-pane__action"
+              aria-label="向右拆分"
+              @click="emit('splitRight', paneId)"
+            >
+              <ChatIcon name="panelRightOpen" />
+            </el-button>
+          </el-tooltip>
+        </template>
         <el-tooltip content="关闭窗格" placement="bottom">
           <el-button
             text
@@ -2994,22 +3053,30 @@ function formatBalance(value: number | null | undefined): string {
 
     <header class="chat-top">
       <div class="chat-top-left">
-        <!-- 二级目录折叠按钮：拆分视图下只由活动窗格渲染（见 sideCollapsed 的说明）。 -->
-        <el-tooltip
-          v-if="active"
-          :content="sideCollapsed ? '展开目录' : '收起目录'"
-          placement="bottom"
-        >
-          <el-button
-            text
-            size="small"
-            class="side-toggle"
-            :aria-label="sideCollapsed ? '展开目录' : '收起目录'"
-            @click="emit('toggleSide')"
+        <!-- 二级目录折叠按钮：拆分视图下只由活动窗格渲染（见 sideCollapsed 的说明）。
+             ⚠️ 但**槽位 `side-toggle-slot` 每个窗格都要渲染**（未选中窗格里是空占位）。
+             以前直接把按钮 `v-if` 掉：活动窗格比其它窗格多占 24px 宽 + 2px 高
+             ⇒ 头像/标题右移 34px、行高 45→47，选中与未选中窗格的头部对不齐。 -->
+        <span class="side-toggle-slot">
+          <el-tooltip
+            v-if="active"
+            :content="sideDrawer ? '打开对话目录' : sideCollapsed ? '展开目录' : '收起目录'"
+            placement="bottom"
           >
-            <el-icon><component :is="sideCollapsed ? 'DArrowRight' : 'DArrowLeft'" /></el-icon>
-          </el-button>
-        </el-tooltip>
+            <el-button
+              text
+              size="small"
+              class="side-toggle"
+              :aria-label="sideDrawer ? '打开对话目录' : sideCollapsed ? '展开目录' : '收起目录'"
+              @click="emit('toggleSide')"
+            >
+              <!-- 手机端（sideDrawer）：用汉堡图标表示「打开抽屉」。
+                   桌面端维持旧版的收起/展开箭头，行为与观感都不变。 -->
+              <el-icon v-if="sideDrawer"><component is="Menu" /></el-icon>
+              <el-icon v-else><component :is="sideCollapsed ? 'DArrowRight' : 'DArrowLeft'" /></el-icon>
+            </el-button>
+          </el-tooltip>
+        </span>
         <ChatAvatar
           role="assistant"
           :name="assistantName"
@@ -3994,9 +4061,17 @@ function formatBalance(value: number | null | undefined): string {
   position: relative;
 }
 
-/* 拆分视图下标记活动窗格：顶部一条强调边（旧版 .chat-pane__header.chat-pane--active） */
-.chat-pane--active {
-  box-shadow: inset 0 2px 0 0 var(--wb-accent);
+/* 拆分视图下标记活动窗格：窗格**顶部**一条蓝色横线（旧版 .chat-pane__header.chat-pane--active）。
+ *
+ * ⚠️ 这条线必须挂在 `.chat-pane__header` 上，**不能**挂在 `.chat-pane` 根节点上：
+ * inset box-shadow 的绘制层级是「元素自身背景之上、子元素背景之下」，而 `.chat-pane__header`
+ * 是不透明白底且铺满窗格顶部 ⇒ 挂在根节点上的线会被整个盖住，等于没画。
+ * （实测：根节点的 computed shadow 是 `rgb(59,130,246) 0px 2px 0px 0px inset`，
+ *  但窗格最顶端 6px 的像素采样是纯白。）
+ * 只在拆分视图（`chrome === 'pane'`）下才加这个 class，此时窗格头必然存在；
+ * 单窗格 / 窄屏单窗格用 `chrome="none"`，不画线（没有需要区分的对象）。 */
+.chat-pane--active > .chat-pane__header {
+  box-shadow: inset 0 4px 0 0 var(--wb-accent);
 }
 
 /* ============== 窗格头（仅拆分视图渲染） ============== */
@@ -4010,7 +4085,7 @@ function formatBalance(value: number | null | undefined): string {
   min-height: 36px;
   padding: 2px 6px 4px 10px;
   border-bottom: 1px solid var(--wb-border);
-  background: var(--wb-bg-card-strong);
+  background: var(--wb-bg-card);
 }
 
 .chat-pane__session-label {
@@ -4018,22 +4093,32 @@ function formatBalance(value: number | null | undefined): string {
   min-width: 0;
 }
 
+/* 会话 / agent 下拉：换成 el-select 后把外观压回「窗格头里的一行小字」 */
 .chat-pane__session-select {
   width: 100%;
   min-width: 0;
-  padding: 2px 4px;
-  border: 0;
-  border-radius: var(--wb-radius-sm);
-  color: var(--wb-text-primary);
-  background: transparent;
-  font: inherit;
-  font-size: 12px;
-  text-overflow: ellipsis;
-  cursor: pointer;
 }
 
-.chat-pane__session-select:hover {
+.chat-pane :deep(.chat-pane__session-select .el-select__wrapper) {
+  min-height: 24px;
+  padding: 0 4px;
+  border: 0;
+  box-shadow: none;
+  background: transparent;
+  font-size: 12px;
+}
+
+.chat-pane :deep(.chat-pane__session-select .el-select__wrapper:hover) {
   background: var(--wb-bg-hover);
+}
+
+.chat-pane :deep(.chat-pane__session-select .el-select__selected-item) {
+  color: var(--wb-text-primary);
+  font-size: 12px;
+}
+
+.chat-pane :deep(.chat-pane__session-select .el-select__placeholder) {
+  font-size: 12px;
 }
 
 .chat-pane__actions {
@@ -4097,11 +4182,22 @@ function formatBalance(value: number | null | undefined): string {
 }
 
 
+/* 折叠按钮槽位：固定 24×24，**每个窗格都占位**（模板注释里有原因）。
+   有按钮 / 没按钮时行高与头像偏移完全一致，选中与未选中窗格的头部才对得齐。 */
+.side-toggle-slot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 24px;
+  width: 24px;
+  height: 24px;
+}
+
 /* 二级目录收起/展开按钮 */
 .side-toggle {
   font-size: 16px !important;
   padding: 4px !important;
-  height: 26px !important;
+  height: 24px !important;
   color: var(--wb-text-secondary) !important;
 }
 
@@ -5865,5 +5961,121 @@ html.dark .credits-alert :deep(.el-alert__title) {
  */
 .chat-attach-popover .attach-menu__option--hidden-media {
   display: none !important;
+}
+
+/**
+ * 窗格头的会话 / agent 下拉（el-select 的弹层同样被 teleport 到 body，
+ * 必须写在非 scoped 块里）。
+ *
+ * el-select 会把宿主宽度写进弹层的 `min-width`；窗格在拆分视图下有半屏宽
+ * （实测 566px），弹层跟着变得又宽又空，所以这里收窄成内容宽度。
+ */
+.chat-pane__session-select-popper.el-select-dropdown {
+  min-width: 180px !important;
+  max-width: min(360px, calc(100vw - 24px)) !important;
+}
+.chat-pane__session-select-popper .el-select-group__title {
+  color: var(--wb-text-secondary);
+  font-size: 12px;
+}
+.chat-pane__session-select-popper .el-select-dropdown__item {
+  font-size: 12px;
+}
+
+/* ===========================================================================
+   手机端（≤768px，含矮横屏）
+   ===========================================================================
+
+   与 `src/styles/layout.mobile.css` 的断点条件逐字一致。本文件放的是**本组件的**
+   手机端规则；全局外壳（安全区、el-main、输入框字号）在那边。
+
+   桌面基线不受影响：全部包在 media query 里（`pane-active-topline` 那套几何断言
+   仍在 1366 下跑，头像偏移 54 / 标题偏移 88 / 行高 45 都不变）。
+   =========================================================================== */
+
+@media (max-width: 768px), (max-width: 932px) and (max-height: 500px) and (orientation: landscape) {
+  /**
+   * 输入区留白：桌面是 `12px 20px 18px`，手机横向把 20px 收到 12px 并把宽度让给输入框；
+   * 底部叠三层：基础 10px + Home 指示条安全区 + **软键盘遮挡补偿**。
+   *
+   * `--wb-keyboard-inset` 由 `utils/keyboardInset.ts` 持续写入。iOS 不缩布局视口，
+   * 键盘弹出时输入区会被盖住；把它加在 composer 的 padding-bottom 上就能把输入内容顶到
+   * 键盘之上，而**不动整页高度**（不动就不会牵连窗格/抽屉那套已经调好的高度链路）。
+   * Android 有 `interactive-widget=resizes-content`，该值恒为 0，不会重复补偿。
+   */
+  .chat-composer {
+    padding: 8px calc(12px + var(--wb-safe-right, 0px))
+      calc(10px + var(--wb-safe-bottom, 0px) + var(--wb-keyboard-inset, 0px))
+      calc(12px + var(--wb-safe-left, 0px));
+  }
+
+  /**
+   * 触控目标统一抬到 44px（iOS HIG）。只改尺寸，颜色/圆角沿用原样式，
+   * 观感与桌面一致、只是更好点。
+   */
+  .composer-attach {
+    width: var(--wb-touch-target, 44px);
+    height: var(--wb-touch-target, 44px);
+    min-width: var(--wb-touch-target, 44px);
+    font-size: 18px;
+  }
+
+  .send-button {
+    height: var(--wb-touch-target, 44px);
+    min-width: var(--wb-touch-target, 44px);
+    padding: 0 18px 0 16px;
+    font-size: 14px;
+  }
+
+  .chat-pane :deep(.chat-open-split-view.el-button) {
+    width: var(--wb-touch-target, 44px);
+    height: var(--wb-touch-target, 44px);
+  }
+
+  /**
+   * 「Enter 发送 · Shift+Enter 换行」在手机上毫无意义（没有物理键盘，回车就是换行），
+   * 留着只会挤占输入区那一行。隐藏它不影响任何逻辑（纯提示文案，非交互元素）。
+   */
+  .composer-hint {
+    display: none;
+  }
+
+  /** 输入框内边距按窄屏收紧，配合全局的 16px 字号（防 iOS 聚焦自动缩放）。 */
+  .composer-input {
+    padding: 12px 14px 4px;
+  }
+
+  /**
+   * 目录折叠按钮（手机端是「打开抽屉」）抬到 44px。
+   *
+   * 这个按钮撑宽会让 `.side-toggle-slot` 从 24px 变成 44px ⇒ 头像/标题整体右移 ——
+   * 只在手机上如此，桌面几何断言（头像偏移 54 / 标题偏移 88）不受影响；
+   * 而手机上同一时刻只渲染活动窗格，不存在「选中/未选中窗格头部对不齐」的问题。
+   */
+  .chat-pane :deep(.side-toggle.el-button) {
+    width: var(--wb-touch-target, 44px);
+    height: var(--wb-touch-target, 44px);
+  }
+
+  .chat-pane :deep(.side-toggle-slot) {
+    width: var(--wb-touch-target, 44px);
+  }
+
+  /** 窗格头两个按钮（会话下拉 / 关闭）也抬到 44px；窗格头在手机上是主要操作区。 */
+  .chat-pane :deep(.chat-pane__action.el-button) {
+    width: var(--wb-touch-target, 44px);
+    height: var(--wb-touch-target, 44px);
+  }
+
+  /**
+   * 双击缩放抑制：手机上按钮/标签的双击会触发浏览器缩放（300ms 延迟 + 整页放大），
+   * 对应用型界面是纯干扰。`manipulation` 保留滚动与点按，只关掉双击缩放。
+   */
+  .chat-pane,
+  .chat-pane button,
+  .chat-pane .el-button,
+  .chat-pane .el-select {
+    touch-action: manipulation;
+  }
 }
 </style>
