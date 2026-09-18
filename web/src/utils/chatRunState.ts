@@ -109,3 +109,22 @@ export function resetChatRunState(state: ChatRunState): void {
 export function chatRunStateSize(): number {
   return buckets.size;
 }
+
+/**
+ * 把**已存在**的某个会话的运行态桶归零（桶不存在时什么都不做，**不新建**）。
+ *
+ * 用途：切到别的会话后，前一个会话的终止帧会被按会话过滤掉，没人再调
+ * `finalizeStreaming()` ⇒ 它的 `sending` 永远停在 true（输入框卡「正在生成」、
+ * 回车只会进待执行队列，整个会话像被中断，只有刷新页面能救）。
+ * 所以在别的会话里收到那个会话的 `final` / `error` 时，顺手把它的桶收干净。
+ *
+ * ⚠️ 传进来的 `sessionKey` + `defaultAgentId` 必须与创建桶时的那一对同源
+ * （`ChatPane` 用的是 `sessionKey.value` + `paneAgentId.value`），否则键不同、收不到桶。
+ */
+export function resetChatRunStateForSession(
+  sessionKey: string | null | undefined,
+  defaultAgentId?: string | null,
+): void {
+  const bucket = buckets.get(bucketKeyOf(sessionKey, defaultAgentId));
+  if (bucket) resetChatRunState(bucket);
+}

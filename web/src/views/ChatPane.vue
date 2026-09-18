@@ -31,12 +31,15 @@ import { useAgentsStore } from "@/stores/agents";
 import { formatTime, formatDateTimeMinute } from "@/utils/format";
 import { sessionKeysMatch, qualifySessionKey } from "@/utils/sessionListSelection";
 import {
+  clearBackgroundAssistantMessages,
   clearChatMessageCache,
   getChatHistoryCursor,
   getChatMessageCache,
+  noteBackgroundAssistantMessage,
+  readBackgroundAssistantMessages,
   setChatMessageCache,
 } from "@/utils/chatMessageCache";
-import { chatRunStateFor } from "@/utils/chatRunState";
+import { chatRunStateFor, resetChatRunStateForSession } from "@/utils/chatRunState";
 import { readModelOverride, writeModelOverride } from "@/utils/modelOverrides";
 import { formatFriendlyError, localizeChatError } from "@/utils/chatErrorCopy";
 import { saveUrlViaBlob, shouldSaveViaBlob } from "@/utils/downloadSave";
@@ -54,6 +57,7 @@ import {
   shouldAdoptStreamedMedia,
 } from "@/utils/messageCommit";
 import type { SessionsListResult } from "@/api/types";
+import { GatewayRequestError } from "@/api/gateway";
 import MarkdownView from "@/components/MarkdownView.vue";
 import ModelSelector, { type ModelOption } from "@/components/ModelSelector.vue";
 import VoiceButton from "@/components/VoiceButton.vue";
@@ -355,6 +359,9 @@ async function loadOlderHistory(): Promise<void> {
   const el = threadRef.value;
   const prevScrollHeight = el?.scrollHeight ?? 0;
   const prevScrollTop = el?.scrollTop ?? 0;
+  // 翻页结果也是异步回来的：期间切了会话就必须整包丢弃，
+  // 否则旧会话的更早一页会被前置插进新会话的列表里（同 `loadHistory` 的版本闸）。
+  const requestKey = resolvedSessionKey();
   loadingOlderHistory.value = true;
   try {
     const res = await gateway.request<{
@@ -362,11 +369,12 @@ async function loadOlderHistory(): Promise<void> {
       hasMore?: boolean;
       nextOffset?: number;
     }>("chat.history", {
-      sessionKey: resolvedSessionKey(),
+      sessionKey: requestKey,
       limit: 200,
       offset: historyNextOffset.value,
       maxChars: CHAT_HISTORY_MAX_CHARS,
     });
+    if (resolvedSessionKey() !== requestKey) return;
     const older = (res?.messages ?? [])
       .map((item, index) => normalizeMessage(item, index))
       .filter((item): item is ChatMessage => item !== null);
@@ -413,6 +421,12 @@ async function loadOlderHistory(): Promise<void> {
 watch(
   messages,
   (list) => {
+    // ⚠️ 空列表**绝不落缓存**：切到一个「本地还没有缓存」的会话时，`watch(sessionKey)`
+    // 会先执行 `messages.value = []`，本回调随之以**新会话**为键写下一份空缓存。
+    // 而 `loadHistory` 命中缓存会秒回（旧版甚至直接 return、根本不联网），
+    // 于是 60s TTL 内每次切进去都是空白 —— 表现就是「历史消息不显示」。
+    // 不缓存空列表的代价只是「空会话每次切换多一次 RPC」，这个代价是值得的。
+    if (list.length === 0) return;
     const key = qualifySessionKey(sessionKey.value, paneAgentId.value) ?? resolvedSessionKey();
     // 存快照而不是活数组：`loadHistory` 命中缓存时会 `cached.filter(...)` 换成新数组，
     // 缓存若仍指向旧数组，之后的 push 就再也同步不进缓存了。
@@ -2132,19 +2146,126 @@ const deleteConfirmStyle = computed<Record<string, string>>((): Record<string, s
   return { left: `${pos.left}px`, top: `${pos.top}px`, visibility: "visible" };
 });
 
+/**
+ * 历史上一次请求的序号：会话快速切换 / 连点刷新时，**只允许最新一次结果写回视图与缓存**。
+ * 对齐旧版 `ui/src/pages/chat/chat-history.ts:82-106 shouldApplyChatHistoryResult`。
+ */
+let historyRequestSeq = 0;
+
+/**
+ * 把「后台会话暂存的终止回复」按稳定 id 去重合并进来（见 `utils/chatMessageCache`
+ * 的 `noteBackgroundAssistantMessage`）。
+ *
+ * 暂存条目**不在这里销毁** —— 服务端 transcript 落库偶尔晚于终止帧，
+ * 早清会让刚切回来的那一瞬间又看不到回复；由服务端结果确认包含后才清。
+ */
+function mergeBackgroundAssistantMessages(cacheKey: string, base: ChatMessage[]): ChatMessage[] {
+  const pending = readBackgroundAssistantMessages(cacheKey);
+  if (pending.length === 0) return base;
+  const known = new Set(base.map((item) => item.id));
+  const extra = pending.filter((item) => !known.has(item.id));
+  return extra.length > 0 ? [...base, ...extra] : base;
+}
+
+/**
+ * 请求期间本地新增的尾部消息（乐观用户气泡 / 刚落库的助手回复）不能被服务端响应抹掉。
+ *
+ * `messages` 是**原地 push** 的数组，所以「同一个数组对象 + 前缀逐项全等」就说明
+ * 后面那几条是请求发出之后才出现的。服务端结果里没有的那些追加回去。
+ * 简化版对齐旧版 `ui/src/pages/chat/chat-history.ts:287 preserveOptimisticTailMessages`。
+ */
+function preserveLocalTailMessages(
+  serverMessages: ChatMessage[],
+  snapshot: ChatMessage[],
+): ChatMessage[] {
+  const current = messages.value;
+  if (current === snapshot || current.length <= snapshot.length) return serverMessages;
+  if (snapshot.some((item, index) => current[index] !== item)) return serverMessages;
+  const present = new Set(serverMessages.map((item) => item.id));
+  const tail = current.slice(snapshot.length).filter((item) => !present.has(item.id));
+  return tail.length > 0 ? [...serverMessages, ...tail] : serverMessages;
+}
+
+/** `chat.history` 的响应形状（`loadHistory` / `loadOlderHistory` 共用字段）。 */
+type ChatHistoryResponse = {
+  messages?: unknown[];
+  sessionId?: string;
+  hasMore?: boolean;
+  nextOffset?: number;
+  totalMessages?: number;
+};
+
+/**
+ * 这条错误是不是「网关不认我传的参数」？
+ *
+ * `ChatHistoryParamsSchema` 是 `additionalProperties: false`
+ * （`packages/gateway-protocol/src/schema/logs-chat.ts:30-39`），校验失败时
+ * 网关回 `INVALID_REQUEST: invalid chat.history params: at /…: must NOT have additional properties`。
+ */
+function isChatHistoryParamsRejected(err: unknown): boolean {
+  return (
+    err instanceof GatewayRequestError &&
+    err.gatewayCode === "INVALID_REQUEST" &&
+    /invalid chat\.history params/i.test(err.message)
+  );
+}
+
+/**
+ * 拉历史时的**入参降级**（预发「历史消息不显示」的一条已知成因）。
+ *
+ * 本文件的请求带了 `offset: 0` 与放大的 `maxChars`（网关默认只给 8000 字符正文，
+ * 长回复会被截断并追加 `...(truncated)...`）。但 schema 是
+ * `additionalProperties: false` ⇒ **前端产物比网关新**（老网关的 schema 里没有这两个字段）
+ * 时整条请求会被判 `INVALID_REQUEST` —— 表现就是「一条历史都不显示」，而且
+ * 报错文案只出现在 toast 里，很容易被当成空会话。
+ *
+ * 命中该错误就退化成最小入参（`sessionKey` + `limit`）再试一次：
+ * 代价是拿不到 `hasMore/nextOffset`（翻页在那种网关上本来就不可用）与长正文截断，
+ * 但至少**历史能显示出来**。
+ */
+async function requestChatHistory<T>(params: {
+  sessionKey: string;
+  limit: number;
+  offset: number;
+  maxChars: number;
+}): Promise<T> {
+  try {
+    return await gateway.request<T>("chat.history", params);
+  } catch (err) {
+    if (!isChatHistoryParamsRejected(err)) throw err;
+    return await gateway.request<T>("chat.history", {
+      sessionKey: params.sessionKey,
+      limit: params.limit,
+    });
+  }
+}
+
 async function loadHistory(options?: { skipCache?: boolean }): Promise<void> {
   loading.value = true;
   // 先同步已删集合（本地、便宜），后面缓存命中也要用。
   loadDeletedMessageIds();
   const deleted = deletedMessageIds.value;
   const cacheKey = qualifySessionKey(sessionKey.value, paneAgentId.value) ?? resolvedSessionKey();
-  // 缓存命中：直接秒回，不联网（对齐旧版 session-message-cache）。
-  // ⚠️ skipCache 时先清缓存，确保一定走服务端请求 —— 用户点刷新按钮就是为了拿最新数据，
-  // 缓存里的消息缺少服务端附件（historyMedia / contentAttachments），刷新才有机会补回。
+  const requestKey = resolvedSessionKey();
+  // ⚠️ 请求版本闸 + 会话快照：`chat.history` 是异步的，期间用户完全可能已经切到别的会话
+  // （预发等慢环境是必然而不是偶然）。没有这道闸时，旧会话的响应会写进新会话的视图，
+  // 紧接着被 `messages` 的深 watch 以**新会话**为键写进缓存 ⇒ 那个会话随后切进去就是
+  // 「没有历史 / 内容是别人的」，且缓存命中分支不再回源，只能等 TTL 过期或点刷新。
+  const seq = ++historyRequestSeq;
+  const isCurrent = () =>
+    seq === historyRequestSeq &&
+    (qualifySessionKey(sessionKey.value, paneAgentId.value) ?? resolvedSessionKey()) === cacheKey;
+  // 缓存命中：先秒回（对齐旧版 session-message-cache），但**不停在这里** —— 继续走一次
+  // 服务端回源（stale-while-revalidate）。否则一条空 / 串会话 / 过期的缓存会把该会话锁死在
+  // 「没有历史」的样子，而唯一的出口是刷新按钮。旧版这里直接 `return`，是「历史不显示」的放大器。
+  // ⚠️ skipCache 时先清缓存，确保用户点刷新时一定拿到服务端最新数据（含服务端附件位）。
   if (options?.skipCache) clearChatMessageCache(cacheKey);
   const cached = getChatMessageCache(cacheKey);
   if (cached) {
-    messages.value = cached.filter((item) => !deleted.has(item.id));
+    messages.value = mergeBackgroundAssistantMessages(
+      cacheKey,
+      cached.filter((item) => !deleted.has(item.id)),
+    );
     // 恢复分页游标：缓存命中也能继续「加载更早」（直接用上次 offset，免联网探测）
     const cursor = getChatHistoryCursor(cacheKey);
     historyHasMore.value = cursor?.hasMore === true;
@@ -2152,18 +2273,12 @@ async function loadHistory(options?: { skipCache?: boolean }): Promise<void> {
     await scrollToBottom(true);
     void fetchMissingSpendResults();
     void loadModelList();
-    loading.value = false;
-    return;
   }
+  // 回源快照：只认「请求发出之后」新增的尾部消息（见 `preserveLocalTailMessages`）。
+  const snapshot = messages.value;
   try {
-    const res = await gateway.request<{
-      messages?: unknown[];
-      sessionId?: string;
-      hasMore?: boolean;
-      nextOffset?: number;
-      totalMessages?: number;
-    }>("chat.history", {
-      sessionKey: resolvedSessionKey(),
+    const res = await requestChatHistory<ChatHistoryResponse>({
+      sessionKey: requestKey,
       limit: 200,
       // ⚠️ 必须**显式**传 offset:0：不传 offset 时网关走 `readChatHistoryPage` 的
       // 「无 offset 分支」，响应里根本没有 hasMore / nextOffset / totalMessages
@@ -2172,14 +2287,12 @@ async function loadHistory(options?: { skipCache?: boolean }): Promise<void> {
       offset: 0,
       maxChars: CHAT_HISTORY_MAX_CHARS,
     });
-    // 记录后端给出的分页游标：还有更早则允许「加载更早」继续翻页
-    historyHasMore.value = res?.hasMore === true;
-    historyNextOffset.value =
-      typeof res?.nextOffset === "number" ? res.nextOffset : undefined;
+    // 迟到的响应（期间切了会话 / 又发起了新请求）：整包丢弃，绝不写进当前视图与缓存。
+    if (!isCurrent()) return;
     // 先同步本次请求所属会话的「已删集合」，再据此过滤 —— 删除后刷新才不会再冒出来。
     loadDeletedMessageIds();
-    const deleted = deletedMessageIds.value;
-    messages.value = (res?.messages ?? [])
+    const deletedNow = deletedMessageIds.value;
+    const serverMessages = (res?.messages ?? [])
       .map((item, index) => normalizeMessage(item, index))
       .filter(
         (item): item is ChatMessage =>
@@ -2194,8 +2307,21 @@ async function loadHistory(options?: { skipCache?: boolean }): Promise<void> {
             Boolean(item.historyMedia?.length) ||
             Boolean(item.contentImages?.length) ||
             Boolean(item.contentAttachments?.length)) &&
-          !deleted.has(item.id),
+          !deletedNow.has(item.id),
       );
+    // 服务端已经落库的那几条从暂存里清掉；还没落库的留着，下次切回来再合并。
+    clearBackgroundAssistantMessages(
+      cacheKey,
+      new Set(serverMessages.map((item) => item.id)),
+    );
+    messages.value = mergeBackgroundAssistantMessages(
+      cacheKey,
+      preserveLocalTailMessages(serverMessages, snapshot),
+    );
+    // 记录后端给出的分页游标：还有更早则允许「加载更早」继续翻页
+    historyHasMore.value = res?.hasMore === true;
+    historyNextOffset.value =
+      typeof res?.nextOffset === "number" ? res.nextOffset : undefined;
     await scrollToBottom();
     // 写入客户端缓存：切回本会话时秒回，避免重复联网（对齐旧版 session-message-cache）。
     // 同时带上分页游标，切回后仍能继续加载更早历史。
@@ -2209,9 +2335,12 @@ async function loadHistory(options?: { skipCache?: boolean }): Promise<void> {
     // 加载完成后从历史补充模型列表
     void loadModelList();
   } catch (err) {
-    ElMessage.error(`加载会话历史失败：${err instanceof Error ? err.message : String(err)}`);
+    // 失败一律不落缓存（保持上一次的好数据），且只在仍是当前会话时才打扰用户。
+    if (isCurrent()) {
+      ElMessage.error(`加载会话历史失败：${err instanceof Error ? err.message : String(err)}`);
+    }
   } finally {
-    loading.value = false;
+    if (isCurrent()) loading.value = false;
   }
 }
 
@@ -2646,6 +2775,43 @@ function isThinkingAgentEvent(
   return payload.stream === "thinking";
 }
 
+/**
+ * 「别的会话」的 chat 帧：视图不动，但这一次 run 必须收干净。
+ *
+ * 场景：会话 A 正在生成 → 用户点侧栏切到 B。此后 A 的所有帧都过不了
+ * `isEventForCurrentSession`。**如果连终止帧一起丢掉**：
+ * ① A 的助手回复谁都没接（内存里没有，消息缓存也停在切换前那一刻）⇒ 切回 A 看不到回复
+ *    （60s 内命中缓存时连回源都不发，这才是「历史消息不显示」的现场）；
+ * ② A 的运行态桶（`utils/chatRunState`）里 `sending` 永远是 true —— 只有
+ *    `finalizeStreaming()` 会清它，而它在别的会话里永远不会被调到 ⇒ 输入框卡在
+ *    「正在生成」、回车只会进待执行队列，整个会话看起来被中断，只有刷新页面能救。
+ *
+ * 对齐旧版 `ui/src/pages/chat/chat-gateway.ts:156-177`：非当前会话的 `final`
+ * 写进该会话的暂存（`noteBackgroundAssistantMessage`，`loadHistory` 时按 id 去重合并），
+ * 并顺手把该会话的运行态归零。
+ *
+ * ⚠️ 这**不会**让服务端 run 继续跑或停下来 —— 服务端压根没收到任何请求
+ * （web 只在点「停止」时发 `chat.abort`）。这里只是「把已经在路上的结果留住」。
+ * ⚠️ `aborted` **刻意不处理**：引导（`sessions.steer`）会先中断当前 run，那个瞬间
+ * 同一会话的另一个窗格正靠 `sending` 撑着「思考中」气泡；在别的窗格里把它归零会让
+ * 那一轮后续的 delta 被 `if (!sending.value) return` 丢掉。被引导的那一轮结束时
+ * 会走 `final`，同样能收干净。
+ */
+function handleBackgroundSessionChatEvent(payload: ChatEventPayload): void {
+  if (payload.state !== "final" && payload.state !== "error") return;
+  const agentId = agents.agentIdForSession(payload.sessionKey);
+  if (payload.state === "final") {
+    // 只暂存 `final`：`aborted` / `error` 的正文可能与已落库的历史重复，
+    // 而它们缺 `responseId` 时稳定 id 会按时间戳派生，去重对不上号就会多一条。
+    const message = normalizeMessage(payload.message, 0);
+    if (message && hasVisibleMessageContent(message)) {
+      const key = qualifySessionKey(payload.sessionKey, agentId) || payload.sessionKey;
+      noteBackgroundAssistantMessage(key, message);
+    }
+  }
+  resetChatRunStateForSession(payload.sessionKey, agentId);
+}
+
 function handleEvent(evt: { event: string; payload?: unknown }): void {
   // 思考流：先于 chat 事件处理，让 `streamingThinking` 在 chat delta 之前就累积好，
   // 避免「先看到正文、再补上思考」造成的拼接感。
@@ -2680,7 +2846,11 @@ function handleEvent(evt: { event: string; payload?: unknown }): void {
   if (!payload) return;
 
   // 会话隔离：切到别的会话后，旧会话的流式帧不应再落进当前视图。
-  if (!isEventForCurrentSession(payload.sessionKey)) return;
+  // 但**终止帧不能直接丢** —— 见 `handleBackgroundSessionChatEvent`。
+  if (!isEventForCurrentSession(payload.sessionKey)) {
+    handleBackgroundSessionChatEvent(payload);
+    return;
+  }
 
   switch (payload.state) {
     case "delta": {
