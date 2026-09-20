@@ -21,9 +21,11 @@ import {
   CloseBold,
   CopyDocument,
   Delete,
+  Download,
   Loading,
   Plus,
   Promotion,
+  View,
 } from "@element-plus/icons-vue";
 import { useGatewayStore } from "@/stores/gateway";
 import { useSettingsStore } from "@/stores/settings";
@@ -40,9 +42,11 @@ import {
   setChatMessageCache,
 } from "@/utils/chatMessageCache";
 import { chatRunStateFor, resetChatRunStateForSession } from "@/utils/chatRunState";
+import { isReplyFinishedAgentEvent } from "@/utils/agentLifecycle";
 import { readModelOverride, writeModelOverride } from "@/utils/modelOverrides";
 import { formatFriendlyError, localizeChatError } from "@/utils/chatErrorCopy";
 import { saveUrlViaBlob, shouldSaveViaBlob } from "@/utils/downloadSave";
+import { exportChatMarkdown } from "@/utils/exportChat";
 import {
   contextPercentClassOf,
   contextPercentOf,
@@ -220,6 +224,8 @@ const emit = defineEmits<{
   /** 开始拖动本窗格（拖到别的窗格边缘 → 拆分，由布局层处理落区）。 */
   (e: "paneDragStart", paneId: string): void;
   (e: "paneDragEnd"): void;
+  /** 请求在右侧详情面板展开某条消息的完整内容（由布局层持有面板）。 */
+  (e: "openDetail", message: ChatMessage): void;
 }>();
 
 const gateway = useGatewayStore();
@@ -500,20 +506,14 @@ function toolGroupOf(msg: ChatMessage): ChatMessage[] {
 }
 
 /**
- * 工具组是否包含错误（对齐旧版 chat-message.ts 的 `--error` 判定）。
- * 当前 `toolResult` 仅带 `text`、无结构化错误字段，故按文本启发式识别；
- * 命中常见错误关键词即判定为出错组，默认展开并标红提示。
+ * 折叠块是否展开：仅用户手动展开过才算展开。
+ *
+ * ⚠️ 之前「含错误的组默认展开」是为了排障，但产品口径改为：工具执行过程
+ * 与思考过程一样**默认折叠、中性展示**，不因含错误就标红 / 默认展开
+ * （错误信息已在工具结果正文里，无需在折叠头再强调）。
  */
-const TOOL_ERROR_HINTS = ["error", "exception", "traceback", "失败", "异常", "拒绝", "denied"];
-function toolGroupHasError(msg: ChatMessage): boolean {
-  return toolGroupOf(msg).some((item) =>
-    TOOL_ERROR_HINTS.some((hint) => (item.text ?? "").toLowerCase().includes(hint.toLowerCase())),
-  );
-}
-
-/** 折叠块是否展开：用户手动展开过，或该组含错误（错误组默认展开，便于排障）。 */
 function isToolGroupExpanded(msg: ChatMessage): boolean {
-  return expandedToolGroups.value.has(toolGroupKey(msg)) || toolGroupHasError(msg);
+  return expandedToolGroups.value.has(toolGroupKey(msg));
 }
 
 function toggleToolGroup(key: string): void {
@@ -999,6 +999,22 @@ const streamingSpend = computed<JdSpendResult | null>({
     runState.value.streamingSpend = next;
   },
 });
+
+/**
+ * 「本轮生成已结束、积分还在算」——流式气泡下方的「积分计算中」只由它驱动。
+ *
+ * 由 agent 事件 `stream=lifecycle, data.phase=end` 置位（见 `utils/agentLifecycle.ts`），
+ * 由任何收尾路径（final / aborted / error / 停止 / 换会话）清零。
+ *
+ * ⚠️ 不要退回「按 `sending && streamingText` 猜」：那样思考与生成过程中就会一直显示
+ * 积分计算中，而积分实际要等生成结束、网关轮询完才有（实测有 ~6.8s 真空）。
+ */
+const spendPending = computed<boolean>({
+  get: () => runState.value.spendPending,
+  set: (next) => {
+    runState.value.spendPending = next;
+  },
+});
 const expandedThinkingIds = ref<Set<string>>(new Set());
 
 /** 可用模型列表（按 provider/model 去重，catalog 优先 + 历史聚合补充）。 */
@@ -1109,9 +1125,6 @@ const composerPlaceholder = computed<string>(() => {
   //（zh-CN.ts:1608 = "给 {name} 发消息"）：名字取**本窗格** agent，不是全局选中的那个。
   return `给 ${assistantName.value} 发消息`;
 });
-const creditsCalculating = computed(
-  () => sending.value && Boolean(streamingText.value) && !streamingSpend.value,
-);
 const isThinking = computed(
   () => sending.value && !streamingText.value && !streamingThinking.value,
 );
@@ -1665,6 +1678,28 @@ async function loadContextWindow(): Promise<void> {
 const sessionRows = ref<SessionsListResult["sessions"]>([]);
 
 /**
+ * 窗格头下拉里一条会话的展示名。
+ *
+ * 入口 token 派生的会话 key（裸 `id-<hash>` / `agent:<id>:id-<hash>`）拿不到
+ * label / displayName，`sessionDisplayNameFor` 只能回落成裸 id —— 下拉里就是
+ * 「id-xxxxxxxx」这样一行无意义的 id。这种 id 形态的展示名改用 **agent 展示
+ * 名**（这类会话是各 agent 的网页入口会话，agent 名才是有效信息）；其余会话
+ * （主会话 / 渠道联系人 / cron…）保持原解析结果不动。
+ */
+function paneSessionOptionLabel(
+  key: string,
+  row?: { label?: string; displayName?: string } | null,
+  agentId = "",
+): string {
+  const name = agents.sessionDisplayNameFor(key, row);
+  if (name && name !== key && !ENTRY_SESSION_ID_RE.test(name)) return name;
+  return agents.nameForAgent(agentId);
+}
+
+/** 入口 token 会话的裸 id 形态：`id-<hash>`（旧下拉里「id-09fb9e55」那一行）。 */
+const ENTRY_SESSION_ID_RE = /^id-[0-9a-z]{6,}$/i;
+
+/**
  * 窗格头下拉的候选：跨 agent 的**全部会话，按 agent 分组**（模板里渲染成 `<optgroup>`）。
  *
  * 产品口径：窗格内换 agent 有**两条**路 ——
@@ -1688,7 +1723,7 @@ const paneSessionGroups = computed<
     seen.add(key);
     const agentId = agents.agentIdForSession(key);
     const options = byAgent.get(agentId) ?? [];
-    options.push({ key, label: agents.sessionDisplayNameFor(key, row) });
+    options.push({ key, label: paneSessionOptionLabel(key, row, agentId) });
     byAgent.set(agentId, options);
   }
 
@@ -1699,7 +1734,10 @@ const paneSessionGroups = computed<
   if (currentKey && !seen.has(currentKey)) {
     const agentId = paneAgentId.value;
     const options = byAgent.get(agentId) ?? [];
-    options.unshift({ key: currentKey, label: agents.sessionDisplayNameFor(currentKey) });
+    options.unshift({
+      key: currentKey,
+      label: paneSessionOptionLabel(currentKey, undefined, paneAgentId.value),
+    });
     byAgent.set(agentId, options);
   }
 
@@ -1727,6 +1765,17 @@ function messageCopyText(msg: ChatMessage): string {
 /** 是否有可复制内容（决定复制按钮是否可点）。 */
 function canCopyMessage(msg: ChatMessage): boolean {
   return messageCopyText(msg).length > 0;
+}
+
+/**
+ * 是否可打开「详情」面板（右侧展开完整消息）。
+ *
+ * 对齐上游 `resolveMessageActionDetails`：只对**助手消息**提供「详情」入口，
+ * 且必须有正文（或思考过程）。用户消息无需在右侧面板展开（内容已在气泡里完整呈现）。
+ */
+function canOpenDetail(msg: ChatMessage): boolean {
+  if (msg.role !== "assistant") return false;
+  return (msg.text ?? "").trim().length > 0 || Boolean(msg.thinking);
 }
 
 /**
@@ -2530,6 +2579,9 @@ async function send(textOverride?: string): Promise<boolean> {
   streamingText.value = "";
   streamingThinking.value = "";
   streamingSpend.value = null;
+  // 新一轮开始：清掉上一轮可能残留的「积分计算中」（正常路径下 final 已经清过，
+  // 但「final 缺失 + 引导排队」这类异常收尾可能没走到）
+  spendPending.value = false;
   steerCount.value = 0;
   steeredMessages.value = [];
   awaitingSteeredRun.value = false;
@@ -2658,6 +2710,28 @@ async function abort(): Promise<void> {
 }
 
 /**
+ * 导出本窗格整段对话为 Markdown 文件。
+ *
+ * 与「复制为 Markdown」按钮的差别：复制只取**单条**消息的正文，导出则是
+ * **整段对话**的结构化 Markdown（会话标题 + 逐条角色 + 时间戳），见
+ * `utils/exportChat.ts`。二者不能互相替代 —— 复制服务于「把某条回复粘走」，
+ * 导出服务于「存档/分享整场对话」。
+ */
+function exportConversation(): void {
+  const ok = exportChatMarkdown(
+    messages.value,
+    assistantName.value,
+    settings.gatewayHttpBase,
+    settings.token,
+  );
+  if (!ok) {
+    ElMessage({ message: "当前没有可导出的消息", type: "warning", grouping: true });
+    return;
+  }
+  ElMessage({ message: "对话已导出为 Markdown", type: "success", grouping: true });
+}
+
+/**
  * 把当前流式的正文 / 思考落地成一条助手消息（**不动 sending**）。
  *
  * 单独抽出来是给「引导打断」用：那条路径要保留气泡（继续显示思考中），
@@ -2725,6 +2799,9 @@ function holdStreamingBubbleForSteer(): void {
   streamingText.value = "";
   streamingThinking.value = "";
   streamingSpend.value = null;
+  // 被打断的旧 run 的积分不会再有 final 帧带回来（积分随 aborted 帧一起丢），
+  // 所以不能把「积分计算中」挂在气泡上等 —— 气泡马上要转回「思考中」接新一轮。
+  spendPending.value = false;
   sending.value = true;
   awaitingSteeredRun.value = true;
   void scrollToBottom();
@@ -2735,6 +2812,7 @@ function finalizeStreaming(skipCommit = false): void {
   streamingText.value = "";
   streamingThinking.value = "";
   streamingSpend.value = null;
+  spendPending.value = false;
   sending.value = false;
   // 路由切换 / 用户手动 abort / chat 事件自然结束 —— 全部清零 steerCount
   steerCount.value = 0;
@@ -2813,6 +2891,21 @@ function handleBackgroundSessionChatEvent(payload: ChatEventPayload): void {
 }
 
 function handleEvent(evt: { event: string; payload?: unknown }): void {
+  // 「本轮生成已结束」：网关广播这个信号时，带 `spendResult` 的 `chat state=final`
+  // 还在等积分轮询（实测 ~6.8s），所以这里是**唯一**能显示「积分计算中」的时刻
+  // ——见 `utils/agentLifecycle.ts` 的时序图。必须在下面的 `evt.event !== "chat"`
+  // 兜底之前处理。
+  if (isReplyFinishedAgentEvent(evt)) {
+    const payload = evt.payload;
+    // 会话隔离：别的会话的收尾信号不能点亮本窗格的加载态。
+    if (!isEventForCurrentSession(payload.sessionKey)) return;
+    // 只在发送中标记。`sending=false` 时说明本轮早已收尾（例如 WS 乱序把 final
+    // 排在 lifecycle 之前），此时气泡已经没了，标记只会变成幽灵加载态。
+    if (!sending.value) return;
+    spendPending.value = true;
+    return;
+  }
+
   // 思考流：先于 chat 事件处理，让 `streamingThinking` 在 chat delta 之前就累积好，
   // 避免「先看到正文、再补上思考」造成的拼接感。
   if (isThinkingAgentEvent(evt)) {
@@ -2978,6 +3071,10 @@ function handleEvent(evt: { event: string; payload?: unknown }): void {
       streamingText.value = "";
       streamingThinking.value = "";
       streamingSpend.value = null;
+      // 积分已经随 final 帧落到消息上了（`pushed.spendResult`）——加载态到此结束，
+      // 数值由消息自己的 `.content-credits` 渲染。final 没带数值时一并结束，
+      // 不做无谓的二次查询（见 `utils/agentLifecycle.ts` 的口径说明）。
+      spendPending.value = false;
       if (steeredMessages.value.length > 0) {
         // 未完成的引导还在排队：保持「进行中 = 思考中」，别让气泡消失
         sending.value = true;
@@ -3009,6 +3106,7 @@ function handleEvent(evt: { event: string; payload?: unknown }): void {
       streamingText.value = "";
       streamingThinking.value = "";
       streamingSpend.value = null;
+      spendPending.value = false;
       sending.value = false;
       const friendly = localizeChatError(payload.errorMessage ?? "");
       ElMessage({
@@ -3078,6 +3176,7 @@ watch(
       streamingText.value = "";
       streamingThinking.value = "";
       streamingSpend.value = null;
+      spendPending.value = false;
       sending.value = false;
       steerCount.value = 0;
     }
@@ -3570,6 +3669,17 @@ function formatBalance(value: number | null | undefined): string {
                 />
                 <span class="msg-actions">
                   <el-button
+                    v-if="canOpenDetail(msg)"
+                    class="msg-action msg-action--detail"
+                    text
+                    size="small"
+                    title="查看详情"
+                    aria-label="查看详情"
+                    @click="emit('openDetail', msg)"
+                  >
+                    <el-icon><View /></el-icon>
+                  </el-button>
+                  <el-button
                     class="msg-action msg-action--delete"
                     text
                     size="small"
@@ -3612,11 +3722,11 @@ function formatBalance(value: number | null | undefined): string {
             </div>
           </div>
 
-          <!-- 工具结果：折叠进「Activity」卡片（移植上游 chat-message.ts
+          <!-- 工具结果：折叠进「思考过程」卡片（移植上游 chat-message.ts
                `renderActivityDisclosure`）。连续多条 toolResult 合并为一个折叠块。
-               含错误的组默认展开并标红（对齐旧版 `--error` + "includes errors"）；
-               每条 toolResult 只带 `text`（无 toolName），上游 `extractToolCards`
-               兜底 name="tool"。 -->
+               默认折叠；不再标红、不再显示 "includes errors"（工具执行过程按
+               正常思考过程中性展示）。每条 toolResult 只带 `text`（无 toolName），
+               上游 `extractToolCards` 兜底 name="tool"。 -->
           <div
             v-else-if="msg.role === 'toolResult' && isToolGroupStart(msg)"
             class="row row-assistant"
@@ -3633,10 +3743,7 @@ function formatBalance(value: number | null | undefined): string {
               />
             </span>
             <div class="content">
-              <div
-                class="chat-activity-group"
-                :class="{ 'chat-activity-group--error': toolGroupHasError(msg) }"
-              >
+              <div class="chat-activity-group">
                 <button
                   class="chat-activity-group__summary"
                   type="button"
@@ -3645,14 +3752,7 @@ function formatBalance(value: number | null | undefined): string {
                 >
                   <span class="chat-activity-group__icon">⚡</span>
                   <span class="chat-activity-group__label"
-                    >Activity: {{ toolGroupOf(msg).length }} tool{{
-                      toolGroupOf(msg).length === 1 ? "" : "s"
-                    }}</span
-                  >
-                  <span
-                    v-if="toolGroupHasError(msg)"
-                    class="chat-activity-group__error-tag"
-                    >includes errors</span
+                    >思考过程 · {{ toolGroupOf(msg).length }} 步</span
                   >
                   <span
                     class="collapse-chevron"
@@ -3795,27 +3895,17 @@ function formatBalance(value: number | null | undefined): string {
                 </a>
               </template>
               <span class="caret caret-inline" />
-              <div v-if="creditsCalculating || streamingSpend" class="content-credits">
-                <span v-if="creditsCalculating" class="credits-loading">
+              <!-- 积分行：**只在「本轮生成已结束、积分还在算」时出现**（`spendPending`）。
+                   思考 / 生成过程中一律不显示积分 —— 积分本来就要等生成结束、
+                   网关轮询完才有（`utils/agentLifecycle.ts` 里有实测时序）。
+                   算完之后数值随 final 帧落到消息上，由消息自己的 `.content-credits`
+                   渲染，所以这里**没有**「已有数值」的分支：一旦有数值，气泡已经被
+                   落库的那条消息取代了。 -->
+              <div v-if="spendPending" class="content-credits">
+                <span class="credits-loading">
                   <el-icon class="is-loading"><Loading /></el-icon>
                   <span>积分计算中</span>
                 </span>
-                <template v-else-if="streamingSpend">
-                  <!-- <span class="credits-item">
-                    <span class="credits-label">消耗积分</span>
-                    <span class="credits-value spend">{{ formatCredits(streamingSpend.spend) }}</span>
-                  </span>
-                  <span class="credits-divider" /> -->
-                  <span class="credits-item">
-                    <span class="credits-label">剩余积分</span>
-                    <span class="credits-value balance">{{ formatBalance(streamingSpend.balance) }}</span>
-                  </span>
-                  <span v-if="effectiveModelParts" class="credits-divider" />
-                  <span v-if="effectiveModelParts" class="credits-item credits-item-model" :title="`${effectiveModelParts.provider}/${effectiveModelParts.model}`">
-                    <!-- <span class="credits-label">生成模型</span> -->
-                    <span class="credits-value model">{{ effectiveModelParts.model }}</span>
-                  </span>
-                </template>
               </div>
             </template>
 
@@ -4076,6 +4166,17 @@ function formatBalance(value: number | null | undefined): string {
                 <ChatIcon name="panelRightOpen" />
               </el-button>
             </el-tooltip>
+            <!-- 导出对话：整段会话存成 Markdown 文件（与单条「复制为 Markdown」区分）。 -->
+            <el-tooltip content="导出对话为 Markdown" placement="top">
+              <el-button
+                text
+                class="chat-export-conversation"
+                aria-label="导出对话为 Markdown"
+                @click="exportConversation"
+              >
+                <el-icon><Download /></el-icon>
+              </el-button>
+            </el-tooltip>
             <span v-if="streaming" class="composer-status">
               <el-icon class="is-loading"><Loading /></el-icon>
               <span>正在生成{{ steerCount > 0 ? ` · 已引导 ${steerCount} 次` : "" }}</span>
@@ -4310,7 +4411,8 @@ function formatBalance(value: number | null | undefined): string {
 
 /* 拆分入口紧贴 composer 左下角的附件入口（`.composer-attach`，26px）：
    尺寸与圆角都对齐它，两个图标才像一组工具按钮而不是两个控件。 */
-.chat-pane :deep(.chat-open-split-view.el-button) {
+.chat-pane :deep(.chat-open-split-view.el-button),
+.chat-pane :deep(.chat-export-conversation.el-button) {
   width: 26px;
   min-width: 26px;
   height: 26px;
@@ -4322,7 +4424,8 @@ function formatBalance(value: number | null | undefined): string {
 }
 
 .chat-pane :deep(.chat-pane__action.el-button:hover),
-.chat-pane :deep(.chat-open-split-view.el-button:hover) {
+.chat-pane :deep(.chat-open-split-view.el-button:hover),
+.chat-pane :deep(.chat-export-conversation.el-button:hover) {
   color: var(--wb-accent-strong);
   background: var(--wb-bg-hover);
 }
@@ -4480,9 +4583,12 @@ html.dark .credits-alert :deep(.el-alert__title) {
 }
 
 .chat-inner {
-  max-width: 760px;
+  /* 760 → 1100：拆分视图单窗格常有 800~1000px 宽，760 上限让正文两侧空出
+     一大截；放宽上限并收窄左右 padding（20 → 16），把横向空间还给内容。
+     ⚠️ .pending-tasks / .composer-box 与本列对齐，宽度要同步改。 */
+  max-width: 1100px;
   margin: 0 auto;
-  padding: 28px 20px 24px;
+  padding: 28px 16px 24px;
 }
 
 /* 空状态欢迎页 */
@@ -5235,28 +5341,12 @@ html.dark .credits-alert :deep(.el-alert__title) {
 /* ============== 工具结果 Activity 折叠卡片 ============== */
 /* 移植上游 ui/src/styles/chat/tool-cards.css 的 .chat-activity-group*，
    把 --text / --muted / --border / --bg-hover / --radius-sm 换成项目 --wb-* 令牌。
-   默认收起；含错误的组标红并默认展开（对齐旧版 --error + "includes errors"）。 */
+   默认收起；中性展示（不再标红、不再默认展开，与思考过程一致）。 */
 
 .chat-activity-group {
   width: 100%;
   min-width: 0;
   max-width: 100%;
-}
-
-/* 工具组含错误：轮廓标红 + 折叠头底色提示，便于排障 */
-.chat-activity-group--error > .chat-activity-group__summary {
-  background: var(--el-color-danger-light-9, #fef0f0);
-  color: var(--el-color-danger, #f56c6c);
-}
-
-.chat-activity-group__error-tag {
-  margin-left: 2px;
-  padding: 0 6px;
-  border: 1px solid var(--el-color-danger-light-5, #fab6b6);
-  border-radius: 10px;
-  font-size: 11px;
-  line-height: 16px;
-  color: var(--el-color-danger, #f56c6c);
 }
 
 .chat-activity-group__summary {
@@ -5365,12 +5455,14 @@ html.dark .credits-alert :deep(.el-alert__title) {
 .chat-composer {
   position: relative;
   flex-shrink: 0;
-  padding: 12px 20px 18px;
+  /* 左右 20 → 16：与 .chat-inner 的新 padding 对齐，输入框和消息列同边缘 */
+  padding: 12px 16px 18px;
   background: var(--wb-bg-content);
 }
 
 .pending-tasks {
-  max-width: 760px;
+  /* 与 .chat-inner 内容列同宽（见其注释），别单改一处 */
+  max-width: 1100px;
   margin: 0 auto 8px;
   border: 1px solid var(--wb-border);
   border-radius: var(--wb-radius);
@@ -5460,7 +5552,8 @@ html.dark .credits-alert :deep(.el-alert__title) {
 }
 
 .composer-box {
-  max-width: 760px;
+  /* 与 .chat-inner 内容列同宽（输入框与消息左右边缘对齐），别单改一处 */
+  max-width: 1100px;
   margin: 0 auto;
   border: 1px solid var(--wb-border-strong);
   border-radius: var(--wb-radius-xl);
@@ -6145,6 +6238,11 @@ html.dark .credits-alert :deep(.el-alert__title) {
   max-width: min(360px, calc(100vw - 24px)) !important;
 }
 .chat-pane__session-select-popper .el-select-group__title {
+  /* 分组 DOM 保留（pane-agent-isolation / pane-wechat-session 按
+     el-select-group__wrap 结构断言），但标题行视觉上隐藏：选项文案已带
+     可读名，再显示组标题就是重行，且组标题本身不可点击 —— 对齐「下拉里
+     只留会话名一行、点击即切」的产品口径。仅 CSS 隐藏，便于日后恢复。 */
+  display: none;
   color: var(--wb-text-secondary);
   font-size: 12px;
 }
@@ -6197,7 +6295,8 @@ html.dark .credits-alert :deep(.el-alert__title) {
     font-size: 14px;
   }
 
-  .chat-pane :deep(.chat-open-split-view.el-button) {
+  .chat-pane :deep(.chat-open-split-view.el-button),
+  .chat-pane :deep(.chat-export-conversation.el-button) {
     width: var(--wb-touch-target, 44px);
     height: var(--wb-touch-target, 44px);
   }

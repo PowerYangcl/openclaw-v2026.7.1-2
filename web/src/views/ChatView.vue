@@ -63,8 +63,12 @@ import { useRoute, useRouter } from "vue-router";
 import ChatSidebar from "@/components/ChatSidebar.vue";
 import ChatPaneTabs from "@/components/ChatPaneTabs.vue";
 import ResizableDivider from "@/components/ResizableDivider.vue";
+import ChatDetailSidebar from "@/components/ChatDetailSidebar.vue";
+import FilePreviewModal, { type PreviewFile } from "@/components/FilePreviewModal.vue";
 import ChatPane from "@/views/ChatPane.vue";
 import { useSettingsStore } from "@/stores/settings";
+import { useAgentsStore } from "@/stores/agents";
+import type { ChatMessage } from "@/types/chat";
 import {
   PANE_DRAG_MIME,
   PANE_DROP_EDGE_PX,
@@ -83,6 +87,7 @@ import {
 } from "@/utils/splitLayout";
 
 const settings = useSettingsStore();
+const agents = useAgentsStore();
 const route = useRoute();
 const router = useRouter();
 
@@ -425,6 +430,79 @@ function handleClosePane(paneId: string): void {
   if (active) setCurrentSession(active.sessionKey, true);
 }
 
+// ---------------------------------------------------------------------------
+// 右侧详情面板 + 文件预览弹窗
+// ---------------------------------------------------------------------------
+
+/**
+ * 当前在详情面板展开的消息（null = 面板关闭）。
+ *
+ * 状态由布局层持有：多个窗格（单窗格 / 拆分 / 窄屏活动窗格）都能触发「详情」，
+ * 但面板在布局层**只有一个** —— 谁点开就显示谁，切会话/关窗格时顺带收起。
+ */
+const detailMessage = ref<ChatMessage | null>(null);
+
+/** 详情面板展示的消息所属 agent 的展示名（点开时按活动窗格的会话推导）。 */
+const detailAgentName = ref<string>("");
+
+/** 文件预览弹窗是否打开。 */
+const filePreviewOpen = ref(false);
+/** 文件预览弹窗的初始选中文件。 */
+const filePreviewActivePath = ref("");
+
+/** 点「详情」按钮：在右侧面板展开该消息的完整内容，并记录其 agent 展示名。 */
+function handleOpenDetail(message: ChatMessage): void {
+  detailMessage.value = message;
+  // 助手消息按当前会话对应的 agent 取展示名；非助手消息面板回落「我 / 助手」。
+  if (message.role === "assistant") {
+    detailAgentName.value = agents.nameForAgent(agents.agentIdForSession(currentSessionKey.value));
+  } else {
+    detailAgentName.value = "";
+  }
+}
+
+/** 关闭详情面板（顺带关掉文件预览弹窗，避免面板关了弹窗还悬着）。 */
+function closeDetail(): void {
+  detailMessage.value = null;
+  filePreviewOpen.value = false;
+}
+
+/**
+ * 详情面板里点「查看会话工作区文件」→ 打开文件预览弹窗。
+ *
+ * ⚠️ 数据源为**初步实现**：当前从详情消息本身可提取的文件引用（正文里的本地文件
+ * 路径、content 附件文档）构造文件列表，让弹窗可真实工作。完整的「会话工作区文件树」
+ * 需接入网关 workspace RPC（`session.workspace.*`），作为后续增量 —— 届时只需替换
+ * `workspaceFiles` 的取值来源，弹窗组件无需改动。
+ */
+function openFilePreview(): void {
+  filePreviewActivePath.value = "";
+  filePreviewOpen.value = true;
+}
+
+/** 文件预览弹窗的文件列表（当前 = 从详情消息提取的文件引用，初步实现）。 */
+const workspaceFiles = computed<PreviewFile[]>(() => {
+  const msg = detailMessage.value;
+  if (!msg) return [];
+  const files: PreviewFile[] = [];
+  const seen = new Set<string>();
+  const push = (path: string): void => {
+    const clean = path.trim();
+    if (!clean || seen.has(clean)) return;
+    seen.add(clean);
+    files.push({ path: clean, size: "", contents: "" });
+  };
+  // 1) content 里的文档附件
+  for (const att of msg.contentAttachments ?? []) {
+    if (att.kind === "document") push(att.label || att.url);
+  }
+  // 2) 正文里出现的本地文件路径（/root/…、~/… 等常见形态）
+  const text = msg.text ?? "";
+  const pathRe = /(?:\/[\w./-]+|~\/[\w./-]+)/g;
+  for (const m of text.matchAll(pathRe)) push(m[0]);
+  return files;
+});
+
 onMounted(() => {
   bindMediaQuery(NARROW_SPLIT_QUERY, narrow);
   bindMediaQuery(MOBILE_QUERY, mobile);
@@ -483,6 +561,7 @@ onBeforeUnmount(() => {
         @session-change="handlePaneSessionChange"
         @open-split="openSplitView"
         @toggle-side="toggleSide"
+        @open-detail="handleOpenDetail"
       />
 
       <!-- 拆分视图 -->
@@ -519,6 +598,7 @@ onBeforeUnmount(() => {
           @session-change="handlePaneSessionChange"
           @close-pane="handleClosePane"
           @toggle-side="toggleSide"
+          @open-detail="handleOpenDetail"
         />
 
         <template v-for="(column, columnIndex) in layout.columns" :key="column.id">
@@ -552,6 +632,7 @@ onBeforeUnmount(() => {
                 @split-down="handleSplitDown"
                 @close-pane="handleClosePane"
                 @toggle-side="toggleSide"
+                @open-detail="handleOpenDetail"
               />
               <!-- 同列内相邻两窗格之间的横向分隔条（旧版 orientation="horizontal"） -->
               <ResizableDivider
@@ -585,6 +666,23 @@ onBeforeUnmount(() => {
         </template>
       </div>
     </div>
+
+    <!-- 右侧详情面板：点消息下的「详情」按钮后，展开该消息的完整内容。 -->
+    <ChatDetailSidebar
+      :message="detailMessage"
+      :agent-name="detailAgentName"
+      @close="closeDetail"
+      @open-file-preview="openFilePreview"
+    />
+
+    <!-- 会话工作区文件预览弹窗（详情面板里「查看会话工作区文件」触发）。 -->
+    <FilePreviewModal
+      v-if="filePreviewOpen"
+      :files="workspaceFiles"
+      :active-path="filePreviewActivePath"
+      @close="filePreviewOpen = false"
+      @select="(path) => (filePreviewActivePath = path)"
+    />
   </div>
 </template>
 

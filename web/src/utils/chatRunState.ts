@@ -39,6 +39,17 @@ export type ChatRunState = {
   streamingThinking: string;
   /** 本轮积分（拿到之前为 `null`）。 */
   streamingSpend: ChatRunSpend | null;
+  /**
+   * 「本轮生成已结束、积分还在算」——为 true 时流式气泡下方显示「积分计算中」。
+   *
+   * 置 true 的信号是 agent 事件 `stream=lifecycle, data.phase=end`（见
+   * `utils/agentLifecycle.ts`）：网关广播它时，积分轮询（最长 6s）才刚刚开始，
+   * 带 `spendResult` 的 `chat state=final` 还没发出来。实测这段真空约 6.8s。
+   *
+   * 放在运行态桶里（而不是 ChatPane 的局部 ref）与其它流式字段同理：
+   * 这段真空期内拆分视图会销毁并重建窗格，放局部 ref 会让加载态凭空消失。
+   */
+  spendPending: boolean;
   /** 本轮被引导次数。 */
   steerCount: number;
 };
@@ -51,6 +62,7 @@ function createBucket(): ChatRunState {
     streamingText: "",
     streamingThinking: "",
     streamingSpend: null,
+    spendPending: false,
     steerCount: 0,
   });
 }
@@ -95,13 +107,14 @@ export function chatRunStateFor(
  *
  * ⚠️ **只清字段，不从 Map 里删桶** —— 拆分视图下多个窗格拿的是同一个对象，
  * 把桶删掉会让「还活着的窗格继续写旧对象、新窗格另起一个」，两边立刻分歧
- * （一个还在流式、一个显示已结束）。空桶自身只有 5 个字段，留着没有代价。
+ * （一个还在流式、一个显示已结束）。空桶自身只有 6 个字段，留着没有代价。
  */
 export function resetChatRunState(state: ChatRunState): void {
   state.sending = false;
   state.streamingText = "";
   state.streamingThinking = "";
   state.streamingSpend = null;
+  state.spendPending = false;
   state.steerCount = 0;
 }
 
