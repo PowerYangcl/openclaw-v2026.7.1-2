@@ -336,6 +336,10 @@ defineExpose({ openPanel: () => { open.value = true; } });
 .model-selector {
   position: relative;
   display: inline-flex;
+  /* 窄窗格（多窗格 / 拆分视图底栏）里允许被压缩：
+     逐级 `min-width: 0` 才能把「窗格变窄」传导到 `.trigger-label` 的省略号上。
+     见 views/ChatPane.vue「窄窗格底栏」一节。 */
+  min-width: 0;
 }
 
 /* 包裹 span：用 el-button 时拿 ref 拿到的是组件实例，
@@ -343,6 +347,7 @@ defineExpose({ openPanel: () => { open.value = true; } });
 .model-trigger-wrap {
   display: inline-flex;
   align-items: center;
+  min-width: 0;
 }
 
 .model-trigger {
@@ -357,7 +362,8 @@ defineExpose({ openPanel: () => { open.value = true; } });
   font-size: 12px;
   cursor: pointer;
   transition: all 0.15s var(--wb-ease);
-  max-width: 220px;
+  /* 上限跟随可用宽度：父级被压窄时（窄窗格底栏）跟着变窄 */
+  max-width: min(220px, 100%);
   user-select: none;
   height: auto;
 }
@@ -368,6 +374,10 @@ defineExpose({ openPanel: () => { open.value = true; } });
   padding: 6px 8px 6px 10px;
   font-size: 12px;
   height: 34px;
+  /* 可压缩（否则 `white-space: nowrap` 的 min-content 会撑住宽度、把兄弟控件顶出去）；
+     压到极限时用 overflow 兜底，别让图标/文字画出胶囊边界。 */
+  min-width: 0;
+  overflow: hidden;
 }
 .model-selector :deep(.model-trigger.el-button > span) {
   display: inline-flex;
@@ -419,7 +429,8 @@ defineExpose({ openPanel: () => { open.value = true; } });
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 140px;
+  /* 常态封顶 140px；被压窄时跟随父级，省略号照常生效（不会硬切） */
+  max-width: min(140px, 100%);
 }
 
 .trigger-provider {
@@ -429,13 +440,14 @@ defineExpose({ openPanel: () => { open.value = true; } });
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  max-width: 140px;
+  max-width: min(140px, 100%);
 }
 
 .trigger-caret {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex-shrink: 0;
   color: var(--wb-text-tertiary);
   transition: transform 0.18s var(--wb-ease);
 }

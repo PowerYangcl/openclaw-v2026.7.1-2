@@ -49,6 +49,16 @@ export const CHAT_HISTORY_PAGE_SIZE = 500;
  */
 export const CHAT_HISTORY_MAX_CHARS = 200_000;
 
+/**
+ * 入参降级时用的**保守页大小**（`requestChatHistory` 第二次尝试才用）。
+ *
+ * 为什么要「降」而不是沿用 `CHAT_HISTORY_PAGE_SIZE`：老网关的 schema 是
+ * `additionalProperties: false` **且**每个字段带 `maximum`。只删新增字段、把 `limit`
+ * 原样重发，会被同一个 `invalid chat.history params` **再拒一次** —— 降级等于没写，
+ * 症状与「历史一条都不显示」完全相同。100 在所有历史版本的 schema 里都合法。
+ */
+export const CHAT_HISTORY_FALLBACK_PAGE_SIZE = 100;
+
 /** `chat.history` 的分页游标（首屏与翻页共用一份）。 */
 export type HistoryCursor = {
   /** 后端是否还有**更早**的消息。 */

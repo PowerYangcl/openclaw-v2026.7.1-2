@@ -47,6 +47,7 @@
     "test:e2e:pane-agent": "node tests/smoke/pane-agent-isolation.e2e.mjs",
     "test:e2e:download": "node tests/smoke/download-insecure-origin.e2e.mjs",
     "test:e2e:chat-error": "node tests/smoke/chat-error-toast.e2e.mjs",
+    "test:e2e:composer": "node tests/smoke/composer-narrow.e2e.mjs",
     "test": "npm run test:unit && npm run test:e2e"
   },
   "dependencies": {

@@ -42,11 +42,16 @@ import {
   readBackgroundAssistantMessages,
   setChatMessageCache,
 } from "@/utils/chatMessageCache";
-import { chatRunStateFor, resetChatRunStateForSession } from "@/utils/chatRunState";
+import {
+  chatRunStateFor,
+  resetChatRunStateForSession,
+  type ChatHistoryError,
+} from "@/utils/chatRunState";
 import { isReplyFinishedAgentEvent } from "@/utils/agentLifecycle";
 import { readModelOverride, writeModelOverride } from "@/utils/modelOverrides";
 import { localizeChatError } from "@/utils/chatErrorCopy";
 import {
+  CHAT_HISTORY_FALLBACK_PAGE_SIZE,
   CHAT_HISTORY_MAX_CHARS,
   CHAT_HISTORY_PAGE_SIZE,
   EMPTY_HISTORY_CURSOR,
@@ -62,6 +67,7 @@ import {
 import {
   createPendingTask,
   deletePendingTasksBucket,
+  discardPendingTasksFromPreviousPage,
   pendingTaskBucketKey,
   planPendingTaskBucketChange,
   readPendingTasks,
@@ -414,6 +420,10 @@ async function loadOlderHistory(): Promise<void> {
   // 游标必须带 nextOffset 才允许翻页：只有 hasMore 没有 nextOffset 时，
   // 请求会退化成「不传 offset」，网关拿这一页糊回来 ⇒ 原地死循环。
   if (!canLoadOlder(cursor, loadingOlderHistory.value)) return;
+  // 收窄给类型系统看（`canLoadOlder` 只是运行时守卫，不是类型谓词）。顺带把不变量写实：
+  // 没有 `nextOffset` 就必须原地停下 —— 退化请求会变成「拿同一页糊回来」的原地死循环。
+  const nextOffset = cursor.nextOffset;
+  if (nextOffset === undefined) return;
   const el = threadRef.value;
   const prevScrollHeight = el?.scrollHeight ?? 0;
   const prevScrollTop = el?.scrollTop ?? 0;
@@ -422,14 +432,17 @@ async function loadOlderHistory(): Promise<void> {
   const requestKey = resolvedSessionKey();
   loadingOlderHistory.value = true;
   try {
-    const res = await gateway.request<{
+    // ⚠️ 走 `requestChatHistory`，**不要**裸调 `gateway.request`：翻页请求同样带
+    // `offset` / `maxChars`，老网关会把整条请求判 `INVALID_REQUEST`。裸调用没有入参降级，
+    // 表现是「加载更早消息」静默失败（下面那个 catch 是空的，连 toast 都没有）。
+    const res = await requestChatHistory<{
       messages?: unknown[];
       hasMore?: boolean;
       nextOffset?: number;
-    }>("chat.history", {
+    }>({
       sessionKey: requestKey,
       limit: CHAT_HISTORY_PAGE_SIZE,
-      offset: cursor.nextOffset,
+      offset: nextOffset,
       maxChars: CHAT_HISTORY_MAX_CHARS,
     });
     if (resolvedSessionKey() !== requestKey) return;
@@ -591,6 +604,22 @@ const sending = computed<boolean>({
   get: () => runState.value.sending,
   set: (next) => {
     runState.value.sending = next;
+  },
+});
+/**
+ * 本会话最近一次历史加载失败的**错误态**（写读代理，同上面几个）。
+ *
+ * 语义：`null` = 历史正常；有值 = 这趟 `chat.history` 失败了，模板渲染成错误态 + 重试按钮。
+ * 存在的理由见 `utils/chatRunState.ts` 的 `ChatHistoryError`：
+ * 失败若只留一条 3s toast，页面会退化成「空会话」，与「本来就没有消息」无法区分。
+ *
+ * ⚠️ 只有**当前会话**的错误该出现在当前窗格 —— 桶本身就是按会话分的，这点由
+ * `runState` 的取值保证（见 `chatRunStateFor`）。
+ */
+const historyError = computed<ChatHistoryError | null>({
+  get: () => runState.value.historyError,
+  set: (next) => {
+    runState.value.historyError = next;
   },
 });
 // ---------------------------------------------------------------------------
@@ -1001,9 +1030,6 @@ let resumeAttempt = 0;
 /** 最近一次续跑失败的网关原文（重试耗尽时作为失败原因落盘，见 scheduleResumeRetry）。 */
 let lastResumeFailure = "";
 
-/** 刷新后恢复出来的队列已经提示过一次就不再提示（避免每次重连都弹）。 */
-let pendingTasksRestoreNotified = false;
-
 function cancelPendingResumeRetry(): void {
   if (resumeRetryTimer === null) return;
   window.clearTimeout(resumeRetryTimer);
@@ -1019,17 +1045,27 @@ function persistPendingTasks(): void {
  * 桶 key 变化 → 重读该会话的队列。
  *
  * 三种情况（判定在 `planPendingTaskBucketChange`，有单测）：
- * - **首次挂载**：直接读盘，桶缺失即空队列；
+ * - **首次求值**：先作废上一个页面周期落盘的队列（整页刷新 ⇒ 队列不执行、不展示），
+ *   再读盘，桶缺失即空队列；
  * - **换会话**：同样直接读盘，且**桶缺失必须清空视图** —— 上一版「桶缺失就什么都不做」
  *   会让上一个会话的待执行任务留在新会话界面上（串味），而它们其实属于别的会话；
  * - **同一会话、桶 key 只是被细化**（冷启动窗口结束）：把内存里的队列搬到新桶再读回，
  *   否则用户会看到「任务本来在界面上，刷新一下反而没了」。
  *
- * 顺带触发「刷新后接着跑」：读盘拿到非空队列就要续跑，见 `resumePendingTasksAfterReload`。
+ * ⚠️ 口径 2026-09-21 二轮：**刷新后队列既不执行也不展示**，所以本 watch 不再承担
+ * 「F5 之后把队列捞回来并接着跑」（那是上一版的行为，用户明确否掉了）。
+ * 它现在的职责只剩「同页生命周期内跨窗格 / 跨会话复原队列」—— 拆分视图重建窗格、
+ * 侧栏换会话都在这条线上。
+ *
+ * 顺带触发「接着跑」：读盘拿到非空队列交给 `resumePendingTasksAfterReload`
+ * （刷新那条路已经读不到任何任务了，见 `discardPendingTasksFromPreviousPage`）。
  */
 watch(
   pendingTaskBucket,
   (nextBucket) => {
+    // ⚠️ 必须在读盘**之前**：清完再读，plan 的 nextBucketCount 才会是 0，
+    // 否则冷启动窗口的 key 细化会把旧任务从另一个桶里「读回来」。
+    discardPendingTasksFromPreviousPage();
     const sameSession = sessionKey.value === lastPendingTasksSession;
     const previousBucket = lastPendingTasksBucket;
     const plan = planPendingTaskBucketChange({
@@ -1046,13 +1082,6 @@ watch(
     pendingTasks.value = readPendingTasks(nextBucket);
     lastPendingTasksSession = sessionKey.value;
     lastPendingTasksBucket = nextBucket;
-    if (pendingTasks.value.length > 0 && !pendingTasksRestoreNotified) {
-      pendingTasksRestoreNotified = true;
-      // 这个 watch 带 immediate，首次求值发生在 setup 期 —— 那时弹 toast 太早，
-      // 推到下一次 tick（挂载之后）再提示。
-      const restored = pendingTasks.value.length;
-      void nextTick(() => notifyPendingTasksRestored(restored));
-    }
     void resumePendingTasksAfterReload();
   },
   { immediate: true },
@@ -2432,9 +2461,12 @@ async function requestChatHistory<T>(params: {
     return await gateway.request<T>("chat.history", params);
   } catch (err) {
     if (!isChatHistoryParamsRejected(err)) throw err;
+    // ⚠️ 重试必须**同时把 `limit` 收窄**，不能只删新增字段：老网关的 schema 每个字段都带
+    // `maximum`，本端产物又一贯比网关新（500/1000 是新值），原样重发会被同一个
+    // `invalid chat.history params` **再拒一次** ⇒ 降级等于没写，症状仍是「历史一条都不显示」。
     return await gateway.request<T>("chat.history", {
       sessionKey: params.sessionKey,
-      limit: params.limit,
+      limit: CHAT_HISTORY_FALLBACK_PAGE_SIZE,
     });
   }
 }
@@ -2486,6 +2518,8 @@ async function loadHistory(options?: { skipCache?: boolean }): Promise<void> {
     });
     // 迟到的响应（期间切了会话 / 又发起了新请求）：整包丢弃，绝不写进当前视图与缓存。
     if (!isCurrent()) return;
+    // 服务端**给了数据** = 这一趟加载成功：收掉上一趟失败留下的错误态。
+    historyError.value = null;
     // 先同步本次请求所属会话的「已删集合」，再据此过滤 —— 删除后刷新才不会再冒出来。
     loadDeletedMessageIds();
     const deletedNow = deletedMessageIds.value;
@@ -2530,9 +2564,22 @@ async function loadHistory(options?: { skipCache?: boolean }): Promise<void> {
     // 加载完成后从历史补充模型列表
     void loadModelList();
   } catch (err) {
-    // 失败一律不落缓存（保持上一次的好数据），且只在仍是当前会话时才打扰用户。
+    // 失败一律不落缓存（保持上一次的好数据）。
+    //
+    // ⚠️ 失败**必须留下能长期看见的痕迹**（2026-09-21 踩坑）：原来这里只弹一条 3s 的 toast，
+    // 弹完页面就落成「有什么可以帮你？」的**空会话** —— 与「这个会话本来就没有消息」在 UI 上
+    // 完全同形。用户看到的是「刷新之后我所有历史都没了」，真相只是「这一趟请求失败了」，
+    // 不开控制台无从区分。所以改成写进会话级的 `historyError`，由模板渲染成带「重试」的错误态
+    //（与生成失败的内联落点同一条口径：**不弹窗，但要留痕**）。
     if (isCurrent()) {
-      ElMessage.error(`加载会话历史失败：${err instanceof Error ? err.message : String(err)}`);
+      const raw = err instanceof Error ? err.message : String(err);
+      historyError.value = { title: "加载会话历史失败", detail: raw };
+      // toast 只在「屏幕上已经有消息」时才值得弹：那种情况下错误态**不占位**（不遮挡已有内容），
+      // 用户不会主动去找，需要一次即时提示。一条消息都没有时不弹 —— 错误态本身就是全屏可见的。
+      if (messages.value.length > 0) ElMessage.error(`加载会话历史失败：${raw}`);
+      // 控制台留原文：toast 会消失、错误态会被下一次成功覆盖，`console` 不会。
+      // 排查时按 `[chat-pane]` 过滤（与生成失败的静默路径同一个前缀）。
+      console.error("[chat-pane] 加载会话历史失败", { sessionKey: requestKey, raw, err });
     }
   } finally {
     if (isCurrent()) loading.value = false;
@@ -3436,23 +3483,39 @@ function handleEvent(evt: { event: string; payload?: unknown }): void {
       streamingSpend.value = null;
       spendPending.value = false;
       sending.value = false;
-      // ⚠️ 生成失败**刻意不提示用户**（2026-09-21 口径）：本轮失败不再弹 `ElMessage`。
+      // ⚠️ 生成失败**不弹窗**（2026-09-21 口径）：本轮失败不必弹 `ElMessage`。
       // 依据：能走到这里的文案绝大多数对用户不可行动（会话接管 / 供应商抖动 /
       // 上游未分类的 `Agent run failed` …），弹出来只会让用户以为「自己操作错了」
-      // 或「产品坏了」—— 静默比误导更符合预期。
+      // 或「产品坏了」—— 弹窗比不提示更容易误导。
       //
-      // 静默的边界只到「弹窗」为止，另外两件事一件都不能省：
-      //   ① 上面几行的状态复位 —— 少了 `sending=false` / 清流式，气泡会永远停在
-      //      「思考中」，用户只能刷新页面（那比弹窗更糟）；
-      //   ② 失败必须留痕 —— 转控制台诊断（`localizeChatError` 照跑，日志里是分类后的
-      //      中文标题 + 原文），排查时按 `[chat-pane]` 过滤。
+      // ⚠️⚠️ 但「不弹窗」**不等于「什么都不显示」**（这条是踩过坑补的）：
+      // 流式气泡整体挂在 `v-if="sending"` 上，上面那行 `sending.value = false` 会把
+      // 思考中三 dot + 流式正文**整块打掉**。于是删掉弹窗之后，失败现场变成
+      // 「消息下面一片空白」—— 用户既不知道失败了，也分不清是网关挂了还是自己没点到，
+      // 排查时只能靠控制台（普通用户根本不会开）。这比弹窗更糟。
       //
-      // 需要恢复弹窗时：把下面这段换回
+      // 落点（2026-09-21 二轮口径）：**一条普通助手消息** —— 与真实回复同款式
+      // （同 row / 头像 / content 结构 + MarkdownView），刻意不再用 `.chat-failure-notice`
+      // 那张专用卡片（「会话中不展示 chat-failure-notice」是明确要求）。
+      // ⚠️ 它只活在内存里：网关侧根本没有这一轮消息，刷新后 `chat.history` 不会带回来，
+      // 所以控制台留痕（③）不能省。三件事一件都不能少：
+      //   ① 状态复位 —— 少了 `sending=false` / 清流式，气泡会永远停在「思考中」；
+      //   ② 助手消息落点 —— 失败必须有处可寻；
+      //   ③ 控制台留痕 —— 分类后的中文标题 + 网关原文，排查按 `[chat-pane]` 过滤。
+      //
+      // 需要恢复弹窗时：把下面这段换成
       //   `ElMessage({ message: formatFriendlyError(friendly), type: "error",
       //     duration: friendly.retryable ? 4500 : 6500, grouping: true })`
       // 并把 `formatFriendlyError` 加回本文件顶部 import（`noUnusedLocals` 会拦住漏改）。
       const friendly = localizeChatError(payload.errorMessage ?? "");
-      console.warn("[chat-pane] 生成失败（按策略静默，不提示用户）", {
+      messages.value.push({
+        id: `assistant-error-${Date.now()}`,
+        role: "assistant",
+        text: friendly.detail ? `${friendly.title}\n\n${friendly.detail}` : friendly.title,
+        ts: Date.now(),
+      });
+      void scrollToBottom();
+      console.warn("[chat-pane] 生成失败（不弹窗，落成一条助手消息）", {
         sessionKey: payload.sessionKey,
         runId: payload.runId,
         title: friendly.title,
@@ -3566,26 +3629,21 @@ function scheduleNextPendingTask(): void {
   void consumeNextPendingTask();
 }
 
-/** 恢复队列的一次性提示（挂载后弹，避免用户以为「任务自己开始跑了」）。 */
-function notifyPendingTasksRestored(count: number): void {
-  ElMessage({
-    message: `已恢复 ${count} 条待执行任务，正在继续执行`,
-    type: "info",
-    duration: 3000,
-    grouping: true,
-  });
-}
-
 /**
- * 刷新后「接着跑」恢复出来的队列。
+ * 把「已经恢复进内存的队列」接着排空（**不提示**，见下）。
  *
- * ## 为什么必须有这条路径（而不是复用 `scheduleNextPendingTask`）
- * `scheduleNextPendingTask` 的唯一触发点是「本会话某一轮 run 结束」（final / end 事件）。
- * 整页刷新时那一轮**往往早就在网关侧结束了**（服务端不因刷新中断 run），
- * 于是恢复出来的队列再也没有任何触发点 —— 表现就是「列表回来了，任务永远不执行」。
+ * ## 覆盖范围（口径 2026-09-21 二轮）
+ * 整页刷新**不再**恢复队列：落盘内容在页面加载后的第一次读盘前就作废了
+ * （`discardPendingTasksFromPreviousPage`，见 `utils/pendingTaskQueue.ts`），
+ * 刷新后既不执行、也不展示、也不提示 —— 所以本函数**不**服务于「F5 之后接着跑」。
+ * 它覆盖的是**同一个页面周期内**的两种情形：
+ *   - 拆分视图里重建 / 重开某个窗格，桶按会话重新 hydrate 出该会话的队列；
+ *   - 网关连接刚建立或断线重连（`gateway.connected`）而队列还挂着。
+ * 这两种情形下 `scheduleNextPendingTask`（唯一触发点是「本会话某一轮 run 结束」）
+ * 都不会被触发，队列会永远停在那里 —— 所以需要这条路径。
  *
- * ## 为什么要退避重试（而不是失败即标红）
- * 刷新不打断服务端正在跑的 run，所以恢复后立刻 `chat.send` 有相当概率撞上
+ * ## 为什么静默 + 退避重试（而不是失败即标红）
+ * hydrate 出来的那一刻，服务端可能正有一轮在跑，立刻 `chat.send` 有相当概率撞上
  * 「当前会话正在处理中 / 会话接管」（`EmbeddedAttemptSessionTakeoverError`）这类
  * **瞬时**失败；它们在花 token 之前就被拒了。此刻用户并没有做任何操作，
  * 直接标红 + 弹 toast 只会让人以为「自己点错了」。所以：静默退避重试若干次，
@@ -3879,7 +3937,26 @@ function formatBalance(value: number | null | undefined): string {
         </div>
         <div v-else-if="historyOlderLoaded" class="thread-history-end">已加载全部历史消息</div>
 
-        <div v-if="!messages.length && !streamingText && !streamingThinking" class="chat-empty">
+        <!-- 历史加载失败的**错误态**：绝不能退化成「空会话」。
+             见 `loadHistory` 的 catch 口径 —— 失败原来只留 3s toast，之后页面就是
+             「有什么可以帮你？」，与「这个会话本来就没有消息」完全同形，
+             用户看到的是「刷新之后历史都没了」。这里给一个能长期看见、且能自己重试的落点。 -->
+        <div v-if="!messages.length && historyError" class="chat-empty chat-empty-error">
+          <div class="empty-title">{{ historyError.title }}</div>
+          <div v-if="historyError.detail" class="empty-error-detail">{{ historyError.detail }}</div>
+          <el-button
+            class="empty-error-retry"
+            type="primary"
+            plain
+            round
+            :loading="loading"
+            @click="loadHistory({ skipCache: true })"
+          >
+            重试
+          </el-button>
+        </div>
+
+        <div v-else-if="!messages.length && !streamingText && !streamingThinking" class="chat-empty">
           <span class="empty-mark">
             <ChatAvatar
               role="assistant"
@@ -5151,6 +5228,29 @@ html.dark .credits-alert :deep(.el-alert__title) {
   padding: 80px 20px;
 }
 
+/* 历史加载失败的错误态（见 `loadHistory` 的 catch 口径）。
+   刻意**不**复用 `.empty-suggestions`：这时候摆「示例问题」会诱导用户继续发消息，
+   而真正该做的是先把历史拉回来。只留标题 + 网关原文 + 重试。 */
+.chat-empty-error {
+  padding: 72px 20px;
+}
+
+.empty-error-detail {
+  max-width: 560px;
+  margin-bottom: 20px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--wb-text-tertiary);
+  word-break: break-word;
+  /* 网关原文可能很长（schema 校验错误会把整条路径列出来），限高免得把重试按钮顶出视口 */
+  max-height: 120px;
+  overflow: auto;
+}
+
+.empty-error-retry {
+  min-width: 96px;
+}
+
 /* 空状态头像：直接复用消息头像组件（agent 图片头像 / emoji / 首字母） */
 .empty-mark {
   display: inline-flex;
@@ -6006,6 +6106,11 @@ html.dark .credits-alert :deep(.el-alert__title) {
 .chat-composer {
   position: relative;
   flex-shrink: 0;
+  /* 底栏自适应要以**窗格宽度**为参照，不是视口宽度：拆分视图下窗格可以窄到 320px
+     而视口仍是 1920，媒体查询完全看不见。文件末尾「窄窗格底栏」一节的 @container
+     就挂在这个容器上。
+     ⚠️ 只容器化 inline-size —— 高度仍由内容决定（底栏必须随输入框长高）。 */
+  container-type: inline-size;
   /* 左右 20 → 16：与 .chat-inner 的新 padding 对齐，输入框和消息列同边缘 */
   padding: 12px 16px 18px;
   background: var(--wb-bg-content);
@@ -6151,18 +6256,25 @@ html.dark .credits-alert :deep(.el-alert__title) {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  /* 一行放不下时**换行**（右段整体挪到第二行），而不是让它向右溢出把「发送」顶出窗格。
+     行内的收缩优先级见 .composer-bar-left / --right。row-gap 只在换行后生效，
+     列间距仍是 12px（单行观感不变）。 */
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  min-width: 0;
   padding: 6px 10px 10px;
 }
 
 /* 左下角工具按钮组：`+`（附件）与拆分入口紧邻，所以 gap 收窄成 icon 组间距（2px）；
-   后面的文案靠自身 `padding-left` 拉开与按钮组的距离。 */
+   后面的文案靠自身 `padding-left` 拉开与按钮组的距离。
+   `flex-basis: auto`（内容宽）而不是 0：换行判定按内容算，
+   否则左段恒为「零宽」，右段会先占满一行、把左段压到 0（`+` / 导出一起消失）。 */
 .composer-bar-left {
   display: inline-flex;
   align-items: center;
   gap: 2px;
   min-width: 0;
-  flex: 1;
+  flex: 1 1 auto;
   overflow: hidden;
 }
 
@@ -6170,7 +6282,15 @@ html.dark .credits-alert :deep(.el-alert__title) {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  flex-shrink: 0;
+  /* ⚠️ 这里原本是 `flex-shrink: 0`：右段固有宽度（环 42 + 模型触发器最长 220 + 发送 71 +
+     两处 8px 间距 ≈ 310px）在窄窗格里大于可用宽度时整段向右溢出，
+     「发送」被窗格右边缘切掉（2026-09-21 用户反馈的「多窗格按钮错位」）。
+     改成可收缩 + `min-width: 0`，先让内部唯一有弹性的「模型选择器」截断模型名；
+     主操作（发送）与上下文环各自 `flex-shrink: 0`，永远完整可见。 */
+  flex: 0 1 auto;
+  min-width: 0;
+  /* 换行后（第二行只有这一段）仍然贴右；单行时与 space-between 等价 */
+  margin-left: auto;
 }
 
 .composer-hint {
@@ -6212,6 +6332,8 @@ html.dark .credits-alert :deep(.el-alert__title) {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  /* 主操作永不被压缩：窄窗格里宁可截断模型名，也不让「发送」变形/被切 */
+  flex: 0 0 auto;
   border: none;
   border-radius: 999px;
   font-size: 13px;
@@ -6816,6 +6938,30 @@ html.dark .credits-alert :deep(.el-alert__title) {
 }
 .chat-pane__session-select-popper .el-select-dropdown__item {
   font-size: 12px;
+}
+
+/* ===========================================================================
+   窄窗格底栏（多窗格 / 拆分视图）
+   ===========================================================================
+
+   参照物是**窗格**而不是视口：`@container` 挂在 `.chat-composer`
+   （见其 `container-type: inline-size`）上，阈值量的是它的**内容盒**宽度
+   （≈ 窗格宽 − 32px 的左右内边距）。
+
+   320px 窗格时底栏内容区只剩 266px，而「提示文案 + 上下文环 + 模型名 + 发送」
+   固有宽度合计 ≈ 500px。分级策略：
+     ① 纯键盘提示文案先退场（零功能）；
+     ② 仍放不下 → `flex-wrap` 把右段（环 / 模型 / 发送）整体换到第二行；
+     ③ 还窄 → 模型名截断出省略号（`ModelSelector` 内部逐级 `min-width: 0`）。
+   功能性控件（+ / 导出 / 环 / 模型 / 发送）**一律不隐藏**，只做收缩与换行。
+   =========================================================================== */
+
+/** ①「Enter 发送 · Shift+Enter 换行」在窄窗格里只会挤压工具栏（历史上它被
+ *  `overflow: hidden` 硬切一半，观感同样像错位），到这一档直接退场。 */
+@container (max-width: 640px) {
+  .composer-hint {
+    display: none;
+  }
 }
 
 /* ===========================================================================

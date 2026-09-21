@@ -30,6 +30,23 @@ export type ChatRunSpend = {
   balance: number;
 };
 
+/**
+ * 「这一趟历史没拉下来」的落点。
+ *
+ * 为什么必须存在：`loadHistory` 失败时原来只弹一条 3s 的 `ElMessage`，弹完页面就落成
+ * 「有什么可以帮你？」的**空会话**模样 —— 与「这个会话本来就没有消息」在 UI 上**完全同形**。
+ * 用户看到的是「刷新之后历史都没了」，而真相是「这一次请求失败了」；不开控制台无从区分。
+ *
+ * 放进运行态桶而非组件局部 ref：与其它流式字段同理 —— 拆分视图会销毁重建窗格，
+ * 放局部 ref 会让刚出现的错误态凭空消失。
+ */
+export type ChatHistoryError = {
+  /** 标题（由模板渲染；固定为「加载会话历史失败」）。 */
+  title: string;
+  /** 网关/传输层原文，便于定位（例：`invalid chat.history params: at /limit: ...`）。 */
+  detail: string;
+};
+
 export type ChatRunState = {
   /** 是否有 run 在进行（`sending`）。 */
   sending: boolean;
@@ -52,6 +69,15 @@ export type ChatRunState = {
   spendPending: boolean;
   /** 本轮被引导次数。 */
   steerCount: number;
+  /**
+   * 本会话最近一次历史加载失败（成功拉到数据 / 点重试成功时清空）。
+   *
+   * ⚠️ **刻意不放进 `resetChatRunState`**：那个函数的语义是「一轮生成结束后释放长文本」，
+   * 而历史加载失败与生成轮次无关。若在那里清，用户「发一条消息 / 打断一次生成」就会把
+   * 刚看到的错误态抹掉 —— 又回到「故障现场凭空消失」的老毛病。
+   * 它的生命周期只有两条：拉到数据清、失败写。
+   */
+  historyError: ChatHistoryError | null;
 };
 
 const buckets = new Map<string, ChatRunState>();
@@ -64,6 +90,7 @@ function createBucket(): ChatRunState {
     streamingSpend: null,
     spendPending: false,
     steerCount: 0,
+    historyError: null,
   });
 }
 
