@@ -25,6 +25,7 @@ import {
   Loading,
   Plus,
   Promotion,
+  RefreshRight,
   View,
 } from "@element-plus/icons-vue";
 import { useGatewayStore } from "@/stores/gateway";
@@ -44,9 +45,42 @@ import {
 import { chatRunStateFor, resetChatRunStateForSession } from "@/utils/chatRunState";
 import { isReplyFinishedAgentEvent } from "@/utils/agentLifecycle";
 import { readModelOverride, writeModelOverride } from "@/utils/modelOverrides";
-import { formatFriendlyError, localizeChatError } from "@/utils/chatErrorCopy";
+import { localizeChatError } from "@/utils/chatErrorCopy";
+import {
+  CHAT_HISTORY_MAX_CHARS,
+  CHAT_HISTORY_PAGE_SIZE,
+  EMPTY_HISTORY_CURSOR,
+  anchoredScrollTop,
+  canLoadOlder,
+  isNearBottom,
+  normalizeHistoryCursor,
+  pickUnseenById,
+  readHistoryCursor,
+  shouldAutoLoadOlder,
+  type HistoryCursor,
+} from "@/utils/chatHistoryPager";
+import {
+  createPendingTask,
+  deletePendingTasksBucket,
+  pendingTaskBucketKey,
+  planPendingTaskBucketChange,
+  readPendingTasks,
+  writePendingTasks,
+  type PendingTask,
+} from "@/utils/pendingTaskQueue";
 import { saveUrlViaBlob, shouldSaveViaBlob } from "@/utils/downloadSave";
 import { exportChatMarkdown } from "@/utils/exportChat";
+import {
+  FULL_EXPORT_MAX_CHARS,
+  FULL_EXPORT_MAX_PAGES,
+  describeFullExportProgress,
+  describeFullExportStop,
+  fullExportFilename,
+  mergeFullExportMessages,
+  planFullExportStep,
+  type FullExportCursor,
+  type FullExportStopReason,
+} from "@/utils/fullChatExport";
 import {
   contextPercentClassOf,
   contextPercentOf,
@@ -326,42 +360,60 @@ const messages = ref<ChatMessage[]>([]);
 /**
  * 会话历史分页（完整历史可回溯）。
  *
- * `historyHasMore`      后端是否还有更早消息（`chat.history` 响应的 hasMore）。
- * `historyNextOffset`   下一次「加载更早」要传的 offset（服务端游标）。
- * `loadingOlderHistory` 是否正在加载更早（防滚动抖动重复请求）。
+ * 状态就三个，语义 / 触发条件 / 判定规则全部收敛在 `utils/chatHistoryPager.ts`
+ * （纯函数 + 单测，别再把它们散落回本文件）：
+ * - `historyCursor`：`{ hasMore, nextOffset }` 服务端游标，首屏与翻页共用；
+ * - `loadingOlderHistory`：翻页互斥闸（防滚动抖动重复请求）；
+ * - `historyOlderLoaded`：本次会话是否已经翻过页（只影响「已加载全部」提示）。
+ *
+ * 请求参数（分页相关）：`{ offset: 首屏显式 0 / 翻页用上次响应的 nextOffset,
+ * limit: CHAT_HISTORY_PAGE_SIZE, maxChars: CHAT_HISTORY_MAX_CHARS }`
+ * —— 三者都在 `utils/chatHistoryPager.ts` 定义，见其文件头的方向口径说明。
  *
  * @author yangchenglin11@jd.com
  * @date 2026年9月16日 17:44:00
  * @version feature_web
  */
-const historyHasMore = ref(false);
-const historyNextOffset = ref<number | undefined>(undefined);
+const historyCursor = ref<HistoryCursor>({ ...EMPTY_HISTORY_CURSOR });
 const loadingOlderHistory = ref(false);
-/**
- * 单条消息正文的字符上限。
- *
- * 网关默认只给 8000 字符（`DEFAULT_CHAT_HISTORY_TEXT_MAX_CHARS`），超了就在尾部追加
- * `...(truncated)...` —— 长回复在历史里会被静默切掉。协议
- * `ChatHistoryParamsSchema.maxChars` 允许到 50 万，这里由请求端显式放大。
- */
-const CHAT_HISTORY_MAX_CHARS = 200_000;
+/** 已经翻过至少一页更早历史（用于到底后给一条「已加载全部」的收尾提示）。 */
+const historyOlderLoaded = ref(false);
+const historyHasMore = computed(() => historyCursor.value.hasMore);
+
+/** 写入服务端游标（首屏响应 / 翻页响应 / 缓存回填三条路径共用）。 */
+function applyHistoryCursor(next: HistoryCursor): void {
+  historyCursor.value = next;
+}
+
+/** 复位游标（换会话时用：上一个会话的翻页进度绝不能带到新会话）。 */
+function resetHistoryCursor(): void {
+  historyCursor.value = { ...EMPTY_HISTORY_CURSOR };
+  historyOlderLoaded.value = false;
+}
 
 /**
  * 加载更早历史（会话分页「向上翻」）。
  *
- * 依赖后端 `chat.history` 的 offset 游标：每次请求 offset=historyNextOffset，
+ * 依赖后端 `chat.history` 的 offset 游标：每次请求 `offset = historyCursor.nextOffset`，
  * 返回更早一页消息 → 按稳定 id 去重后前置插到 messages 顶部，并保持滚动位置
  * 不跳动（插入后下一帧把 scrollTop 补回新增高度）。
  *
- * 触发：滚动到对话顶部附近自动调用（见 onThreadScroll）+ 顶部「加载更早」按钮。
+ * 触发（两个都保留，互为兜底）：
+ * - 顶部哨兵进视口（`IntersectionObserver`，见 `observeHistoryTopSentinel`）；
+ * - 滚动回调里的像素阈值判定（`shouldAutoLoadOlder`，IO 不可用时仍能工作）；
+ * - 顶部「加载更早消息」按钮（手动）。
+ *
+ * 状态与判定规则都在 `utils/chatHistoryPager.ts`，本函数只负责「请求 + 落地」。
  *
  * @author yangchenglin11@jd.com
  * @date 2026年9月16日 17:44:00
  * @version feature_web
  */
 async function loadOlderHistory(): Promise<void> {
-  if (loadingOlderHistory.value) return;
-  if (!historyHasMore.value || historyNextOffset.value === undefined) return;
+  const cursor = historyCursor.value;
+  // 游标必须带 nextOffset 才允许翻页：只有 hasMore 没有 nextOffset 时，
+  // 请求会退化成「不传 offset」，网关拿这一页糊回来 ⇒ 原地死循环。
+  if (!canLoadOlder(cursor, loadingOlderHistory.value)) return;
   const el = threadRef.value;
   const prevScrollHeight = el?.scrollHeight ?? 0;
   const prevScrollTop = el?.scrollTop ?? 0;
@@ -376,25 +428,22 @@ async function loadOlderHistory(): Promise<void> {
       nextOffset?: number;
     }>("chat.history", {
       sessionKey: requestKey,
-      limit: 200,
-      offset: historyNextOffset.value,
+      limit: CHAT_HISTORY_PAGE_SIZE,
+      offset: cursor.nextOffset,
       maxChars: CHAT_HISTORY_MAX_CHARS,
     });
     if (resolvedSessionKey() !== requestKey) return;
     const older = (res?.messages ?? [])
       .map((item, index) => normalizeMessage(item, index))
       .filter((item): item is ChatMessage => item !== null);
-    if (older.length > 0) {
-      // 按稳定 id 去重：offset 返回的边界条可能与已加载部分重叠，不能重复渲染
-      const known = new Set(messages.value.map((m) => m.id));
-      const unique = older.filter((m) => !known.has(m.id));
-      if (unique.length > 0) {
-        messages.value = [...unique, ...messages.value];
-      }
+    // 按稳定 id 去重：offset 返回的边界条可能与已加载部分重叠，不能重复渲染
+    const known = new Set(messages.value.map((m) => m.id));
+    const unique = pickUnseenById(older, known);
+    if (unique.length > 0) {
+      messages.value = [...unique, ...messages.value];
     }
-    historyHasMore.value = res?.hasMore === true;
-    historyNextOffset.value =
-      typeof res?.nextOffset === "number" ? res.nextOffset : undefined;
+    applyHistoryCursor(readHistoryCursor(res));
+    historyOlderLoaded.value = true;
     // 游标随缓存一起更新，切回会话后还能继续翻更早历史
     const cacheKey = qualifySessionKey(sessionKey.value, paneAgentId.value) ?? resolvedSessionKey();
     setChatMessageCache(cacheKey, messages.value, {
@@ -404,9 +453,12 @@ async function loadOlderHistory(): Promise<void> {
     // 保持视口不跳动：等 DOM 重排后把 scrollTop 补上新增高度
     await nextTick();
     const after = threadRef.value;
-    if (after && prevScrollHeight > 0) {
-      const delta = after.scrollHeight - prevScrollHeight;
-      if (delta > 0) after.scrollTop = prevScrollTop + delta;
+    if (after) {
+      after.scrollTop = anchoredScrollTop({
+        prevScrollTop,
+        prevScrollHeight,
+        nextScrollHeight: after.scrollHeight,
+      });
     }
   } catch {
     // 静默：翻页失败不打断主对话，保留游标下次可重试
@@ -570,6 +622,8 @@ const streamingMediaAttachments = computed<ContentAttachmentItem[]>(() => {
 const loading = ref(false);
 const input = ref("");
 const threadRef = ref<HTMLElement | null>(null);
+/** 对话流**顶部**的 1px 哨兵 —— 进入视口即自动加载更早一页（见 observeHistoryTopSentinel）。 */
+const historyTopSentinelRef = ref<HTMLElement | null>(null);
 const paneRoot = ref<HTMLElement | null>(null);
 const modelSelectorRef = ref<InstanceType<typeof ModelSelector> | null>(null);
 const inputRef = ref<HTMLTextAreaElement | null>(null);
@@ -917,78 +971,130 @@ function onPaneDragEnd(): void {
   emit("paneDragEnd");
 }
 
-type PendingTask = {
-  id: string;
-  text: string;
-  /** 随引导一起下发的附件（流式中入队时拷贝，通常为空——流式阶段附件入口被禁用）。 */
-  attachments?: ChatAttachment[];
-  /** 上次提交失败标记，用于展示重试入口。 */
-  failed?: boolean;
-  /** 失败原因，展示用。 */
-  error?: string;
-};
-
 const pendingTasks = ref<PendingTask[]>([]);
-let pendingTaskSeed = 0;
 
-/** 待执行队列按会话持久化（对齐旧版 chat-queue 的持久化意图），刷新不丢。 */
-const PENDING_TASKS_KEY = "openclaw.web.pendingTasks.v1";
-function persistPendingTasks(key: string): void {
-  try {
-    const map = JSON.parse(localStorage.getItem(PENDING_TASKS_KEY) ?? "{}") as Record<string, PendingTask[]>;
-    if (pendingTasks.value.length > 0) map[key] = pendingTasks.value;
-    else delete map[key];
-    localStorage.setItem(PENDING_TASKS_KEY, JSON.stringify(map));
-  } catch {
-    /* 存储不可用（隐私模式 / 配额）时静默降级，不阻塞交互 */
-  }
-}
-function hydratePendingTasks(key: string): void {
-  try {
-    const map = JSON.parse(localStorage.getItem(PENDING_TASKS_KEY) ?? "{}") as Record<string, PendingTask[]>;
-    const list = map[key];
-    if (Array.isArray(list)) pendingTasks.value = list.filter((t) => t && typeof t.text === "string");
-  } catch {
-    /* 忽略损坏数据 */
-  }
+/**
+ * 队列持久化的分桶 key（规范会话 key；空值兜底见 `utils/pendingTaskQueue.ts`）。
+ *
+ * ⚠️ 它是个**会变的计算值**：会话 key 是裸 key（`id-<hash8>` / `main`）时，
+ * 规范前缀里的 agentId 由 agents store 的 `defaultId` 推出，而后者在冷启动窗口内
+ * 从空变成真值（`agents.list` 回来 / 本地侧栏快照缺失时）——
+ * 于是同一个会话的桶 key 会从 `agent:main:<rest>` 细化成 `agent:<realId>:<rest>`。
+ * 上一版把「读盘」写成挂载时读一次，正好踩在这个窗口上 ⇒ 刷新后队列读不出来。
+ * 现在读盘由下面那个 watch 负责：**key 一变就重读**。
+ */
+const pendingTaskBucket = computed<string>(() =>
+  pendingTaskBucketKey(sessionKey.value, paneAgentId.value),
+);
+
+/** 上一次读盘用的会话 key / 桶 key，用于分辨「换会话」与「只是把 agent 前缀补齐」。 */
+let lastPendingTasksSession = "";
+let lastPendingTasksBucket = "";
+
+/** 本窗格是否已挂载（setup 期的 immediate watch 不做事，见 `resumePendingTasksAfterReload`）。 */
+let paneMounted = false;
+
+/** 逐条排空恢复出来的队列时用的退避（ms），用尽即标失败交给用户。 */
+const RESUME_RETRY_DELAYS_MS = [1500, 3000, 6000, 12000, 24000];
+let resumeRetryTimer: number | null = null;
+let resumeAttempt = 0;
+/** 最近一次续跑失败的网关原文（重试耗尽时作为失败原因落盘，见 scheduleResumeRetry）。 */
+let lastResumeFailure = "";
+
+/** 刷新后恢复出来的队列已经提示过一次就不再提示（避免每次重连都弹）。 */
+let pendingTasksRestoreNotified = false;
+
+function cancelPendingResumeRetry(): void {
+  if (resumeRetryTimer === null) return;
+  window.clearTimeout(resumeRetryTimer);
+  resumeRetryTimer = null;
 }
 
-/** 队列持久化的分桶 key：与消息缓存同源（规范会话 key），保证拆分视图多个窗格共享同一份。 */
-function pendingTasksKey(): string {
-  return qualifySessionKey(sessionKey.value, paneAgentId.value) ?? resolvedSessionKey();
+/** 把队列写盘（所有变更入口共用）。 */
+function persistPendingTasks(): void {
+  writePendingTasks(pendingTaskBucket.value, pendingTasks.value);
 }
 
-/** 队列项提交失败：保留在队列里并标记，供 UI 提供「重试 / 移除」。 */
-function markPendingTaskFailed(id: string, error: string): void {
+/**
+ * 桶 key 变化 → 重读该会话的队列。
+ *
+ * 三种情况（判定在 `planPendingTaskBucketChange`，有单测）：
+ * - **首次挂载**：直接读盘，桶缺失即空队列；
+ * - **换会话**：同样直接读盘，且**桶缺失必须清空视图** —— 上一版「桶缺失就什么都不做」
+ *   会让上一个会话的待执行任务留在新会话界面上（串味），而它们其实属于别的会话；
+ * - **同一会话、桶 key 只是被细化**（冷启动窗口结束）：把内存里的队列搬到新桶再读回，
+ *   否则用户会看到「任务本来在界面上，刷新一下反而没了」。
+ *
+ * 顺带触发「刷新后接着跑」：读盘拿到非空队列就要续跑，见 `resumePendingTasksAfterReload`。
+ */
+watch(
+  pendingTaskBucket,
+  (nextBucket) => {
+    const sameSession = sessionKey.value === lastPendingTasksSession;
+    const previousBucket = lastPendingTasksBucket;
+    const plan = planPendingTaskBucketChange({
+      previousKey: previousBucket,
+      nextKey: nextBucket,
+      sameSession,
+      currentCount: pendingTasks.value.length,
+      nextBucketCount: readPendingTasks(nextBucket).length,
+    });
+    if (plan === "migrate") {
+      writePendingTasks(nextBucket, pendingTasks.value);
+      deletePendingTasksBucket(previousBucket);
+    }
+    pendingTasks.value = readPendingTasks(nextBucket);
+    lastPendingTasksSession = sessionKey.value;
+    lastPendingTasksBucket = nextBucket;
+    if (pendingTasks.value.length > 0 && !pendingTasksRestoreNotified) {
+      pendingTasksRestoreNotified = true;
+      // 这个 watch 带 immediate，首次求值发生在 setup 期 —— 那时弹 toast 太早，
+      // 推到下一次 tick（挂载之后）再提示。
+      const restored = pendingTasks.value.length;
+      void nextTick(() => notifyPendingTasksRestored(restored));
+    }
+    void resumePendingTasksAfterReload();
+  },
+  { immediate: true },
+);
+
+/**
+ * 标记某条任务提交失败：保留在队列里并标记，供 UI 提供「重试 / 移除」。
+ *
+ * `reason` 默认按**网关英文原文**处理，经 `localizeChatError` 转成中文标题再落盘 ——
+ * 模板会把它渲染成红色小胶囊（`.pending-tasks__error`），英文原文直接上屏不合格。
+ * 本组件自己合成的文案（重试耗尽 / 积分不足）传 `alreadyLocalized` 原样保留。
+ */
+function markPendingTaskFailed(
+  id: string,
+  reason: string,
+  options?: { alreadyLocalized?: boolean },
+): void {
+  const error = options?.alreadyLocalized ? reason : localizeChatError(reason).title;
   pendingTasks.value = pendingTasks.value.map((item) =>
     item.id === id ? { ...item, failed: true, error } : item,
   );
-  persistPendingTasks(pendingTasksKey());
+  persistPendingTasks();
 }
 
 function enqueuePendingTask(): void {
   const text = input.value.trim();
   if (!text || !sending.value) return;
-  pendingTaskSeed += 1;
   // 拷贝当前 composer 附件（防御性：流式阶段通常无附件，入口被禁用）
   const taskAttachments = attachments.value.length > 0 ? attachments.value.map((a) => ({ ...a })) : undefined;
-  pendingTasks.value.push({
-    id: `pending-${Date.now()}-${pendingTaskSeed}`,
-    text,
-    ...(taskAttachments ? { attachments: taskAttachments } : {}),
-  });
+  pendingTasks.value.push(createPendingTask(text, taskAttachments));
   input.value = "";
-  persistPendingTasks(pendingTasksKey());
+  persistPendingTasks();
 }
 
 function removePendingTask(id: string): void {
   pendingTasks.value = pendingTasks.value.filter((item) => item.id !== id);
-  persistPendingTasks(pendingTasksKey());
+  persistPendingTasks();
 }
 
 function clearPendingTasks(): void {
   pendingTasks.value = [];
-  persistPendingTasks(pendingTasksKey());
+  persistPendingTasks();
 }
 
 /** 当前流式回合的局部积分展示（用于发送中显示「已消耗 X 积分 · 剩余 Y 积分」）。
@@ -1464,20 +1570,64 @@ function normalizeMessage(raw: unknown, index: number): ChatMessage | null {
   };
 }
 
-/** 距底多少像素内算「在近底」，超过则视为用户在看历史、暂停自动跟随（对齐旧版 scroll.ts:5）。 */
-const NEAR_BOTTOM_PX = 450;
-/** 距顶多少像素内算「在顶」，触发自动加载更早历史（对齐旧版「滚到顶翻页」习惯）。 */
-const NEAR_TOP_PX = 120;
 /** 是否跟随到底部：用户上滑看历史时置 false，新 token 不再把视口拽回底部。 */
 const followScroll = ref(true);
+
+/** 顶部哨兵的预触发距离（与滚动回调的像素阈值同量级）。 */
+const HISTORY_TOP_ROOT_MARGIN_PX = 120;
+
+let historyTopObserver: IntersectionObserver | null = null;
+
+/** 读滚动容器的三个尺寸（判定函数只吃这三个数，便于单测）。 */
+function readScrollMetrics(el: HTMLElement): {
+  scrollTop: number;
+  scrollHeight: number;
+  clientHeight: number;
+} {
+  return {
+    scrollTop: el.scrollTop,
+    scrollHeight: el.scrollHeight,
+    clientHeight: el.clientHeight,
+  };
+}
+
+/**
+ * 让**顶部哨兵**进视口即自动翻页（无限滚动的主触发路径）。
+ *
+ * 为什么不再只靠滚动回调里的像素阈值：像素判定依赖「每一次 scroll 事件都被处理到」，
+ * 触控板惯性滚动 / 移动端会因为节流丢事件，而且内容不足一屏时（没有滚动条）
+ * 根本不会产生 scroll 事件 —— 哨兵进视口是浏览器自己算的，与设备无关。
+ * 旧的像素判定保留作为兜底（`shouldAutoLoadOlder`），IO 不可用时行为不退化。
+ */
+function observeHistoryTopSentinel(): void {
+  historyTopObserver?.disconnect();
+  historyTopObserver = null;
+  const root = threadRef.value;
+  const target = historyTopSentinelRef.value;
+  if (!root || !target || typeof IntersectionObserver === "undefined") return;
+  historyTopObserver = new IntersectionObserver(
+    (entries) => {
+      if (!entries.some((entry) => entry.isIntersecting)) return;
+      if (!canLoadOlder(historyCursor.value, loadingOlderHistory.value)) return;
+      void loadOlderHistory();
+    },
+    {
+      root,
+      // 向上扩 120px：哨兵还没真正进视口就开始拉，用户滑到顶时内容已经就位
+      rootMargin: `${HISTORY_TOP_ROOT_MARGIN_PX}px 0px 0px 0px`,
+      threshold: 0,
+    },
+  );
+  historyTopObserver.observe(target);
+}
 
 function onThreadScroll(): void {
   const el = threadRef.value;
   if (!el) return;
-  const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-  followScroll.value = distanceFromBottom <= NEAR_BOTTOM_PX;
-  // 触顶自动加载更早历史：距顶很近且后端还有更早且未在加载中
-  if (el.scrollTop <= NEAR_TOP_PX && historyHasMore.value && !loadingOlderHistory.value) {
+  const metrics = readScrollMetrics(el);
+  followScroll.value = isNearBottom(metrics);
+  // 自动加载更早历史：触顶（含内容不足一屏导致顶部=底部的场景），且后端还有更早、且不在加载中
+  if (shouldAutoLoadOlder({ cursor: historyCursor.value, loading: loadingOlderHistory.value, metrics })) {
     void loadOlderHistory();
   }
 }
@@ -2316,9 +2466,7 @@ async function loadHistory(options?: { skipCache?: boolean }): Promise<void> {
       cached.filter((item) => !deleted.has(item.id)),
     );
     // 恢复分页游标：缓存命中也能继续「加载更早」（直接用上次 offset，免联网探测）
-    const cursor = getChatHistoryCursor(cacheKey);
-    historyHasMore.value = cursor?.hasMore === true;
-    historyNextOffset.value = cursor?.nextOffset;
+    applyHistoryCursor(normalizeHistoryCursor(getChatHistoryCursor(cacheKey)));
     await scrollToBottom(true);
     void fetchMissingSpendResults();
     void loadModelList();
@@ -2328,7 +2476,7 @@ async function loadHistory(options?: { skipCache?: boolean }): Promise<void> {
   try {
     const res = await requestChatHistory<ChatHistoryResponse>({
       sessionKey: requestKey,
-      limit: 200,
+      limit: CHAT_HISTORY_PAGE_SIZE,
       // ⚠️ 必须**显式**传 offset:0：不传 offset 时网关走 `readChatHistoryPage` 的
       // 「无 offset 分支」，响应里根本没有 hasMore / nextOffset / totalMessages
       // （`src/gateway/server-methods/chat.ts:3044-3070`）。拿不到 hasMore，
@@ -2368,9 +2516,7 @@ async function loadHistory(options?: { skipCache?: boolean }): Promise<void> {
       preserveLocalTailMessages(serverMessages, snapshot),
     );
     // 记录后端给出的分页游标：还有更早则允许「加载更早」继续翻页
-    historyHasMore.value = res?.hasMore === true;
-    historyNextOffset.value =
-      typeof res?.nextOffset === "number" ? res.nextOffset : undefined;
+    applyHistoryCursor(readHistoryCursor(res));
     await scrollToBottom();
     // 写入客户端缓存：切回本会话时秒回，避免重复联网（对齐旧版 session-message-cache）。
     // 同时带上分页游标，切回后仍能继续加载更早历史。
@@ -2555,7 +2701,19 @@ function notifyActionFailure(action: string, err: unknown): void {
   });
 }
 
-async function send(textOverride?: string): Promise<boolean> {
+/**
+ * 发送一条消息。
+ *
+ * `options.silent`：失败时不弹提示、也不回填输入框 —— 只给「刷新后自动续跑」那条
+ * 路径用（用户没做任何操作，弹窗只会让人以为「自己点错了」，见
+ * `resumePendingTasksAfterReload`）；用户显式发起的发送/重试一律走默认的弹窗路径。
+ * `options.onFailure`：把网关原文交给调用方（续跑逻辑据此决定退避重试或标失败），
+ * 避免为了拿到错误再往组件里加一份状态。
+ */
+async function send(
+  textOverride?: string,
+  options?: { silent?: boolean; onFailure?: (raw: string) => void },
+): Promise<boolean> {
   const text = (textOverride ?? input.value).trim();
   if (sending.value) return false;
 
@@ -2624,7 +2782,8 @@ async function send(textOverride?: string): Promise<boolean> {
     // 输入框只在仍为空时回填：等待期间用户又打了新内容的话，别覆盖掉。
     if (textOverride === undefined && !input.value) input.value = text;
     messages.value = messages.value.filter((message) => message.id !== localMessageId);
-    notifyActionFailure("发送失败", err);
+    options?.onFailure?.(err instanceof Error ? err.message : String(err));
+    if (!options?.silent) notifyActionFailure("发送失败", err);
     return false;
   }
 }
@@ -2709,26 +2868,195 @@ async function abort(): Promise<void> {
   }
 }
 
+/** 全量导出是否在进行中（按钮转圈 + 拦截重复点击）。 */
+const exportingFullConversation = ref(false);
+/** 导出进度文案（抓页过程中实时更新；空串 = 不显示）。 */
+const fullExportProgressText = ref("");
+
 /**
- * 导出本窗格整段对话为 Markdown 文件。
+ * 导出运行令牌：换会话 / 组件卸载时自增，让在途的翻页循环立刻收手。
+ *
+ * 与 `historyRequestSeq` 同一个套路 —— `chat.history` 是异步的，翻页期间用户完全
+ * 可能已经切走。没有这道闸，旧会话的消息会被静默拼进新会话的导出文件里。
+ */
+let fullExportRunToken = 0;
+
+/**
+ * 服务端历史条目 → 可导出的消息（与 `loadHistory` 同一套可见性口径）。
+ *
+ * ⚠️ 判空必须「有正文 **或** 有媒体」，不能只看 `text`：用户「只传附件、一个字都没打」
+ * 时 `text` 是空串，只看文本会把整条消息连同附件一起吞掉（同 `loadHistory` 的注释）。
+ */
+function toExportableHistoryMessages(
+  items: unknown[],
+  deleted: ReadonlySet<string>,
+): ChatMessage[] {
+  return items
+    .map((item, index) => normalizeMessage(item, index))
+    .filter(
+      (item): item is ChatMessage =>
+        item !== null &&
+        (Boolean(item.text) ||
+          Boolean(item.historyMedia?.length) ||
+          Boolean(item.contentImages?.length) ||
+          Boolean(item.contentAttachments?.length)) &&
+        !deleted.has(item.id),
+    );
+}
+
+/**
+ * 顺着 offset 游标把**更早的页**一路抓到底（只读，不碰视图）。
+ *
+ * 起始游标直接取 `historyCursor` —— 视图里的 `messages` **就是** offset=0 那一页，
+ * 所以不必重复请求最新一页；这也顺带保证「流式刚生成、服务端还没投影出来的尾部」
+ * 不会丢（它只存在于视图里，会被 `mergeFullExportMessages` 当成最新一段）。
+ *
+ * 为什么不复用 `loadOlderHistory`：那条路会把每页**前置插进 `messages`** 并同步
+ * 滚动位置，而导出是只读动作，不该顺带改变用户正在看的视图。
+ *
+ * 失败与中止：任一页请求失败 ⇒ **保留已收集到的部分**并告知不完整（比整体失败有用
+ * 得多）；会话被切走 ⇒ 立刻返回 `aborted`，调用方不落盘。
+ */
+async function collectFullExportPages(
+  requestKey: string,
+  isCurrent: () => boolean,
+): Promise<{
+  pagesNewestFirst: ChatMessage[][];
+  stopReason: FullExportStopReason;
+  errorNote: string | null;
+  aborted: boolean;
+}> {
+  const pagesNewestFirst: ChatMessage[][] = [];
+  const seenOffsets = new Set<number>();
+  let cursor: FullExportCursor = { ...historyCursor.value };
+  let pageIndex = 0;
+  let stopReason: FullExportStopReason = "exhausted";
+  let errorNote: string | null = null;
+  for (;;) {
+    const step = planFullExportStep({
+      cursor,
+      pageIndex,
+      seenOffsets,
+      maxPages: FULL_EXPORT_MAX_PAGES,
+    });
+    if (step.action === "stop") {
+      stopReason = step.reason;
+      break;
+    }
+    seenOffsets.add(step.offset);
+    fullExportProgressText.value = describeFullExportProgress(
+      pageIndex,
+      visibleMessages.value.length + pagesNewestFirst.reduce((sum, page) => sum + page.length, 0),
+    );
+    let payload: ChatHistoryResponse = {};
+    try {
+      // 复用带「入参降级」的通道：老网关不认 offset/maxChars 时会退回最小入参，
+      // 但那种响应里没有 hasMore/nextOffset ⇒ 下一轮被判 missing-offset 正常收尾。
+      payload = await requestChatHistory<ChatHistoryResponse>({
+        sessionKey: requestKey,
+        limit: CHAT_HISTORY_PAGE_SIZE,
+        offset: step.offset,
+        maxChars: FULL_EXPORT_MAX_CHARS,
+      });
+    } catch (err) {
+      if (!isCurrent()) {
+        return { pagesNewestFirst, stopReason, errorNote, aborted: true };
+      }
+      errorNote = `第 ${pageIndex + 1} 页拉取失败（${
+        err instanceof Error ? err.message : String(err)
+      }）`;
+      break;
+    }
+    // 迟到的响应（期间切了会话）：整包丢弃，绝不写进导出文件。
+    if (!isCurrent()) {
+      return { pagesNewestFirst, stopReason, errorNote, aborted: true };
+    }
+    pagesNewestFirst.push(toExportableHistoryMessages(payload?.messages ?? [], deletedMessageIds.value));
+    cursor = readHistoryCursor(payload);
+    pageIndex += 1;
+  }
+  return { pagesNewestFirst, stopReason, errorNote, aborted: false };
+}
+
+/**
+ * 导出本窗格**整段对话**为 Markdown 文件（全量）。
  *
  * 与「复制为 Markdown」按钮的差别：复制只取**单条**消息的正文，导出则是
  * **整段对话**的结构化 Markdown（会话标题 + 逐条角色 + 时间戳），见
  * `utils/exportChat.ts`。二者不能互相替代 —— 复制服务于「把某条回复粘走」，
  * 导出服务于「存档/分享整场对话」。
+ *
+ * ## 「全量」是怎么做到的
+ * 视图里只装了 `CHAT_HISTORY_PAGE_SIZE` 条（首屏一页，外加用户手动翻过的页），
+ * 所以直接导出 `messages` 是**残缺**的。这里顺着 `chat.history` 的 offset 游标
+ * 把更早的页一路抓到底（网关侧 `offset` 是从最新一条往回数的跳过量），再与视图
+ * 里的最新一段合并。长会话因此会多花几次 RPC，代价换来的是导出文件真的完整。
+ *
+ * @author yangchenglin11@jd.com
+ * @date 2026年9月21日 13:20:00
+ * @version feature_web
  */
-function exportConversation(): void {
-  const ok = exportChatMarkdown(
-    messages.value,
-    assistantName.value,
-    settings.gatewayHttpBase,
-    settings.token,
-  );
-  if (!ok) {
+async function exportConversation(): Promise<void> {
+  if (exportingFullConversation.value) return;
+  const requestKey = resolvedSessionKey();
+  if (!requestKey) return;
+  // 先同步一次已删集合：导出**绝不能**把用户删掉的消息带回来。
+  loadDeletedMessageIds();
+  const live = visibleMessages.value;
+  const moreAvailable = canLoadOlder(historyCursor.value, false);
+  if (live.length === 0 && !moreAvailable) {
     ElMessage({ message: "当前没有可导出的消息", type: "warning", grouping: true });
     return;
   }
-  ElMessage({ message: "对话已导出为 Markdown", type: "success", grouping: true });
+  const token = ++fullExportRunToken;
+  const isCurrent = () => token === fullExportRunToken && resolvedSessionKey() === requestKey;
+  exportingFullConversation.value = true;
+  fullExportProgressText.value = describeFullExportProgress(0, live.length);
+  try {
+    const collected = await collectFullExportPages(requestKey, isCurrent);
+    if (collected.aborted || !isCurrent()) return;
+    const all = mergeFullExportMessages(collected.pagesNewestFirst, live);
+    if (all.length === 0) {
+      ElMessage({ message: "当前没有可导出的消息", type: "warning", grouping: true });
+      return;
+    }
+    const ok = exportChatMarkdown(
+      all,
+      assistantName.value,
+      settings.gatewayHttpBase,
+      settings.token,
+      {
+        filename: fullExportFilename(assistantName.value, Date.now()),
+        // 把条数写进文件头：翻页异常提前收尾时，用户下次打开才能判断这份存档是否完整。
+        messageCount: all.length,
+      },
+    );
+    if (!ok) {
+      ElMessage({ message: "导出失败：生成的 Markdown 内容为空", type: "warning", grouping: true });
+      return;
+    }
+    // 收尾提示：正常抓到底只报条数；其余停因 / 请求失败都意味着**可能不完整**，
+    // 必须说清楚，否则用户会以为手里这份就是全部。
+    const streamingNote = streaming.value ? "；当前正在生成的回复未包含" : "";
+    const incomplete = collected.errorNote ?? describeFullExportStop(collected.stopReason);
+    if (incomplete) {
+      ElMessage({
+        message: `已导出 ${all.length} 条消息 —— ${incomplete}${streamingNote}`,
+        type: "warning",
+        duration: 6000,
+        grouping: true,
+      });
+      return;
+    }
+    ElMessage({
+      message: `对话已全量导出为 Markdown（共 ${all.length} 条消息）${streamingNote}`,
+      type: "success",
+      grouping: true,
+    });
+  } finally {
+    exportingFullConversation.value = false;
+    fullExportProgressText.value = "";
+  }
 }
 
 /**
@@ -3108,14 +3436,27 @@ function handleEvent(evt: { event: string; payload?: unknown }): void {
       streamingSpend.value = null;
       spendPending.value = false;
       sending.value = false;
+      // ⚠️ 生成失败**刻意不提示用户**（2026-09-21 口径）：本轮失败不再弹 `ElMessage`。
+      // 依据：能走到这里的文案绝大多数对用户不可行动（会话接管 / 供应商抖动 /
+      // 上游未分类的 `Agent run failed` …），弹出来只会让用户以为「自己操作错了」
+      // 或「产品坏了」—— 静默比误导更符合预期。
+      //
+      // 静默的边界只到「弹窗」为止，另外两件事一件都不能省：
+      //   ① 上面几行的状态复位 —— 少了 `sending=false` / 清流式，气泡会永远停在
+      //      「思考中」，用户只能刷新页面（那比弹窗更糟）；
+      //   ② 失败必须留痕 —— 转控制台诊断（`localizeChatError` 照跑，日志里是分类后的
+      //      中文标题 + 原文），排查时按 `[chat-pane]` 过滤。
+      //
+      // 需要恢复弹窗时：把下面这段换回
+      //   `ElMessage({ message: formatFriendlyError(friendly), type: "error",
+      //     duration: friendly.retryable ? 4500 : 6500, grouping: true })`
+      // 并把 `formatFriendlyError` 加回本文件顶部 import（`noUnusedLocals` 会拦住漏改）。
       const friendly = localizeChatError(payload.errorMessage ?? "");
-      ElMessage({
-        message: formatFriendlyError(friendly),
-        type: "error",
-        // 5s 让 retryable=false 的（鉴权失败 / 余额不足 / 锁竞争）也来得及看清；
-        // ElMessage 默认 3000ms 对中文两行来说偏短。
-        duration: friendly.retryable ? 4500 : 6500,
-        grouping: true,
+      console.warn("[chat-pane] 生成失败（按策略静默，不提示用户）", {
+        sessionKey: payload.sessionKey,
+        runId: payload.runId,
+        title: friendly.title,
+        detail: friendly.detail || "(网关未返回错误详情)",
       });
       break;
     }
@@ -3124,11 +3465,26 @@ function handleEvent(evt: { event: string; payload?: unknown }): void {
 
 let unsubscribe: (() => void) | null = null;
 
+// 网关连接状态变化（首次握手完成 / 断线重连）→ 给恢复出来的待执行队列一次机会。
+// 挂载那一刻 WS 往往还没握手完，`gateway.request` 会等最多 30s 才超时，
+// 期间 composer 一直显示「正在生成」—— 所以续跑要先等连接（见 resumePendingTasksAfterReload）。
+watch(
+  () => gateway.connected,
+  (connected) => {
+    if (connected) void resumePendingTasksAfterReload();
+  },
+);
+
 onMounted(() => {
   unsubscribe = gateway.onEvent(handleEvent);
   void agents.ensureLoaded();
-  // 刷新后恢复本会话未提交的引导队列（入队 / 移除时已写盘）
-  hydratePendingTasks(pendingTasksKey());
+  // 待执行队列的读盘由 `watch(pendingTaskBucket)` 负责（它带 immediate，且能在
+  // 桶 key 被细化的那一刻重读，见那里的注释）；这里只把「已挂载」标记立起来，
+  // 让恢复出来的队列可以开始续跑（setup 期不做这件事）。
+  paneMounted = true;
+  void resumePendingTasksAfterReload();
+  // 顶部哨兵此时才在 DOM 里，观察器要在 nextTick 之后挂（模板 ref 刚赋值）
+  void nextTick(() => observeHistoryTopSentinel());
   void loadHistory();
   void loadDefaultModel();
   // 模型目录先就绪，上下文窗口才有第三层兜底
@@ -3137,6 +3493,12 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   unsubscribe?.();
+  historyTopObserver?.disconnect();
+  historyTopObserver = null;
+  cancelPendingResumeRetry();
+  // 顶掉在途的全量导出令牌：关窗格（拆分视图下很常见）后翻页循环必须立刻收手，
+  // 否则它会继续发 `chat.history` 并尝试落盘一个已经没人要的文件。
+  fullExportRunToken += 1;
   closeDeleteConfirm();
   for (const timer of copyTimers.values()) window.clearTimeout(timer);
   copyTimers.clear();
@@ -3166,8 +3528,7 @@ watch(
     attachments.value = [];
     messages.value = [];
     // 切换会话：重置历史分页游标，避免把上一个会话的翻页进度带到新会话
-    historyHasMore.value = false;
-    historyNextOffset.value = undefined;
+    resetHistoryCursor();
     loadingOlderHistory.value = false;
     // ⚠️ 运行态现在按会话放在组件外：切到的这个会话**正有一轮在跑**时不能清，
     // 否则会把「另一个窗格里正在进行的同一个会话的任务」一起打断。
@@ -3182,8 +3543,8 @@ watch(
     }
     steeredMessages.value = [];
     awaitingSteeredRun.value = false;
-    // 队列按会话持久化：切回来要恢复该会话待执行的任务，而不是清空
-    hydratePendingTasks(pendingTasksKey());
+    // 队列按会话持久化：切回来要恢复该会话待执行的任务 —— 读盘已收敛到
+    // `watch(pendingTaskBucket)`（它会随本行的 sessionKey 变化重读），这里不再重复调用。
     expandedThinkingIds.value = new Set();
     void loadHistory();
     // 上下文窗口可能随会话变化（每个会话有自己的 contextTokens）
@@ -3203,6 +3564,115 @@ async function consumeNextPendingTask(): Promise<void> {
 function scheduleNextPendingTask(): void {
   if (pendingTasks.value.length === 0) return;
   void consumeNextPendingTask();
+}
+
+/** 恢复队列的一次性提示（挂载后弹，避免用户以为「任务自己开始跑了」）。 */
+function notifyPendingTasksRestored(count: number): void {
+  ElMessage({
+    message: `已恢复 ${count} 条待执行任务，正在继续执行`,
+    type: "info",
+    duration: 3000,
+    grouping: true,
+  });
+}
+
+/**
+ * 刷新后「接着跑」恢复出来的队列。
+ *
+ * ## 为什么必须有这条路径（而不是复用 `scheduleNextPendingTask`）
+ * `scheduleNextPendingTask` 的唯一触发点是「本会话某一轮 run 结束」（final / end 事件）。
+ * 整页刷新时那一轮**往往早就在网关侧结束了**（服务端不因刷新中断 run），
+ * 于是恢复出来的队列再也没有任何触发点 —— 表现就是「列表回来了，任务永远不执行」。
+ *
+ * ## 为什么要退避重试（而不是失败即标红）
+ * 刷新不打断服务端正在跑的 run，所以恢复后立刻 `chat.send` 有相当概率撞上
+ * 「当前会话正在处理中 / 会话接管」（`EmbeddedAttemptSessionTakeoverError`）这类
+ * **瞬时**失败；它们在花 token 之前就被拒了。此刻用户并没有做任何操作，
+ * 直接标红 + 弹 toast 只会让人以为「自己点错了」。所以：静默退避重试若干次，
+ * 仍不成功才标失败、留给用户手动处理。
+ *
+ * 手动入口是 `retryPendingTask`（有 toast，因为那是用户的显式动作）。
+ */
+async function resumePendingTasksAfterReload(): Promise<void> {
+  cancelPendingResumeRetry();
+  // setup 期（桶 key 的 immediate watch）不做事，等 onMounted / 事件驱动
+  if (!paneMounted || sending.value) return;
+  const next = pendingTasks.value[0];
+  // 队首已经是失败态时不自动重试：那是用户需要看到的结论，不是要静默盖掉的状态
+  if (!next || next.failed) return;
+  // 握手还没完成先不急着发：`gateway.request` 会等最多 30s 才超时，期间 composer
+  // 一直显示「正在生成」。连上之后由 gateway.connected 的 watch 再进来一次。
+  if (!gateway.connected) return;
+  if (insufficientCredits.value) {
+    markPendingTaskFailed(next.id, "积分不足，已暂停自动执行", { alreadyLocalized: true });
+    return;
+  }
+  const ok = await send(next.text, {
+    silent: true,
+    onFailure: (raw) => {
+      lastResumeFailure = raw;
+    },
+  });
+  if (!ok) {
+    scheduleResumeRetry();
+    return;
+  }
+  resumeAttempt = 0;
+  lastResumeFailure = "";
+  removePendingTask(next.id);
+  // 后面的任务由「本轮 run 结束」的 scheduleNextPendingTask 接着排空；
+  // 这里再主动进来一次，兼作「send 后 sending 未及时置位」的兜底（会自行 early return）。
+  void resumePendingTasksAfterReload();
+}
+
+/** 退避重试：用尽重试次数后把队首标失败（附本地化原因）。 */
+function scheduleResumeRetry(): void {
+  const delay = RESUME_RETRY_DELAYS_MS[resumeAttempt];
+  resumeAttempt += 1;
+  const head = pendingTasks.value[0];
+  if (!head) return;
+  if (delay === undefined) {
+    // 有网关原文就用原文（localizeChatError 会给中文标题），否则用本组件合成的兜底文案
+    if (lastResumeFailure) markPendingTaskFailed(head.id, lastResumeFailure);
+    else markPendingTaskFailed(head.id, "多次重试仍未成功，请手动重试或删除", { alreadyLocalized: true });
+    return;
+  }
+  cancelPendingResumeRetry();
+  resumeRetryTimer = window.setTimeout(() => {
+    resumeRetryTimer = null;
+    void resumePendingTasksAfterReload();
+  }, delay);
+}
+
+/** 用户手动重试某条失败任务（流式中仍走「引导」，非流式按普通消息重发）。 */
+async function retryPendingTask(item: PendingTask): Promise<void> {
+  if (streaming.value) {
+    await steerPendingTask(item);
+    return;
+  }
+  // 清掉失败态再发，避免「重试成功但还挂着红色失败标签」
+  pendingTasks.value = pendingTasks.value.map((task) =>
+    task.id === item.id
+      ? {
+          id: task.id,
+          text: task.text,
+          ...(task.attachments ? { attachments: task.attachments } : {}),
+        }
+      : task,
+  );
+  persistPendingTasks();
+  let failure = "";
+  const ok = await send(item.text, {
+    onFailure: (raw) => {
+      failure = raw;
+    },
+  });
+  if (ok) {
+    resumeAttempt = 0;
+    removePendingTask(item.id);
+    return;
+  }
+  markPendingTaskFailed(item.id, failure);
 }
 
 function onKeydown(event: KeyboardEvent): void {
@@ -3383,6 +3853,32 @@ function formatBalance(value: number | null | undefined): string {
         ↓ 下方有新消息
       </button>
       <div class="chat-inner">
+        <!-- 无限滚动的触发哨兵：1px 高、无视觉，进视口即自动加载更早一页
+             （IntersectionObserver，见 observeHistoryTopSentinel）。
+             ⚠️ 对话是**时间正序**（旧在上、新在下），所以「更早一页」在列表顶部，
+             哨兵也必须在这里 —— 列表底部是最新消息，那里没有下一页可翻。 -->
+        <div ref="historyTopSentinelRef" class="thread-sentinel" aria-hidden="true" />
+        <div
+          v-if="loadingOlderHistory || historyHasMore"
+          class="thread-history-status"
+          role="status"
+          aria-live="polite"
+        >
+          <template v-if="loadingOlderHistory">
+            <el-icon class="thread-history-spinner is-loading" aria-hidden="true"><Loading /></el-icon>
+            <span>正在加载更早消息…</span>
+          </template>
+          <button
+            v-else
+            class="thread-load-earlier"
+            type="button"
+            @click="loadOlderHistory"
+          >
+            加载更早消息
+          </button>
+        </div>
+        <div v-else-if="historyOlderLoaded" class="thread-history-end">已加载全部历史消息</div>
+
         <div v-if="!messages.length && !streamingText && !streamingThinking" class="chat-empty">
           <span class="empty-mark">
             <ChatAvatar
@@ -3411,17 +3907,6 @@ function formatBalance(value: number | null | undefined): string {
             </el-button>
           </div>
         </div>
-
-        <!-- 会话历史向上翻页：触顶自动加载之外，给一个显式按钮入口（也可点击触发） -->
-        <button
-          v-if="historyHasMore || loadingOlderHistory"
-          class="thread-load-earlier"
-          type="button"
-          :disabled="loadingOlderHistory"
-          @click="loadOlderHistory"
-        >
-          {{ loadingOlderHistory ? "正在加载更早消息…" : "加载更早消息" }}
-        </button>
 
         <template v-for="msg in visibleMessages" :key="msg.id">
           <!-- 用户消息：右侧蓝底气泡 -->
@@ -3976,10 +4461,30 @@ function formatBalance(value: number | null | undefined): string {
           </el-button>
         </div>
         <div class="pending-tasks__list">
-          <div v-for="item in pendingTasks" :key="item.id" class="pending-tasks__item">
+          <div
+            v-for="item in pendingTasks"
+            :key="item.id"
+            class="pending-tasks__item"
+            :class="{ 'is-failed': item.failed }"
+          >
             <span class="pending-tasks__text" :title="item.text">{{ item.text }}</span>
+            <!-- 提交失败的原因（已在 markPendingTaskFailed 里本地化为中文标题） -->
+            <span v-if="item.failed" class="pending-tasks__error" :title="item.error">
+              {{ item.error || "提交失败" }}
+            </span>
             <div class="pending-tasks__actions">
               <el-button
+                v-if="item.failed && !streaming"
+                class="pending-tasks__retry"
+                size="small"
+                title="重新提交这条任务"
+                @click="retryPendingTask(item)"
+              >
+                <el-icon><RefreshRight /></el-icon>
+                <span>重试</span>
+              </el-button>
+              <el-button
+                v-else
                 class="pending-tasks__steer"
                 size="small"
                 :disabled="!streaming"
@@ -4166,18 +4671,32 @@ function formatBalance(value: number | null | undefined): string {
                 <ChatIcon name="panelRightOpen" />
               </el-button>
             </el-tooltip>
-            <!-- 导出对话：整段会话存成 Markdown 文件（与单条「复制为 Markdown」区分）。 -->
-            <el-tooltip content="导出对话为 Markdown" placement="top">
+            <!-- 导出对话：整段会话存成 Markdown 文件（与单条「复制为 Markdown」区分）。
+                 全量导出会顺着 offset 游标把更早的页一路抓到底，长会话期间按钮转圈、不可重复点击。 -->
+            <el-tooltip
+              :content="
+                exportingFullConversation
+                  ? fullExportProgressText
+                  : '导出对话为 Markdown（全量）'
+              "
+              placement="top"
+            >
               <el-button
                 text
                 class="chat-export-conversation"
                 aria-label="导出对话为 Markdown"
+                :loading="exportingFullConversation"
                 @click="exportConversation"
               >
                 <el-icon><Download /></el-icon>
               </el-button>
             </el-tooltip>
-            <span v-if="streaming" class="composer-status">
+            <!-- 导出进度与「正在生成」共用同一条状态位：二者不会同时有意义，
+                 用 v-else-if 串起来可保证这一排始终只有一个元素占位，不抖布局。 -->
+            <span v-if="exportingFullConversation" class="composer-status chat-export-progress">
+              <span class="chat-export-progress__text">{{ fullExportProgressText }}</span>
+            </span>
+            <span v-else-if="streaming" class="composer-status">
               <el-icon class="is-loading"><Loading /></el-icon>
               <span>正在生成{{ steerCount > 0 ? ` · 已引导 ${steerCount} 次` : "" }}</span>
             </span>
@@ -4558,11 +5077,43 @@ html.dark .credits-alert :deep(.el-alert__title) {
   background: var(--el-color-primary-light-8, #d9ecff);
 }
 
+/* 顶部无限滚动哨兵：只给 IntersectionObserver 命中用，不参与视觉（1px 且不吃 margin） */
+.thread-sentinel {
+  height: 1px;
+  margin-bottom: -1px;
+}
+
+/* 历史翻页状态行：加载中（转圈 + 文案）与手动入口共用一个居中槽位，
+    高度固定 ⇒ 两种状态切换时列表不会上下跳。 */
+.thread-history-status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 26px;
+  margin-bottom: 8px;
+  color: var(--el-text-color-secondary, #909399);
+  font-size: 12px;
+}
+
+.thread-history-spinner {
+  color: var(--el-color-primary, #409eff);
+  font-size: 13px;
+}
+
+/* 更早历史已全部加载完的收尾提示 */
+.thread-history-end {
+  padding: 4px 0 10px;
+  color: var(--wb-text-tertiary, #909399);
+  font-size: 12px;
+  text-align: center;
+}
+
 /* 会话历史向上翻页入口（触顶自动加载之外的手动触发） */
 .thread-load-earlier {
   display: block;
   width: max-content;
-  margin: 0 auto 8px;
+  margin: 0 auto;
   padding: 4px 12px;
   border: 1px solid var(--el-border-color, #dcdfe6);
   border-radius: 14px;
@@ -5532,7 +6083,8 @@ html.dark .credits-alert :deep(.el-alert__title) {
   flex-shrink: 0;
 }
 
-.pending-tasks__steer {
+.pending-tasks__steer,
+.pending-tasks__retry {
   border-radius: 999px;
 }
 
@@ -5636,6 +6188,22 @@ html.dark .credits-alert :deep(.el-alert__title) {
   color: var(--wb-accent-strong);
   white-space: nowrap;
   padding-left: 12px;
+}
+
+/**
+ * 全量导出进度：文案长度随抓页数增长（「正在导出 1234 条消息…（已抓取 3 页）」），
+ * 不截断会把发送按钮顶出可视区。转圈由导出按钮自己承担，这里只要文字。
+ */
+.chat-export-progress {
+  min-width: 0;
+}
+
+.chat-export-progress__text {
+  display: inline-block;
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* ============== 发送按钮（图标 + 文案胶囊） ============== */
@@ -6307,6 +6875,11 @@ html.dark .credits-alert :deep(.el-alert__title) {
    */
   .composer-hint {
     display: none;
+  }
+
+  /** 窄屏下进度文案必须更短，否则 44px 的发送按钮会被挤出可视区。 */
+  .chat-export-progress__text {
+    max-width: 96px;
   }
 
   /** 输入框内边距按窄屏收紧，配合全局的 16px 字号（防 iOS 聚焦自动缩放）。 */

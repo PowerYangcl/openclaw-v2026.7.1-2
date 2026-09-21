@@ -3,9 +3,14 @@
  * 右侧详情面板 — 移植上游 `ui/src/pages/chat/components/chat-sidebar.ts` 的
  * 「消息详情」能力到 Vue 3，用 Element Plus 的 `el-drawer`（右侧抽屉）承载。
  *
- * 职责：把单条消息的**完整内容**（完整 Markdown + 思考过程 + 媒体/附件）从
- * 气泡里「展开」到右侧抽屉，便于长消息阅读、复制、以及进一步查看
- * 会话工作区文件（文件预览弹窗）。
+ * 职责：把单条消息的**完整内容**（完整 Markdown + 媒体/附件）从气泡里「展开」到
+ * 右侧抽屉，便于长消息阅读、复制、以及进一步查看会话工作区文件（文件预览弹窗）。
+ *
+ * ⚠️ **详情抽屉里不展示思考过程**（2026-09-21 口径）：思考是「生成过程中的中间态」，
+ * 平铺进详情既像正文、又和正文重复，只会让用户困惑。收敛范围**仅限本抽屉** ——
+ * `ChatPane.vue` 气泡里的折叠块（`.thinking-fold`）与流式阶段的实时思考照常展示。
+ * 数据层不删：`ChatMessage.thinking` 仍由 `normalizeMessage` 正常填充，这里只是不渲染；
+ * 将来要恢复，模板 + `.detail-drawer__thinking*` 三条样式需一起加回（样式本次已一并删除）。
  *
  * 显隐由父级传入的 `message`（非空 = 展开）驱动：`el-drawer` 的 `model-value`
  * 绑定 `!!message`，关闭动画结束后回调 `close` 事件 → 父级把 message 置 null。
@@ -70,8 +75,6 @@ const title = computed<string>(() => {
 const timeText = computed<string>(() =>
   props.message?.ts ? formatDateTimeMinute(props.message.ts) : "",
 );
-
-const hasThinking = computed(() => Boolean(props.message?.thinking));
 
 /** 是否可复制（有正文才可）。 */
 const canCopy = computed(() => (props.message?.text ?? "").trim().length > 0);
@@ -191,11 +194,7 @@ async function copyFullMessage(): Promise<void> {
     </template>
 
     <div v-if="message" class="detail-drawer__body">
-      <div v-if="hasThinking" class="detail-drawer__thinking">
-        <div class="detail-drawer__thinking-label">思考过程</div>
-        <div class="detail-drawer__thinking-body">{{ message.thinking }}</div>
-      </div>
-
+      <!-- 思考过程**刻意不在此渲染**（理由见文件头）。气泡折叠块 / 流式实时思考不受影响。 -->
       <MarkdownView :text="message.text" />
 
       <!-- 内嵌图片（助手回复 / 工具结果里的 image 块）。包 <a download>：点击只下载，
@@ -320,24 +319,6 @@ async function copyFullMessage(): Promise<void> {
   height: 100%;
   overflow-y: auto;
   padding: 16px;
-}
-.detail-drawer__thinking {
-  margin-bottom: 14px;
-  border: 1px solid var(--wb-border);
-  border-radius: var(--wb-radius);
-  background: var(--wb-bg-inset);
-  padding: 10px 12px;
-}
-.detail-drawer__thinking-label {
-  font-size: 11px;
-  color: var(--wb-text-tertiary);
-  margin-bottom: 6px;
-}
-.detail-drawer__thinking-body {
-  font-size: 13px;
-  color: var(--wb-text-secondary);
-  white-space: pre-wrap;
-  word-break: break-word;
 }
 .detail-drawer__images {
   display: flex;
