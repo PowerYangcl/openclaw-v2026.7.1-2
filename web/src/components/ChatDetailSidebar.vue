@@ -6,11 +6,18 @@
  * 职责：把单条消息的**完整内容**（完整 Markdown + 媒体/附件）从气泡里「展开」到
  * 右侧抽屉，便于长消息阅读、复制、以及进一步查看会话工作区文件（文件预览弹窗）。
  *
- * ⚠️ **详情抽屉里不展示思考过程**（2026-09-21 口径）：思考是「生成过程中的中间态」，
- * 平铺进详情既像正文、又和正文重复，只会让用户困惑。收敛范围**仅限本抽屉** ——
- * `ChatPane.vue` 气泡里的折叠块（`.thinking-fold`）与流式阶段的实时思考照常展示。
- * 数据层不删：`ChatMessage.thinking` 仍由 `normalizeMessage` 正常填充，这里只是不渲染；
- * 将来要恢复，模板 + `.detail-drawer__thinking*` 三条样式需一起加回（样式本次已一并删除）。
+ * ⚠️ **详情抽屉里不展示思考过程**（2026-09-21 口径），且**不展示工具过程输出**
+ * （2026-09-23 补：`toolResult` 的原始 stdout 也算「思考过程」，气泡里它就是
+ * 「思考过程 · N 步」折叠块的内容）。这类中间态平铺进详情既像正文、又和正文重复，
+ * 只会让用户困惑（现场：抽屉里冒出 `Successfully wrote 9905 bytes ...` / `pid=10662` / `saved`）。
+ * 收敛范围**仅限本抽屉** —— `ChatPane.vue` 气泡里的折叠块（`.thinking-fold` /
+ * `.chat-activity-group`）与流式阶段的实时思考照常展示。
+ *
+ * 落点在**数据层**：过滤在 `utils/chatTurnGroups.ts:runDetailMessage()` 完成（合成详情消息时
+ * 只拼 `role:"assistant"` 段的正文），所以本组件拿到的 `message.text` 已经只有正文，
+ * 既不用在模板里判 `role`，也不会漏掉任何一条进抽屉的路径。
+ * 数据不删：`ChatMessage.thinking` 仍由 `normalizeMessage` 正常填充，这里只是不渲染；
+ * 将来要恢复，模板 + `.detail-drawer__thinking*` 三条样式需一起加回（样式已删除）。
  *
  * 显隐由父级传入的 `message`（非空 = 展开）驱动：`el-drawer` 的 `model-value`
  * 绑定 `!!message`，关闭动画结束后回调 `close` 事件 → 父级把 message 置 null。
@@ -194,7 +201,8 @@ async function copyFullMessage(): Promise<void> {
     </template>
 
     <div v-if="message" class="detail-drawer__body">
-      <!-- 思考过程**刻意不在此渲染**（理由见文件头）。气泡折叠块 / 流式实时思考不受影响。 -->
+      <!-- 思考过程与工具过程输出**刻意不在此渲染**（过滤在 runDetailMessage，理由见文件头）。
+           气泡折叠块 / 流式实时思考不受影响。 -->
       <MarkdownView :text="message.text" />
 
       <!-- 内嵌图片（助手回复 / 工具结果里的 image 块）。包 <a download>：点击只下载，

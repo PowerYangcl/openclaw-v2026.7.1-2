@@ -14,12 +14,17 @@
  */
 import { defineStore } from "pinia";
 import { computed, ref } from "vue";
-import type { AgentIdentityResult, AgentsListResult, GatewayAgentRow } from "@/api/types";
 import { useGatewayStore } from "@/stores/gateway";
 import { useSettingsStore } from "@/stores/settings";
+import type { AgentIdentityResult, AgentsListResult, GatewayAgentRow } from "@/api/types";
+import {
+  DEFAULT_AGENT_ID,
+  normalizeAgentId,
+  parseAgentSessionKey,
+} from "@/utils/sessionKey";
 import { resolveAgentDisplayName } from "@/utils/avatar";
+import { resolveAgentQuickStart } from "@/utils/quickStart";
 import { resolveSessionDisplayName } from "@/utils/sessionDisplay";
-import { DEFAULT_AGENT_ID, normalizeAgentId, parseAgentSessionKey } from "@/utils/sessionKey";
 import { readSidebarSnapshot, writeSidebarSnapshot } from "@/utils/sidebarSnapshot";
 
 /** agent.identity.get 的返回（缺字段时按可选处理）。 */
@@ -86,9 +91,7 @@ export const useAgentsStore = defineStore("agents", () => {
     const id = selectedAgentId.value;
     return (
       agents.value.find((agent) => normalizeAgentId(agent.id) === id) ??
-      agents.value.find(
-        (agent) => normalizeAgentId(agent.id) === normalizeAgentId(defaultId.value),
-      ) ??
+      agents.value.find((agent) => normalizeAgentId(agent.id) === normalizeAgentId(defaultId.value)) ??
       agents.value[0] ??
       null
     );
@@ -292,9 +295,7 @@ export const useAgentsStore = defineStore("agents", () => {
    */
   async function ensureIdentities(agentIds: Array<string | null | undefined>): Promise<void> {
     const ids = Array.from(
-      new Set(
-        agentIds.map((agentId) => normalizeAgentId(agentId ?? "")).filter((id) => Boolean(id)),
-      ),
+      new Set(agentIds.map((agentId) => normalizeAgentId(agentId ?? "")).filter((id) => Boolean(id))),
     );
     for (let i = 0; i < ids.length; i += IDENTITY_FETCH_CONCURRENCY) {
       const batch = ids.slice(i, i + IDENTITY_FETCH_CONCURRENCY);
@@ -350,6 +351,24 @@ export const useAgentsStore = defineStore("agents", () => {
     return agents.value.find((agent) => normalizeAgentId(agent.id) === id) ?? null;
   }
 
+  /**
+   * 指定 agent 的**快捷开场白**（`agents.list` 行里的 `quickStart`）。
+   *
+   * 数据来源：网关按 agent workspace 里的 `agent-config.json` 的 `quickStart` 注入
+   * （`src/gateway/session-utils.ts:1370 readAgentQuickStart`，调用点 `:1348`）。
+   *
+   * 判定口径全部在 `utils/quickStart.ts` 里（对齐旧版 Lit 界面的
+   * `ui/src/pages/chat/chat-pane.ts:1049 resolveSameAgentQuickStart` +
+   * `ui/src/pages/chat/components/chat-welcome.ts:44 resolveSuggestionTexts`），
+   * 这里只负责**按 id 找到行**并转交 —— 不再自己写过滤逻辑，避免两处口径漂移。
+   *
+   * 按 `agentId` 取而不是读全局选中 agent：拆分视图下每个窗格要用**自己**的 agent
+   * 的开场白（同 `identityForAgent` / `nameForAgent` 的拆分视图口径）。
+   */
+  function quickStartForAgent(agentId: string): string[] | undefined {
+    return resolveAgentQuickStart(agentById(agentId));
+  }
+
   return {
     agents,
     defaultId,
@@ -376,5 +395,6 @@ export const useAgentsStore = defineStore("agents", () => {
     ensureIdentity,
     ensureIdentities,
     agentById,
+    quickStartForAgent,
   };
 });

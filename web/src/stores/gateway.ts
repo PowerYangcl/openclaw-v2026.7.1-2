@@ -129,11 +129,7 @@ export const useGatewayStore = defineStore("gateway", () => {
         }
         consecutiveRetries = 0;
         phase.value = "failed";
-        setError(
-          error?.message ?? `连接失败 (${code}): ${reason}`,
-          error?.code ?? null,
-          error ?? null,
-        );
+        setError(error?.message ?? `连接失败 (${code}): ${reason}`, error?.code ?? null, error ?? null);
         // 清理过期的 token，避免下次自动连接仍用同一个坏 token 死循环
         if (
           detailCode === ConnectErrorDetailCodes.AUTH_TOKEN_MISMATCH ||

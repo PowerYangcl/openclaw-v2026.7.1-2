@@ -21,8 +21,8 @@
 import { defineStore } from "pinia";
 import { computed, ref, watch } from "vue";
 import { deriveDefaultGatewayUrl } from "@/api/gateway";
-import { resolveGatewayHttpBase } from "@/utils/avatar";
 import { getUrlOverrides } from "@/utils/urlOverrides";
+import { resolveGatewayHttpBase } from "@/utils/avatar";
 
 /** 登录态：per-tab（sessionStorage），刷新保留、跨 tab 隔离。 */
 const SESSION_KEY = "openclaw.web.session.v1";

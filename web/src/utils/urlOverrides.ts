@@ -49,8 +49,7 @@ export function sanitizeInternalPath(fullPath: string): string {
     if (queryIndex < 0) return fullPath;
     const pathPart = fullPath.slice(0, queryIndex);
     const hashIndex = fullPath.indexOf("#", queryIndex);
-    const searchPart =
-      hashIndex < 0 ? fullPath.slice(queryIndex + 1) : fullPath.slice(queryIndex + 1, hashIndex);
+    const searchPart = hashIndex < 0 ? fullPath.slice(queryIndex + 1) : fullPath.slice(queryIndex + 1, hashIndex);
     const params = new URLSearchParams(searchPart);
     const changed = stripSensitive(params);
     const search = params.toString();

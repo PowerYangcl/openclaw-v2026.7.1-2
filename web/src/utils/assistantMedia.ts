@@ -150,11 +150,7 @@ export function isLocalMediaSource(source: string): boolean {
  * 这里统一用「先判形态、再绝对化、最后无条件补」。
  */
 function stripTokenForUrl(source: string, base: string, token?: string | null): string {
-  const absolute = base
-    ? source.startsWith("/")
-      ? `${base}${source}`
-      : `${base}/${source}`
-    : source;
+  const absolute = base ? (source.startsWith("/") ? `${base}${source}` : `${base}/${source}`) : source;
   const secret = typeof token === "string" ? token.trim() : "";
   if (!secret) return absolute;
   const sep = absolute.includes("?") ? "&" : "?";

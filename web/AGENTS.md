@@ -20,14 +20,14 @@ It is hosted by the Gateway from `web/dist/` (or `gateway.controlUi.root` if ove
 
 ## Build & dev
 
-| Command            | Purpose                                                                                                        |
-| ------------------ | -------------------------------------------------------------------------------------------------------------- |
-| `pnpm web:install` | Install workspace deps                                                                                         |
+| Command | Purpose |
+|---|---|
+| `pnpm web:install` | Install workspace deps |
 | `pnpm web:dev`     | Vite dev server on `:5273`; proxies `/api/`, `/control-ui-config.json`, `/__openclaw__/*` to `127.0.0.1:18789` |
-| `pnpm web:build`   | Vite production build → `./dist/` (gateway default root)                                                       |
-| `pnpm typecheck`   | `vue-tsc --noEmit` (run as `CODEBUDDY_SAFE_DELETE_ENABLED=0` on this machine)                                  |
-| `pnpm test:unit`   | esbuild + node unit tests                                                                                      |
-| `pnpm test:e2e`    | CDP smoke against live local gateway                                                                           |
+| `pnpm web:build`   | Vite production build → `./dist/` (gateway default root) |
+| `pnpm typecheck`   | `vue-tsc --noEmit` (run as `CODEBUDDY_SAFE_DELETE_ENABLED=0` on this machine) |
+| `pnpm test:unit`   | esbuild + node unit tests |
+| `pnpm test:e2e`    | CDP smoke against live local gateway |
 
 ## Boundaries (do not cross)
 
@@ -37,14 +37,14 @@ It is hosted by the Gateway from `web/dist/` (or `gateway.controlUi.root` if ove
 
 ## Integration contract with the Gateway
 
-| Surface          | URL / path                                                                                                                           | Source of truth                                                    |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------ |
-| Bootstrap config | `${basePath}/control-ui-config.json`                                                                                                 | `src/gateway/control-ui-contract.ts`                               |
-| WS               | `ws(s)://<host>:<port>/` (same-origin upgrade)                                                                                       | `src/gateway/server-http.ts`                                       |
-| Avatar           | `${basePath}/__openclaw__/avatar/<agentId>?token=...`                                                                                | `handleControlUiAvatarRequest`                                     |
-| Assistant media  | `${basePath}/__openclaw__/assistant-media?source=...&mediaTicket=...`                                                                | `handleControlUiAssistantMediaRequest`                             |
-| Device auth      | ed25519-signed `connect.params.auth.deviceToken`                                                                                     | `src/gateway/device-auth.js` (mirrored in `web/src/api/device.ts`) |
-| HTML attrs       | `<html data-openclaw-control-ui-base-path="${basePath}" data-openclaw-terminal-enabled="${bool}">` injected by gateway at serve time | `serveResolvedIndexHtml` in `src/gateway/control-ui.ts`            |
+| Surface | URL / path | Source of truth |
+|---|---|---|
+| Bootstrap config | `${basePath}/control-ui-config.json` | `src/gateway/control-ui-contract.ts` |
+| WS | `ws(s)://<host>:<port>/` (same-origin upgrade) | `src/gateway/server-http.ts` |
+| Avatar | `${basePath}/__openclaw__/avatar/<agentId>?token=...` | `handleControlUiAvatarRequest` |
+| Assistant media | `${basePath}/__openclaw__/assistant-media?source=...&mediaTicket=...` | `handleControlUiAssistantMediaRequest` |
+| Device auth | ed25519-signed `connect.params.auth.deviceToken` | `src/gateway/device-auth.js` (mirrored in `web/src/api/device.ts`) |
+| HTML attrs | `<html data-openclaw-control-ui-base-path="${basePath}" data-openclaw-terminal-enabled="${bool}">` injected by gateway at serve time | `serveResolvedIndexHtml` in `src/gateway/control-ui.ts` |
 
 > When the gateway opens `http://127.0.0.1:18789/` the HTML returned is `web/dist/index.html` with these attributes injected. Read them in `web/index.html` (inline script) **before** Vue mounts to avoid FOUC.
 

@@ -9,8 +9,8 @@
  * 未收录的错误码会退化成「原始 message + 错误码」，不会丢信息。
  */
 
-import type { GatewayErrorInfo } from "@/api/gateway";
 import { ConnectErrorDetailCodes } from "@/api/protocol";
+import type { GatewayErrorInfo } from "@/api/gateway";
 
 export type ConnectErrorAdvice = {
   /** 一句话说清「出了什么事」。 */

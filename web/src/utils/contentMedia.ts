@@ -1,4 +1,3 @@
-import { resolveSafeExternalUrl } from "@/utils/openExternalUrl";
 /**
  * 消息 `content` 数组里的**内嵌媒体块**解析（图片 / 音频附件）。
  *
@@ -43,7 +42,11 @@ import { resolveSafeExternalUrl } from "@/utils/openExternalUrl";
  * 4. **不做 `/api/chat/media/outgoing/` 的 fetch→blob 转换**：该路径由
  *    `buildAssistantMediaUrl` 当「站内托管路径」直接拼网关源 + token 给 `<img src>` 用。
  */
-import { extractTranscriptMediaItems, labelForMediaPath } from "@/utils/transcriptMedia";
+import {
+  extractTranscriptMediaItems,
+  labelForMediaPath,
+} from "@/utils/transcriptMedia";
+import { resolveSafeExternalUrl } from "@/utils/openExternalUrl";
 
 /** 一张可渲染的图片块（`url` 是**原始**引用，渲染前要过 `buildAssistantMediaUrl`）。 */
 export type ContentImageBlock = {
@@ -68,9 +71,7 @@ const DEFAULT_BASE64_AUDIO_MIME = "audio/mpeg";
 
 /** 与旧版 `buildBase64ImageUrl` 逐字一致：已经是 `data:` 就原样用，否则按 MIME 包一层。 */
 export function buildBase64DataUrl(data: string, mediaType?: string): string {
-  return data.startsWith("data:")
-    ? data
-    : `data:${mediaType ?? DEFAULT_BASE64_IMAGE_MIME};base64,${data}`;
+  return data.startsWith("data:") ? data : `data:${mediaType ?? DEFAULT_BASE64_IMAGE_MIME};base64,${data}`;
 }
 
 /** 读 `openclaw_pairing_qr` 块的过期时间（ms）；缺失/非法返回 undefined。 */
@@ -208,11 +209,7 @@ export function extractContentImages(
   return images;
 }
 
-function normalizeAttachmentKind(
-  value: unknown,
-  url: string,
-  mimeType?: string,
-): ContentAttachmentItem["kind"] {
+function normalizeAttachmentKind(value: unknown, url: string, mimeType?: string): ContentAttachmentItem["kind"] {
   if (value === "audio" || value === "video" || value === "document") {
     return value;
   }
@@ -285,10 +282,7 @@ export function extractContentAttachments(message: unknown): ContentAttachmentIt
         append({
           kind: "audio",
           url,
-          label:
-            typeof raw.label === "string" && raw.label.trim()
-              ? raw.label
-              : labelForMediaPath(url) || url,
+          label: typeof raw.label === "string" && raw.label.trim() ? raw.label : labelForMediaPath(url) || url,
           mimeType: mediaType,
         });
       }
@@ -311,7 +305,10 @@ export function extractContentAttachments(message: unknown): ContentAttachmentIt
 }
 
 /** 图片块是否来自「用户上传的附件」（顶层 MediaPaths），用于避免与气泡附件条重复渲染。 */
-export function contentImageIsTranscriptMedia(image: ContentImageBlock, message: unknown): boolean {
+export function contentImageIsTranscriptMedia(
+  image: ContentImageBlock,
+  message: unknown,
+): boolean {
   return extractTranscriptMediaItems(message).some(
     (item) => item.kind === "image" && item.source === image.url,
   );

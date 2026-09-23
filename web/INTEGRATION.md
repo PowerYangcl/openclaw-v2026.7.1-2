@@ -7,18 +7,18 @@
 
 ## What's integrated
 
-| Layer                   | Source                                                                                                          | Status                                                                           |
-| ----------------------- | --------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
-| Build config            | fresh `web/`-local `package.json` + `vite.config.ts` + `tsconfig.json`                                          | ✅ authored                                                                      |
-| Vue 3 SPA source        | `agent-claw-web/src/{api,components,layouts,router,stores,utils,views,App.vue,main.ts,styles}` → `web/src/`     | ✅ copied verbatim                                                               |
-| WS / device auth        | `web/src/api/{gateway,protocol,device,types}.ts`                                                                | ✅ **carried verbatim** per agent-claw-web README's "不要重写" guarantee         |
-| Element Plus native     | `@jdcloud/mobius` → `element-plus` + `@element-plus/icons-vue`                                                  | ✅ 14 file imports swapped                                                       |
-| Router `BASE_URL`       | `createWebHistory(import.meta.env.BASE_URL)`                                                                    | ✅ patched for sub-path deployments                                              |
-| Gateway-injected attrs  | inline boot script reads `<html data-openclaw-control-ui-base-path data-openclaw-terminal-enabled>`             | ✅ mirrored to `window.__OPENCLAW_BASE_PATH__` / `__OPENCLAW_TERMINAL_ENABLED__` |
-| Vite dev proxy          | `/control-ui-config.json`, `/__openclaw__/avatar`, `/__openclaw__/assistant-media`, `/api/` → `127.0.0.1:18789` | ✅ added                                                                         |
-| Env files               | `.env.dev`, `.env.prod`, `.env.pre` (no JD-internal hosts)                                                      | ✅ added                                                                         |
-| Tests                   | `tests/{*.test.ts,smoke/*.e2e.mjs}`                                                                             | ✅ copied                                                                        |
-| Tailwind + style tokens | `tailwindcss@4` + Element Plus dark `css-vars.css`                                                              | ✅ swapped from Mobius tailwind theme                                            |
+| Layer | Source | Status |
+|---|---|---|
+| Build config | fresh `web/`-local `package.json` + `vite.config.ts` + `tsconfig.json` | ✅ authored |
+| Vue 3 SPA source | `agent-claw-web/src/{api,components,layouts,router,stores,utils,views,App.vue,main.ts,styles}` → `web/src/` | ✅ copied verbatim |
+| WS / device auth | `web/src/api/{gateway,protocol,device,types}.ts` | ✅ **carried verbatim** per agent-claw-web README's "不要重写" guarantee |
+| Element Plus native | `@jdcloud/mobius` → `element-plus` + `@element-plus/icons-vue` | ✅ 14 file imports swapped |
+| Router `BASE_URL` | `createWebHistory(import.meta.env.BASE_URL)` | ✅ patched for sub-path deployments |
+| Gateway-injected attrs | inline boot script reads `<html data-openclaw-control-ui-base-path data-openclaw-terminal-enabled>` | ✅ mirrored to `window.__OPENCLAW_BASE_PATH__` / `__OPENCLAW_TERMINAL_ENABLED__` |
+| Vite dev proxy | `/control-ui-config.json`, `/__openclaw__/avatar`, `/__openclaw__/assistant-media`, `/api/` → `127.0.0.1:18789` | ✅ added |
+| Env files | `.env.dev`, `.env.prod`, `.env.pre` (no JD-internal hosts) | ✅ added |
+| Tests | `tests/{*.test.ts,smoke/*.e2e.mjs}` | ✅ copied |
+| Tailwind + style tokens | `tailwindcss@4` + Element Plus dark `css-vars.css` | ✅ swapped from Mobius tailwind theme |
 
 ## What the source already wires (and why integration is a drop-in)
 
@@ -28,7 +28,7 @@ The agent-claw-web source was authored to mirror the **exact Gateway contract** 
 - Ed25519 device-identity (`@noble/ed25519` 3.1.0) handshake via `@/api/device.ts`.
 - `clientName = "openclaw-control-ui"`, `mode = "webchat"` — matches `ui/src/app/gateway-store.ts:116-118`.
 - HTTP fallback for `/avatar/<agentId>` and `/__openclaw__/assistant-media` (5-min HMAC ticket) matches `src/gateway/control-ui.ts:580-744`.
-- Bootstrap config is fetched _only_ by `control-ui-config.json` — no equivalent is needed because Vite proxies it in dev and the Gateway serves it from `web/dist/control-ui-config.json` if the user adds it later.
+- Bootstrap config is fetched *only* by `control-ui-config.json` — no equivalent is needed because Vite proxies it in dev and the Gateway serves it from `web/dist/control-ui-config.json` if the user adds it later.
 
 ## Build & verify (last run)
 
@@ -67,23 +67,23 @@ CDP smoke (auth)          → token injected into sessionStorage,
 
 `ui/` declares **22 first-level routes** + terminal (ghostty-web) + workboard + config-form schema renderer (see `web/AGENTS.md` and `docs/web/web-replacement-plan.md`). The Vue 3 port currently ships a **subset** that matches the agent-claw-web footprint:
 
-| Legacy route                                                                                                                                                                                                  | Vue 3 web/                  | Notes                                                                                                                                                                                                              |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `/login`                                                                                                                                                                                                      | ✅ `views/LoginView.vue`    | full URL-token + password login                                                                                                                                                                                    |
-| `/overview`                                                                                                                                                                                                   | ✅ `views/OverviewView.vue` | stats cards + health snapshot                                                                                                                                                                                      |
-| `/chat`                                                                                                                                                                                                       | ✅ `views/ChatView.vue`     | streaming chat + markdown + sidebar + audio + voice (3.4k lines)                                                                                                                                                   |
-| `/sessions`                                                                                                                                                                                                   | ✅ `views/SessionsView.vue` | list / archive / delete                                                                                                                                                                                            |
-| `/channels`                                                                                                                                                                                                   | ✅ `views/ChannelsView.vue` | status grid                                                                                                                                                                                                        |
-| `/agents`                                                                                                                                                                                                     | ✅ `views/AgentsView.vue`   | agents list                                                                                                                                                                                                        |
-| `/skills`                                                                                                                                                                                                     | ✅ `views/SkillsView.vue`   | skill status + missing-deps                                                                                                                                                                                        |
-| `/cron`                                                                                                                                                                                                       | ✅ `views/CronView.vue`     | scheduled jobs CRUD                                                                                                                                                                                                |
-| `/usage`                                                                                                                                                                                                      | ✅ `views/UsageView.vue`    | token + cost dashboard                                                                                                                                                                                             |
-| `/logs`                                                                                                                                                                                                       | ✅ `views/LogsView.vue`     | live event stream                                                                                                                                                                                                  |
-| `/config`                                                                                                                                                                                                     | ✅ `views/ConfigView.vue`   | raw JSON viewer                                                                                                                                                                                                    |
-| `/config/{general,appearance,...}`                                                                                                                                                                            | ❌                          | not ported (no schema-form renderer yet)                                                                                                                                                                           |
-| `/workboard`, `/instances`, `/nodes`, `/tasks`, `/plugin`, `/dreams`, `/mcp`, `/infrastructure`, `/automation`, `/ai-agents`, `/communications`, `/debug`, `/worktrees`, `/activity`, `/instances`, `/plugin` | ❌                          | each must be ported per-PR per the migration plan                                                                                                                                                                  |
-| Terminal (`?view=terminal`, ghostty-web)                                                                                                                                                                      | ❌                          | per `web/AGENTS.md`, port lives in `web/src/components/terminal/` and will mirror `ui/src/components/terminal/`; deps `@openclaw/libterminal` + `ghostty-web` NOT in package.json yet — bring them in when porting |
-| i18n                                                                                                                                                                                                          | ❌ deferred                 | `ui/src/i18n/` keeps running until vue-i18n lands (decision 1 in `docs/web/web-replacement-plan.md`)                                                                                                               |
+| Legacy route | Vue 3 web/ | Notes |
+|---|---|---|
+| `/login` | ✅ `views/LoginView.vue` | full URL-token + password login |
+| `/overview` | ✅ `views/OverviewView.vue` | stats cards + health snapshot |
+| `/chat` | ✅ `views/ChatView.vue` | streaming chat + markdown + sidebar + audio + voice (3.4k lines) |
+| `/sessions` | ✅ `views/SessionsView.vue` | list / archive / delete |
+| `/channels` | ✅ `views/ChannelsView.vue` | status grid |
+| `/agents` | ✅ `views/AgentsView.vue` | agents list |
+| `/skills` | ✅ `views/SkillsView.vue` | skill status + missing-deps |
+| `/cron` | ✅ `views/CronView.vue` | scheduled jobs CRUD |
+| `/usage` | ✅ `views/UsageView.vue` | token + cost dashboard |
+| `/logs` | ✅ `views/LogsView.vue` | live event stream |
+| `/config` | ✅ `views/ConfigView.vue` | raw JSON viewer |
+| `/config/{general,appearance,...}` | ❌ | not ported (no schema-form renderer yet) |
+| `/workboard`, `/instances`, `/nodes`, `/tasks`, `/plugin`, `/dreams`, `/mcp`, `/infrastructure`, `/automation`, `/ai-agents`, `/communications`, `/debug`, `/worktrees`, `/activity`, `/instances`, `/plugin` | ❌ | each must be ported per-PR per the migration plan |
+| Terminal (`?view=terminal`, ghostty-web) | ❌ | per `web/AGENTS.md`, port lives in `web/src/components/terminal/` and will mirror `ui/src/components/terminal/`; deps `@openclaw/libterminal` + `ghostty-web` NOT in package.json yet — bring them in when porting |
+| i18n | ❌ deferred | `ui/src/i18n/` keeps running until vue-i18n lands (decision 1 in `docs/web/web-replacement-plan.md`) |
 
 **Deferred decisions** (`docs/web/web-replacement-plan.md` §3.6 + `web/README.md`):
 

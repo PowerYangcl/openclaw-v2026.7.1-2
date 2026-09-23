@@ -1,0 +1,9 @@
+{
+  "id": "v20260923094001",
+  "description": "不重启gateway版本",
+  "gateway": "",
+  "cmd": "",
+  "zip": {
+    "dist.zip": "/app/web/dist"
+  }
+}

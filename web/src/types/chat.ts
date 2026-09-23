@@ -7,8 +7,8 @@
  */
 
 import type { ChatAttachment } from "@/utils/chatAttachments";
-import type { ContentAttachmentItem, ContentImageBlock } from "@/utils/contentMedia";
 import type { TranscriptMediaItem } from "@/utils/transcriptMedia";
+import type { ContentAttachmentItem, ContentImageBlock } from "@/utils/contentMedia";
 
 export type ChatRole = "user" | "assistant" | "system" | "tool" | "toolResult";
 
@@ -38,12 +38,7 @@ export type TokenUsage = {
  * - `idempotencyKey`：用户消息
  * - `derived`：以上都没有，只能用本地派生的稳定键兜底
  */
-export type MessageIdSource =
-  | "responseId"
-  | "transcriptId"
-  | "recordId"
-  | "idempotencyKey"
-  | "derived";
+export type MessageIdSource = "responseId" | "transcriptId" | "recordId" | "idempotencyKey" | "derived";
 
 export type ChatMessage = {
   id: string;

@@ -252,9 +252,7 @@ export function buildSidebarSessionRows(params: {
   // 至少让当前会话可见。首屏（`allowSyntheticRows === false`）跳过 ——
   // 否则这个「至少一行」会被当成完整菜单。
   const current =
-    params.allowSyntheticRows === false
-      ? ""
-      : (normalizeOptionalString(params.currentSessionKey) ?? "");
+    params.allowSyntheticRows === false ? "" : (normalizeOptionalString(params.currentSessionKey) ?? "");
   if (current && !rows.some((row) => sessionKeysMatch(row.key, current, params.defaultAgentId))) {
     const currentAgentId = resolveAgentIdFromSessionKey(current);
     const agentAlreadyCovered = rows.some(

@@ -293,7 +293,9 @@ export function dataImageClipboardFile(dataUrl: string): { file: File; dataUrl: 
 }
 
 /** 收集剪贴板事件里的图片附件（保序返回 File 列表）。 */
-export function chatAttachmentFilesFromClipboard(clipboardData: DataTransfer | null): File[] {
+export function chatAttachmentFilesFromClipboard(
+  clipboardData: DataTransfer | null,
+): File[] {
   const items = clipboardData?.items;
   if (items) {
     const files: File[] = [];

@@ -1,5 +1,8 @@
 node_modules/
 dist/
+release/
+# 发布面板的本地配置（会填真实服务器地址，默认值见 scripts/deploy-lib.mjs 的 DEFAULT_CONFIG）
+deploy.config.json
 .DS_Store
 *.log
 .vite/

@@ -24,6 +24,11 @@
  * 2. **整行只有 `MEDIA:` 时，该行整行消失**（不留空行）——「文本保真 + 媒体提到卡片位」；
  * 3. **非法但明显是本地路径的 `MEDIA:` 行整行丢弃**，绝不当可见文本泄漏
  *    （上游注释：internal tools like TTS 的绝对路径不该出现在气泡里）。
+ * 4. **整行被一对反引号包住的 `MEDIA:` 行仍按投递处理**（`codeSpanWrappedMediaLine`）——
+ *    模型经常把指令整行写进「行内代码」：`` `MEDIA:/root/x.docx` ``。上游与「行内 code span
+ *    里的 `MEDIA:` 是讲解举例」那条规则会把这种行当示例放过 ⇒ **附件卡片消失、正文里还留着
+ *    一行 `MEDIA:` 脏文本**（预发实测正是这样）。判据收紧到「整行只有这一对反引号 +
+ *    去壳后能解析出至少一条可渲染引用」，正文中段出现的 `` `MEDIA:/x.mp3` `` 举例不受影响。
  *
  * ## 与上游的取舍（都是「让客户端实现更薄」，不是行为差异）
  * 1. **不做 `meta=1` 可用性探测 + blocked 卡片**：上游会先探测本地文件是否在允许目录内，
@@ -38,11 +43,7 @@
  *    客户端红线其实由 `utils/openExternalUrl.ts` 兜底（http/https/blob，`data:` 仅图片），
  *    这里只是不放过上游明确拒绝的形态。
  */
-import {
-  labelForMediaPath,
-  transcriptMediaKind,
-  type TranscriptMediaKind,
-} from "@/utils/transcriptMedia";
+import { labelForMediaPath, transcriptMediaKind, type TranscriptMediaKind } from "@/utils/transcriptMedia";
 
 /** 旧版 `src/media/parse.ts` 的同名正则：捕获 `MEDIA:` 后面的整段（可含反引号包裹）。 */
 export const MEDIA_TOKEN_RE = /\bMEDIA:\s*`?([^\n]+)`?/gi;
@@ -107,20 +108,38 @@ const MIME_BY_EXT: Record<string, string> = {
   zip: "application/zip",
   html: "text/html",
   htm: "text/html",
+  // Office 产物。⚠️ 以前这张表没有它们，直接后果是**卡片上的 mimeType 为空**
+  // （`inferMediaAttachment` 取不到 → 下游只能靠扩展名兜底），而且
+  // `RELATIVE_ARTIFACT_EXT_RE` 同步缺失 ⇒ 助手按相对路径交付
+  // `MEDIA:备考计划.docx` 时既不产卡片、正文里还留一行 `MEDIA:`。
+  // 预发截图里丢按钮的正是 docx / xlsx 这两类。
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  doc: "application/msword",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  xls: "application/vnd.ms-excel",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ppt: "application/vnd.ms-powerpoint",
+  odt: "application/vnd.oasis.opendocument.text",
+  ods: "application/vnd.oasis.opendocument.spreadsheet",
+  odp: "application/vnd.oasis.opendocument.presentation",
+  rtf: "application/rtf",
 };
 
 /**
- * 扩展名明确属于「产物」的**相对引用**（`./lobster-invaders.html`、`report.pdf`）。
+ * 扩展名明确属于「产物」的**相对引用**（`./lobster-invaders.html`、`report.docx`）。
  *
  * ⚠️ 与上游的刻意差异：上游把相对引用原样留在正文里（`isRenderableMediaReference`
- * 返回 false）。但 HTML / 小游戏这类产物，助手是按 prompt 给的**相对路径**交付的
- * （`MEDIA:./x.html`），而 `chat.history` 里网关往往已把它规范成 workspace 绝对路径
- * ⇒ 首次返回判为「不可渲染」⇒ 没有卡片、正文还多一行 `MEDIA:./x.html`；刷新后却
- * 变成绝对路径、卡片出现了 —— 正是「下载入口要刷新才出现」。
+ * 返回 false）。但 HTML / 小游戏 / 办公文档这类产物，助手是按 prompt 给的**相对路径**
+ * 交付的（`MEDIA:./x.html`、`MEDIA:备考计划.docx`），而 `chat.history` 里网关往往已把
+ * 它规范成 workspace 绝对路径 ⇒ 首次返回判为「不可渲染」⇒ 没有卡片、正文还多一行
+ * `MEDIA:./x.html`；刷新后却变成绝对路径、卡片出现了 —— 正是「下载入口要刷新才出现」。
  * 因此：扩展名明确属于产物时放行成卡片，其余相对引用仍按上游保留原文。
+ *
+ * ⚠️ 这份清单必须与 `MIME_BY_EXT` 的键**同步扩展**：两边缺一个，对应格式的
+ * 相对交付就退化成「没有卡片 + 正文残留 `MEDIA:`」（docx / xlsx 曾经就是这样）。
  */
 const RELATIVE_ARTIFACT_EXT_RE =
-  /\.(?:html?|pdf|md|csv|json|zip|txt|png|jpe?g|gif|webp|svg|avif|heic|heif|bmp|mp3|wav|m4a|aac|ogg|oga|opus|flac|mp4|webm|mov|m4v)$/i;
+  /\.(?:html?|pdf|md|csv|json|zip|txt|png|jpe?g|gif|webp|svg|avif|heic|heif|bmp|mp3|wav|m4a|m2a|aac|ogg|oga|opus|flac|mp4|webm|mov|m4v|docx?|xlsx?|pptx?|od[stp]|rtf)$/i;
 
 // ---------------------------------------------------------------------------
 // 引用形态判定
@@ -245,9 +264,7 @@ function isBlockedIpv6Literal(host: string): boolean {
   if (hexMapped) {
     const hi = Number.parseInt(hexMapped[1]!, 16);
     const lo = Number.parseInt(hexMapped[2]!, 16);
-    return isBlockedIpv4Literal(
-      [(hi >> 8) & 0xff, hi & 0xff, (lo >> 8) & 0xff, lo & 0xff].join("."),
-    );
+    return isBlockedIpv4Literal([(hi >> 8) & 0xff, hi & 0xff, (lo >> 8) & 0xff, lo & 0xff].join("."));
   }
   return false;
 }
@@ -311,11 +328,7 @@ function isValidMedia(
   // agent workspace 解析 `source` 的，取得到字节。
   // ⚠️ 只在「不会拆成碎片」时放行（见 splitMediaMarkers 的 mediaOpts）：含空格的
   // 本地路径要靠「回退 1」把碎片合成整条，提前放行片段会把 `test image.png` 拆成两个文件。
-  if (
-    opts?.allowArtifactFilename &&
-    !SCHEME_RE.test(candidate) &&
-    RELATIVE_ARTIFACT_EXT_RE.test(candidate)
-  ) {
+  if (opts?.allowArtifactFilename && !SCHEME_RE.test(candidate) && RELATIVE_ARTIFACT_EXT_RE.test(candidate)) {
     return true;
   }
   if (opts?.allowBareFilename && !SCHEME_RE.test(candidate) && HAS_FILE_EXT.test(candidate)) {
@@ -444,6 +457,40 @@ function hasFileExtensionTail(candidate: string): boolean {
   return /\.[A-Za-z0-9]{1,8}$/.test(fileName);
 }
 
+/**
+ * 整行恰好被**一对**反引号包住时返回内部文本（否则 `null`）。
+ *
+ * 只认单反引号（`` `` `` 是双反引号代码，保守不动），且内部不允许再出现反引号 ——
+ * 出现即说明这一行不是一个完整的 code span（如 `` `a` 和 `b` ``），不参与判定。
+ */
+function unwrapWholeLineCodeSpan(line: string): string | null {
+  const trimmed = line.trim();
+  if (trimmed.length < 3) return null;
+  if (!trimmed.startsWith("`") || !trimmed.endsWith("`")) return null;
+  if (trimmed.startsWith("``") || trimmed.endsWith("``")) return null;
+  const inner = trimmed.slice(1, -1);
+  if (inner.includes("`")) return null;
+  return inner;
+}
+
+/**
+ * 整行 code span 里的 `MEDIA:` 是否属于**投递**（而非正文里的讲解举例）。
+ *
+ * 判据（两道，缺一不可）：
+ * 1. 去掉包裹反引号后，该行以 `MEDIA:` 开头；
+ * 2. 去壳后的整行能被 `splitMediaMarkers` 解析出**至少一条可渲染引用**。
+ *
+ * 第 2 条是递归调用（去壳后的行不含反引号，必然终止）—— 它把「路径是否合法、是否可渲染」
+ * 这套既有规则原样复用，避免在这里再写一份判定。命中则返回去壳文本，调用方按行首
+ * `MEDIA:` 常规路径解析；未命中返回 `null`，该行**原样保留**（举例文本不受任何影响）。
+ */
+function codeSpanWrappedMediaLine(line: string): string | null {
+  const inner = unwrapWholeLineCodeSpan(line);
+  if (!inner) return null;
+  if (!inner.trimStart().toUpperCase().startsWith("MEDIA:")) return null;
+  return splitMediaMarkers(inner).media.length > 0 ? inner : null;
+}
+
 function splitInlineMediaReference(line: string): { prefix: string; reference: string } | null {
   const matches = Array.from(line.matchAll(MEDIA_TOKEN_RE));
   if (matches.length !== 1) return null;
@@ -456,7 +503,7 @@ function splitInlineMediaReference(line: string): { prefix: string; reference: s
   // **行内代码**（围栏 ``` 在主循环更前面就拦掉了，这里只剩单个反引号对），里面的路径是
   // 举例、不是投递，解成卡片会凭空多一个指向不存在文件的幽灵卡片。判据：`MEDIA:` 之前
   // 出现**奇数个**反引号 ⇒ 当前位置在 code span 内部。
-  if ((prefix.match(/`/g)?.length ?? 0) % 2 === 1) return null;
+  if (((prefix.match(/`/g)?.length ?? 0) % 2) === 1) return null;
 
   const payload = match[1] ?? "";
   const unwrapped = unwrapQuoted(payload);
@@ -509,10 +556,13 @@ export function splitMediaMarkers(text: unknown): MediaMarkerSplit {
       keptLines.push(line);
       continue;
     }
+    // ①.5 整行被一对反引号包住的 `MEDIA:` 行（`` `MEDIA:/x.docx` ``）—— 当投递处理，
+    // 见 codeSpanWrappedMediaLine。命中去壳文本，后面完全按行首 `MEDIA:` 走。
+    const effectiveLine = codeSpanWrappedMediaLine(line) ?? line;
     // ② 行内 `MEDIA:`（`- **PDF 版**：MEDIA:/x.pdf`）—— 上游只认行首，客户端放宽一档。
     // 见 splitInlineMediaReference：只在「整段就是一条引用」时才吃，不猜边界。
-    if (!line.trimStart().toUpperCase().startsWith("MEDIA:")) {
-      const inline = splitInlineMediaReference(line);
+    if (!effectiveLine.trimStart().toUpperCase().startsWith("MEDIA:")) {
+      const inline = splitInlineMediaReference(effectiveLine);
       if (!inline) {
         keptLines.push(line);
         continue;
@@ -525,9 +575,9 @@ export function splitMediaMarkers(text: unknown): MediaMarkerSplit {
       continue;
     }
 
-    const matches = Array.from(line.matchAll(MEDIA_TOKEN_RE));
+    const matches = Array.from(effectiveLine.matchAll(MEDIA_TOKEN_RE));
     if (matches.length === 0) {
-      keptLines.push(line);
+      keptLines.push(effectiveLine);
       continue;
     }
 
@@ -535,7 +585,7 @@ export function splitMediaMarkers(text: unknown): MediaMarkerSplit {
     let cursor = 0;
     for (const match of matches) {
       const start = match.index ?? 0;
-      pieces.push(line.slice(cursor, start));
+      pieces.push(effectiveLine.slice(cursor, start));
 
       const payload = match[1] ?? "";
       const unwrapped = unwrapQuoted(payload);
@@ -610,7 +660,7 @@ export function splitMediaMarkers(text: unknown): MediaMarkerSplit {
       cursor = start + match[0].length;
     }
 
-    pieces.push(line.slice(cursor));
+    pieces.push(effectiveLine.slice(cursor));
     const cleanedLine = cleanLineText(pieces.join(""));
     // ② 整行只剩 `MEDIA:` ⇒ 该行整行消失
     if (cleanedLine) keptLines.push(cleanedLine);

@@ -25,9 +25,18 @@
  */
 
 /**
+ * 全量导出的单页条数（`chat.history` 的 `limit`）。
+ *
+ * ⚠️ 与视图的 `CHAT_HISTORY_PAGE_SIZE`(100) **刻意分开**：导出是「一次性拿全」，
+ * 页小只会把往返次数和 `FULL_EXPORT_MAX_PAGES` 闸门一起放大（100 条/页时 50 页只覆盖
+ * 5000 条，长会话会被 max-pages 提前截断）。500 条/页是实测拐点（814KB / 107ms）。
+ */
+export const FULL_EXPORT_PAGE_SIZE = 500;
+
+/**
  * 全量导出最多翻多少页。
  *
- * 50 页 × `CHAT_HISTORY_PAGE_SIZE`(500) = 25000 条，远超真实会话长度；它纯粹是
+ * 50 页 × `FULL_EXPORT_PAGE_SIZE`(500) = 25000 条，远超真实会话长度；它纯粹是
  * 「网关给了不推进的游标」时的兜底 —— 没有这道闸，导出会变成一个用户看不见的
  * 无限请求循环（比导不出来糟得多）。
  */
@@ -187,10 +196,7 @@ export function describeFullExportStop(reason: FullExportStopReason): string | n
  * 助手名来自网关配置 / 会话标题，未必是纯文本（可能含 `/`、`:`、换行），
  * 直接拼进 `download` 会让文件落到意外的目录或直接失败。
  */
-export function safeFilenameSegment(
-  raw: string | null | undefined,
-  fallback = "assistant",
-): string {
+export function safeFilenameSegment(raw: string | null | undefined, fallback = "assistant"): string {
   const text = typeof raw === "string" ? raw.trim() : "";
   const cleaned = text
     // 控制字符 + Windows/macOS 非法字符 + 路径分隔符
@@ -207,7 +213,10 @@ export function safeFilenameSegment(
  *
  * 时间戳由调用方注入（而不是内部 `Date.now()`），以保证可单测。
  */
-export function fullExportFilename(assistantName: string | null | undefined, now: number): string {
+export function fullExportFilename(
+  assistantName: string | null | undefined,
+  now: number,
+): string {
   const name = safeFilenameSegment(assistantName);
   const stamp = Number.isFinite(now) ? Math.floor(now) : Date.now();
   return `chat-${name}-${stamp}.md`;

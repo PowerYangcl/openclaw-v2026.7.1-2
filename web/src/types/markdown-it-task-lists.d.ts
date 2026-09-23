@@ -8,6 +8,9 @@ declare module "markdown-it-task-lists" {
     label?: boolean;
     labelAfter?: boolean;
   }
-  const plugin: (md: MarkdownIt, options?: TaskListsOptions) => void;
+  const plugin: (
+    md: MarkdownIt,
+    options?: TaskListsOptions,
+  ) => void;
   export default plugin;
 }

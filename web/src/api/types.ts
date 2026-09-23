@@ -137,14 +137,7 @@ export type CronSchedule =
 export type CronPayload =
   | { kind: "systemEvent"; text: string }
   | { kind: "command"; argv: string[]; cwd?: string; timeoutSeconds?: number }
-  | {
-      kind: "agentTurn";
-      message: string;
-      model?: string;
-      deliver?: boolean;
-      channel?: string;
-      to?: string;
-    };
+  | { kind: "agentTurn"; message: string; model?: string; deliver?: boolean; channel?: string; to?: string };
 
 export type CronJobState = {
   nextRunAtMs?: number;
@@ -224,6 +217,16 @@ export type GatewayAgentIdentity = {
   emoji?: string;
   avatar?: string;
   avatarUrl?: string;
+  /**
+   * 快捷开场白（**协议在 identity 上也声明了这个字段**：
+   * `src/shared/session-types.ts:9`，与行级的 `:44` 同源）。
+   *
+   * 当前网关版本把值注入在 **行级** `GatewayAgentRow.quickStart` 上
+   * （`src/gateway/session-utils.ts:1348`），所以这个位置通常为空；声明它是为了
+   * 不丢「网关改为收敛进 identity」这一演进路径上的配置
+   * （解析统一走 `utils/quickStart.ts:resolveAgentQuickStart`，两处都会读）。
+   */
+  quickStart?: string[];
 };
 
 export type GatewayAgentRow = {
@@ -237,6 +240,19 @@ export type GatewayAgentRow = {
   identity?: GatewayAgentIdentity;
   workspace?: string;
   model?: { primary?: string; fallbacks?: string[] };
+  /**
+   * 该 agent 的**快捷开场白**（可为空数组 / 缺省）。
+   *
+   * 网关 `agents.list` 会带上它 —— 读的是该 agent workspace 里
+   * `agent-config.json` 的 `quickStart` 数组
+   * （`src/gateway/session-utils.ts:1370 readAgentQuickStart`，调用点 `:1348`），例如
+   * `workspace-cet4/agent-config.json`。旧版 Lit 界面用它替换空会话的默认推荐
+   * （`ui/src/pages/chat/components/chat-welcome.ts:44 resolveSuggestionTexts`）。
+   *
+   * 解析统一走 `utils/quickStart.ts:resolveAgentQuickStart`（行级优先，
+   * identity 级兜底），不要在别处重复判定。
+   */
+  quickStart?: string[];
 };
 
 export type AgentsListResult = {

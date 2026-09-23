@@ -85,10 +85,9 @@ export function readAgentLifecyclePhase(payload: unknown): AgentLifecyclePhase |
  * `finishing` 同样不认：它是 with-in run 的收尾前哨（`agent-lifecycle-terminal.ts:67`），
  * 之后还可能再产出内容。
  */
-export function isReplyFinishedAgentEvent(evt: {
-  event?: unknown;
-  payload?: unknown;
-}): evt is { event: "agent"; payload: AgentLifecycleEventPayload } {
+export function isReplyFinishedAgentEvent(
+  evt: { event?: unknown; payload?: unknown },
+): evt is { event: "agent"; payload: AgentLifecycleEventPayload } {
   if (evt.event !== "agent") return false;
   if (readAgentLifecyclePhase(evt.payload) !== "end") return false;
   return true;

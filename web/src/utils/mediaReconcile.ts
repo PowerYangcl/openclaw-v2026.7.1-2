@@ -18,8 +18,8 @@
  * 就是当前这一轮」抽成纯函数，好在单测里钉住（组件里的编排不在测试中）。
  */
 
-import type { ContentAttachmentItem, ContentImageBlock } from "@/utils/contentMedia";
 import type { TranscriptMediaItem } from "@/utils/transcriptMedia";
+import type { ContentAttachmentItem, ContentImageBlock } from "@/utils/contentMedia";
 
 /** 只需要「身份 + 媒体位」字段的消息视图（`ChatMessage` 的结构子集，便于单测构造）。 */
 export type MediaAwareMessage = {

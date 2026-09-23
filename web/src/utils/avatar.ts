@@ -30,16 +30,13 @@ type AgentLike = {
   };
 };
 
-type AgentIdentityLike =
-  | {
-      name?: string;
-      avatar?: string;
-      emoji?: string;
-      /** `agent.identity.get` 返回：`local` 表示头像由网关托管的本地文件提供。 */
-      avatarStatus?: string;
-    }
-  | null
-  | undefined;
+type AgentIdentityLike = {
+  name?: string;
+  avatar?: string;
+  emoji?: string;
+  /** `agent.identity.get` 返回：`local` 表示头像由网关托管的本地文件提供。 */
+  avatarStatus?: string;
+} | null | undefined;
 
 export function isRenderableControlUiAvatarUrl(value: string): boolean {
   return CONTROL_UI_AVATAR_URL_RE.test(value);
@@ -191,9 +188,12 @@ export function resolveAgentAvatarValue(
 }
 
 /** agent 图片头像的归因状态（`agent.identity.get` 的 `avatarStatus`）。 */
-export function resolveAgentAvatarStatus(agentIdentity?: AgentIdentityLike): string | null {
-  const status =
-    typeof agentIdentity?.avatarStatus === "string" ? agentIdentity.avatarStatus.trim() : "";
+export function resolveAgentAvatarStatus(
+  agentIdentity?: AgentIdentityLike,
+): string | null {
+  const status = typeof agentIdentity?.avatarStatus === "string"
+    ? agentIdentity.avatarStatus.trim()
+    : "";
   return status || null;
 }
 
@@ -203,7 +203,10 @@ export function resolveAgentAvatarStatus(agentIdentity?: AgentIdentityLike): str
  *
  * 注意：**不要**给远端 URL 补 token —— 那会把网关凭据泄露给第三方。
  */
-export function withChatAvatarToken(url: string, token: string | null | undefined): string {
+export function withChatAvatarToken(
+  url: string,
+  token: string | null | undefined,
+): string {
   const value = typeof url === "string" ? url.trim() : "";
   if (!value) return value;
   const secret = typeof token === "string" ? token.trim() : "";
@@ -277,12 +280,7 @@ export function resolveGatewayHttpBase(
   // 只在**同源**时升级 —— 跨源明文网关是用户显式指定的，升级会直接连不上；
   // 而同源却降级成 http，只可能是网关地址里写死了 ws://（登录页手输 / 入口链接带入）。
   const page = parsePageOrigin(pageHref ?? defaultPageHref());
-  if (
-    httpScheme === "http" &&
-    page &&
-    page.protocol === "https:" &&
-    sameHostname(host, page.host)
-  ) {
+  if (httpScheme === "http" && page && page.protocol === "https:" && sameHostname(host, page.host)) {
     httpScheme = "https";
     // 未显式给端口或给的是 80：直接用页面 origin（TLS 终止在 LB 上时端口就是 443）。
     // 显式给了非 80 端口（如 18789）说明网关就在这个端口上，保留。
@@ -303,9 +301,7 @@ function defaultPageHref(): string | null {
 }
 
 /** 取页面的协议与 host（含端口）；无法解析时返回 null。 */
-function parsePageOrigin(
-  href: string | null | undefined,
-): { protocol: string; host: string } | null {
+function parsePageOrigin(href: string | null | undefined): { protocol: string; host: string } | null {
   const value = typeof href === "string" ? href.trim() : "";
   if (!value) return null;
   try {
@@ -334,7 +330,7 @@ function portOfHost(host: string): string {
     return end >= 0 && value[end + 1] === ":" ? value.slice(end + 2) : "";
   }
   const parts = value.split(":");
-  return parts.length === 2 ? (parts[1] ?? "") : "";
+  return parts.length === 2 ? parts[1] ?? "" : "";
 }
 
 function sameHostname(a: string, b: string): boolean {
@@ -348,7 +344,10 @@ function sameHostname(a: string, b: string): boolean {
  * - 已经是 `http(s)://` 的原样返回；
  * - `base` 为空时返回原路径（兜底：同源部署下也能工作）。
  */
-export function resolveGatewayAssetUrl(base: string | null | undefined, path: string): string {
+export function resolveGatewayAssetUrl(
+  base: string | null | undefined,
+  path: string,
+): string {
   const value = typeof path === "string" ? path.trim() : "";
   if (!value) return "";
   if (/^https?:\/\//i.test(value) || value.startsWith("data:") || value.startsWith("blob:")) {

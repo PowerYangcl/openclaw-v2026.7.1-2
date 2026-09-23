@@ -38,9 +38,9 @@
  * —— 判定逻辑在 `planPendingTaskBucketChange`，纯函数、有单测。
  */
 
-import type { ChatAttachment } from "@/utils/chatAttachments";
-import { normalizeOptionalString } from "@/utils/sessionKey";
 import { qualifySessionKey } from "@/utils/sessionListSelection";
+import { normalizeOptionalString } from "@/utils/sessionKey";
+import type { ChatAttachment } from "@/utils/chatAttachments";
 
 /** 队列项。 */
 export type PendingTask = {
@@ -100,10 +100,7 @@ export function normalizePendingTasks(value: unknown): PendingTask[] {
     const record = item as Partial<PendingTask>;
     const text = typeof record.text === "string" ? record.text : "";
     if (!text.trim()) continue;
-    const id =
-      typeof record.id === "string" && record.id.trim()
-        ? record.id
-        : `pending-restored-${out.length}`;
+    const id = typeof record.id === "string" && record.id.trim() ? record.id : `pending-restored-${out.length}`;
     out.push({
       id,
       text,
@@ -267,10 +264,7 @@ export function planPendingTaskBucketChange(params: {
 let pendingTaskSeed = 0;
 
 /** 造一个新队列项（id 稳定且同页唯一）。 */
-export function createPendingTask(
-  text: string,
-  attachments?: readonly ChatAttachment[],
-): PendingTask {
+export function createPendingTask(text: string, attachments?: readonly ChatAttachment[]): PendingTask {
   pendingTaskSeed += 1;
   return {
     id: `pending-${Date.now()}-${pendingTaskSeed}`,

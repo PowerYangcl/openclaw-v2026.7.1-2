@@ -74,11 +74,18 @@ import {
   writePendingTasks,
   type PendingTask,
 } from "@/utils/pendingTaskQueue";
-import { saveUrlViaBlob, shouldSaveViaBlob } from "@/utils/downloadSave";
+import {
+  describeDownloadFailure,
+  isNativeDownloadAnchor,
+  saveUrlViaBlob,
+  saveUrlViaNativeAnchor,
+  shouldSaveViaBlob,
+} from "@/utils/downloadSave";
 import { exportChatMarkdown } from "@/utils/exportChat";
 import {
   FULL_EXPORT_MAX_CHARS,
   FULL_EXPORT_MAX_PAGES,
+  FULL_EXPORT_PAGE_SIZE,
   describeFullExportProgress,
   describeFullExportStop,
   fullExportFilename,
@@ -95,11 +102,40 @@ import {
 import { resolveLocalUserName } from "@/utils/avatar";
 import { copyToClipboard } from "@/utils/clipboard";
 import {
+  isCompactionNoticeMessage,
+  looksLikeStreamingCompactionNotice,
+} from "@/utils/compactionNotice";
+import {
+  COMPACTION_TOP_KEY,
+  compactionHasDetails,
+  formatCompactionReason,
+  formatCompactionSummary,
+  planCompactionNodes,
+  type CompactionCheckpoint,
+} from "@/utils/compactionCheckpoints";
+import {
   hasVisibleMessageContent,
   isRenderableMessageRole,
   resolveCommittedText,
   shouldAdoptStreamedMedia,
 } from "@/utils/messageCommit";
+import {
+  buildTurnRunPlan,
+  canCopyRun,
+  canOpenRunDetail,
+  isTurnRunMember as isTurnRunMemberOf,
+  isTurnRunStart as isTurnRunStartOf,
+  runCopyText,
+  runDetailMessage,
+  runHasAssistantSegment,
+  runLastMessageId,
+  runModelOf as pickRunModel,
+  runSpendLoading,
+  runSpendResult,
+  turnRunByKey,
+  turnRunKeyOf,
+  type TurnRunPlan,
+} from "@/utils/chatTurnGroups";
 import type { SessionsListResult } from "@/api/types";
 import { GatewayRequestError } from "@/api/gateway";
 import MarkdownView from "@/components/MarkdownView.vue";
@@ -514,9 +550,17 @@ watch(
  * 它还被用来算 index 派生的稳定 key、上下文占用统计、链式删除等，**一旦在数据源层面
  * 丢掉，删除 / 复制 / 统计就会错位**。详见 `utils/messageCommit.ts` 的
  * `isRenderableMessageRole`（也有单测钉住）。
+ *
+ * 第二条过滤：网关在压缩（Compaction）前后会往会话里投递进度提示
+ * （`🧹 Compacting context...` / `🧹 Compaction complete` / `✅ Context compacted …`），
+ * 它们是**后台流程的噪音，不是对话内容**。压缩逻辑照常跑（后端零改动），
+ * 只是这几条不出现在界面上 —— 判定见 `utils/compactionNotice.ts`。
+ * 同样**只挡渲染**：消息仍在 `messages` 里，导出 / 复制 / 统计口径不变。
  */
 const visibleMessages = computed<ChatMessage[]>(() =>
-  messages.value.filter((msg) => isRenderableMessageRole(msg.role)),
+  messages.value.filter(
+    (msg) => isRenderableMessageRole(msg.role) && !isCompactionNoticeMessage(msg),
+  ),
 );
 
 /**
@@ -527,6 +571,92 @@ const visibleMessages = computed<ChatMessage[]>(() =>
  *
  * 这里只负责「把哪些 messages 聚成一个组」：组 key = 该连续 run 第一条 toolResult 的 id。
  */
+/**
+ * 会话流里的「压缩节点」。
+ *
+ * 压缩（Compaction）会保留两样东西：一段**摘要**、以及**保留下来的原始消息**。
+ * 后者本来就在 `chat.history` 里正常渲染，这里只负责**标出边界**；前者（摘要）
+ * 是 checkpoint 里的 `summary`，折叠展示在边界上。
+ *
+ * ⚠️ **纯展示，不影响发给模型的上下文**：只调 `sessions.compaction.list`（只读），
+ * 不碰 `branch` / `restore`、不写 transcript、不改 `messages`（节点是独立渲染行）。
+ * 拿不到就静默 —— 对话该怎么聊还怎么聊。
+ */
+const compactionCheckpoints = ref<CompactionCheckpoint[]>([]);
+/** 已展开的压缩节点（默认全部折叠，与工具结果折叠块同一套交互）。 */
+const expandedCompactionIds = ref<Set<string>>(new Set());
+let compactionRequestSeq = 0;
+
+/** 网关响应 → 本地类型（防御性：协议里多数字段都可选，脏数据一律丢掉而不是渲染成怪东西）。 */
+function normalizeCompactionCheckpoints(raw: unknown): CompactionCheckpoint[] {
+  if (!Array.isArray(raw)) return [];
+  const out: CompactionCheckpoint[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const rec = item as Record<string, unknown>;
+    const id = typeof rec.checkpointId === "string" ? rec.checkpointId : "";
+    if (!id) continue;
+    out.push({
+      checkpointId: id,
+      createdAt: typeof rec.createdAt === "number" ? rec.createdAt : 0,
+      reason: (typeof rec.reason === "string" ? rec.reason : "auto-threshold") as CompactionCheckpoint["reason"],
+      ...(typeof rec.tokensBefore === "number" ? { tokensBefore: rec.tokensBefore } : {}),
+      ...(typeof rec.tokensAfter === "number" ? { tokensAfter: rec.tokensAfter } : {}),
+      ...(typeof rec.summary === "string" && rec.summary.trim() ? { summary: rec.summary.trim() } : {}),
+      ...(typeof rec.firstKeptEntryId === "string" && rec.firstKeptEntryId
+        ? { firstKeptEntryId: rec.firstKeptEntryId }
+        : {}),
+    });
+  }
+  // 时间正序：会话流从上往下读，节点顺序必须与压缩发生的顺序一致
+  return out.sort((a, b) => a.createdAt - b.createdAt);
+}
+
+/**
+ * 拉本会话的压缩记录。
+ *
+ * ⚠️ 与 `chat.history` 同一套「请求版本闸 + 会话快照」：`sessions.compaction.list`
+ * 也是异步的，切会话期间回来的旧响应必须整包丢掉，否则 A 的压缩节点会画在 B 的流里。
+ */
+async function loadCompactionCheckpoints(
+  requestKey: string,
+  isCurrent: () => boolean,
+): Promise<void> {
+  const seq = ++compactionRequestSeq;
+  try {
+    // ⚠️ 参数是 `key`，**不是** `sessionKey`：协议里这个方法的入参叫 key
+    // （`src/gateway/server-methods/sessions.ts` 的 `requireSessionKey(p.key)`），
+    // 传错名字会被网关整包拒绝（params 校验不认多余属性）—— 表现为「永远拉不到压缩节点」。
+    const res = (await gateway.request("sessions.compaction.list", {
+      key: requestKey,
+    })) as { ok?: boolean; checkpoints?: unknown } | null;
+    if (seq !== compactionRequestSeq || !isCurrent()) return;
+    compactionCheckpoints.value = normalizeCompactionCheckpoints(res?.checkpoints);
+  } catch {
+    // 静默：拿不到压缩记录只影响这一块锦上添花的展示，绝不能打扰对话。
+    if (seq === compactionRequestSeq && isCurrent()) compactionCheckpoints.value = [];
+  }
+}
+
+/** 「哪个压缩节点画在哪条消息前面」（定位规则见 `utils/compactionCheckpoints.ts`）。 */
+const compactionNodePlan = computed(() =>
+  planCompactionNodes(visibleMessages.value, compactionCheckpoints.value),
+);
+/** 定位不到插入点（对应消息已被淘汰）的节点，统一画在列表最前面，不凭空丢掉。 */
+const topCompactionNodes = computed(() => compactionNodePlan.value.get(COMPACTION_TOP_KEY) ?? []);
+function compactionNodesBefore(msg: ChatMessage): CompactionCheckpoint[] {
+  return compactionNodePlan.value.get(msg.id) ?? [];
+}
+function isCompactionNodeExpanded(id: string): boolean {
+  return expandedCompactionIds.value.has(id);
+}
+function toggleCompactionNode(id: string): void {
+  const next = new Set(expandedCompactionIds.value);
+  if (next.has(id)) next.delete(id);
+  else next.add(id);
+  expandedCompactionIds.value = next;
+}
+
 const toolGroupPlan = computed<{
   keyToTools: Map<string, ChatMessage[]>;
   msgIdToGroupKey: Map<string, string>;
@@ -588,6 +718,76 @@ function toggleToolGroup(key: string): void {
   expandedToolGroups.value = next;
 }
 
+/**
+ * 「一个回合 = 一个回复单元」的分组计划。
+ *
+ * 一个回合在 transcript 里是**多条** assistant 记录（每产出一段正文一条）+ 中间的
+ * toolResult 连续块；原本按「一条消息 = 一个 row」渲染 ⇒ 截图里那种「同一回合十几个
+ * row，头像 / 名称 / 时间 / 积分行全部重复」（2026-09-22）。
+ * 现改为：两个 user（或 system）边界之间的**所有**助手产出合成一组，组内仍按原顺序
+ * 渲染（正文段 / Activity 折叠块 / 工具卡），而头像 + 名称/时间 + 积分/操作行
+ * **只在组级出现一次**。分组与组级取值口径见 `utils/chatTurnGroups.ts`（有单测钉住）。
+ */
+const turnRunPlan = computed<TurnRunPlan>(() => buildTurnRunPlan(visibleMessages.value));
+
+function turnRunKey(msg: ChatMessage): string {
+  return turnRunKeyOf(turnRunPlan.value, msg);
+}
+function isTurnRunMember(msg: ChatMessage): boolean {
+  return isTurnRunMemberOf(turnRunPlan.value, msg);
+}
+function isTurnRunStart(msg: ChatMessage): boolean {
+  return isTurnRunStartOf(turnRunPlan.value, msg);
+}
+function turnRunOf(msg: ChatMessage): ChatMessage[] {
+  const run = turnRunByKey(turnRunPlan.value, turnRunKey(msg));
+  return run && run.length > 0 ? run : [msg];
+}
+
+/** 组内是否有 assistant 段（纯工具组与合并前一致：不渲染名称/时间、也不渲染底行）。 */
+function runHasAssistantSegmentOf(msg: ChatMessage): boolean {
+  return runHasAssistantSegment(turnRunOf(msg));
+}
+
+/** 组的时间戳：组内第一条带 ts 的消息（= 这一回合开始产出正文的时刻）。 */
+function runTsOf(msg: ChatMessage): number | undefined {
+  for (const seg of turnRunOf(msg)) {
+    if (typeof seg.ts === "number") return seg.ts;
+  }
+  return undefined;
+}
+
+function runSpendResultOf(msg: ChatMessage): JdSpendResult | undefined {
+  return runSpendResult(turnRunOf(msg));
+}
+function runSpendLoadingOf(msg: ChatMessage): boolean {
+  return runSpendLoading(turnRunOf(msg));
+}
+function runModelPartsOf(msg: ChatMessage): { provider: string; model: string } | null {
+  return pickRunModel(turnRunOf(msg));
+}
+
+/**
+ * 流式气泡是否**并进最后一组**（`null` = 独立成一个单元）。
+ *
+ * 只有「引导打断当前 run」这一个窗口会出现「组已在 messages 里、气泡还在」的状态：
+ * `holdStreamingBubbleForSteer()` 把已产出内容落地成消息，但**刻意**保持 `sending=true`
+ * 让气泡原地转「思考中」、等被引导那一轮接管同一个气泡。此时不并入就会看到两个头像 /
+ * 两行名称（而刷新后又是合并成一组 ⇒ 实时与刷新不一致）。
+ * 正常发消息时 `send()` 先把 user 消息 push 进 `messages`，末尾是 user ⇒ 不并入。
+ */
+const liveTailRunKey = computed<string | null>(() => {
+  if (!sending.value || !awaitingSteeredRun.value) return null;
+  const visible = visibleMessages.value;
+  const last = visible[visible.length - 1];
+  if (!last || !isTurnRunMember(last)) return null;
+  return turnRunKey(last);
+});
+const liveTailMerges = computed<boolean>(() => liveTailRunKey.value !== null);
+function isLiveTailRun(msg: ChatMessage): boolean {
+  return liveTailRunKey.value !== null && liveTailRunKey.value === turnRunKey(msg);
+}
+
 const streamingText = computed<string>({
   get: () => runState.value.streamingText,
   set: (next) => {
@@ -647,6 +847,20 @@ const streamingMediaAttachments = computed<ContentAttachmentItem[]>(() => {
   }
   return out;
 });
+/**
+ * 流式气泡里**真正显示**的正文。
+ *
+ * 压缩提示是先流式出来、再随 final 落库的，如果只过滤 `visibleMessages`，
+ * 它仍会在气泡里闪一下（用户视角就是「聊天中插了一句 🧹 Compacting context…」）。
+ * 这里在流式阶段就把它挡掉 —— 隐藏后气泡走下面 `isThinking` 的三 dot「思考中」，
+ * 观感与正常生成过程完全一致。
+ *
+ * ⚠️ 只影响**显示**：`streamingText`（数据源）原样保留，落库 / 媒体剥离 /
+ * 导出全部照旧，压缩提示那条消息只是看不见而已。
+ */
+const visibleStreamingText = computed<string>(() =>
+  looksLikeStreamingCompactionNotice(streamingText.value) ? "" : streamingMediaSplit.value.text,
+);
 
 const loading = ref(false);
 const input = ref("");
@@ -693,8 +907,15 @@ const fileInputRef = ref<HTMLInputElement | null>(null);
 const photoInputRef = ref<HTMLInputElement | null>(null);
 const cameraInputRef = ref<HTMLInputElement | null>(null);
 
-/** 旧版 `canCompose`：未连接 / 正在发送 / 积分不足时不允许再挂附件。 */
-const canAttach = computed(() => !sending.value && !insufficientCredits.value);
+/**
+ * 还能不能再挂附件（旧版 `canCompose`）。
+ *
+ * ⚠️ 这里**刻意不看积分**：选文件 / 粘贴 / 拖拽都是纯本地动作，一分不花，
+ * 只在这一轮真的发出去时才消耗。把积分门槛挂在这里会让「余额 0」的用户
+ * 连输入框上的 + 都点不动 —— 那是提前禁用控件，不是提示。
+ * 保留 `sending` 判断：流式中挂附件会串进正在进行的那一轮（旧版同口径）。
+ */
+const canAttach = computed(() => !sending.value);
 
 async function addAttachmentFiles(files: Iterable<File>): Promise<void> {
   const list = Array.from(files);
@@ -818,11 +1039,19 @@ function downloadFileName(label: string | null | undefined, fallback = "附件")
  * `shouldSaveViaBlob` 认定的场景（非安全上下文 + 同源 http 地址）接管点击，
  * 改成 fetch → `blob:` 落盘；其余场景原样走 `<a href download>` 原生导航 ——
  * **不**改成 `window.open` / `location`，那会把 SPA 顶掉（见 `downloadHrefOrNull`）。
+ *
+ * ⚠️ 兜底失败 **必须回落到原生下载**（2026-09-21 修复）：一旦站点前面的 CDN / 反代把
+ * http 301 到 https，`fetch` 会因为「跨源重定向 + 媒体路由无 CORS 头」直接失败，而原生
+ * 导航能跟随重定向把文件下下来。旧实现失败后只弹提示 —— 既没下到文件，又把本来可用的
+ * 原生下载堵死了（`preventDefault` 已执行，气泡永远不会出现），用户只能看到一句
+ * 「请在下载气泡里点保留」的死提示。
  */
 async function onPaneDownloadClick(evt: MouseEvent): Promise<void> {
   const target = evt.target as Element | null;
   const anchor = target?.closest?.("a[download]") as HTMLAnchorElement | null;
   if (!anchor) return;
+  // 回落时由我们自己触发的原生锚点：放行，交给浏览器（再接管会无限递归）。
+  if (isNativeDownloadAnchor(anchor)) return;
   const href = anchor.getAttribute("href") ?? "";
   const fallback = shouldSaveViaBlob({
     url: href,
@@ -835,13 +1064,16 @@ async function onPaneDownloadClick(evt: MouseEvent): Promise<void> {
   try {
     await saveUrlViaBlob(href, name);
   } catch (err) {
-    console.warn("[chat-pane] blob 下载兜底失败", err);
+    console.warn("[chat-pane] blob 下载兜底失败，回退浏览器原生下载", err);
+    // ① 立刻回落：让浏览器原生走一遍（会弹原生下载气泡，用户可点「保留」）。
+    const fellBack = saveUrlViaNativeAnchor(href, name);
+    // ② 顺带把真实原因问清楚（探测自身失败也不影响回落）。
+    const detail = await describeDownloadFailure(href, err);
     ElMessage({
       message:
-        `下载失败：${name}\n` +
-        "当前站点是明文 HTTP，浏览器可能拦截文件下载；请改用 HTTPS 访问，或在下载气泡里点「保留」。",
-      type: "error",
-      duration: 6500,
+        (fellBack ? `已改为浏览器原生下载：${name}\n` : `下载失败：${name}\n`) + detail,
+      type: fellBack ? "warning" : "error",
+      duration: 8000,
       grouping: true,
     });
   }
@@ -1251,7 +1483,8 @@ const streaming = computed(() => sending.value);
  * 未连接 / 流式中（加入待执行任务）/ 带附件 / 普通。
  */
 const composerPlaceholder = computed<string>(() => {
-  if (insufficientCredits.value) return "积分不足，请充值后再发送消息";
+  // ⚠️ 不再为「积分不足」单开一档占位符：余额 0 时输入框照样要能打字、编辑，
+  // 占位符一直挂着「积分不足」等于提前把控件废掉。真正的提示留给点击发送那一刻。
   if (!gateway.connected) return "未连接到网关，无法发送消息";
   if (streaming.value) return "输入消息加入待执行任务（Enter 添加，Shift+Enter 换行）";
   if (attachments.value.length > 0)
@@ -1260,8 +1493,10 @@ const composerPlaceholder = computed<string>(() => {
   //（zh-CN.ts:1608 = "给 {name} 发消息"）：名字取**本窗格** agent，不是全局选中的那个。
   return `给 ${assistantName.value} 发消息`;
 });
+// ⚠️ 用 `visibleStreamingText`（不是 `streamingText`）：流式正文整段是压缩提示时
+// 它已被隐藏，此时气泡应当回落到「思考中」三 dot，而不是留一个空气泡。
 const isThinking = computed(
-  () => sending.value && !streamingText.value && !streamingThinking.value,
+  () => sending.value && !visibleStreamingText.value && !streamingThinking.value,
 );
 
 /**
@@ -1291,12 +1526,33 @@ const insufficientCredits = computed(
   () => latestBalance.value !== null && latestBalance.value <= 0,
 );
 
+/**
+ * 空会话推荐位的**默认**文案（回落用）。
+ *
+ * 只有在当前 agent 没有在 workspace 配 `quickStart` 时才用它 —— 配了就用配置里的
+ * （见 `welcomeSuggestions`），口径与旧版 Lit 界面的 `renderWelcomeState` 一致：
+ * 「Custom per-agent quickStart wins over the default i18n list」。
+ */
 const SUGGESTIONS = [
   "查看当前网关的连接状态和健康信息",
   "列出所有已配置的通道及其状态",
   "看看有哪些定时任务在运行",
   "统计一下各模型的用量",
 ];
+
+/**
+ * 空会话推荐位实际要渲染的文案。
+ *
+ * 优先取**本窗格 agent** 的 `quickStart`（网关从 `workspace-xxx/agent-config.json`
+ * 读取后挂在 `agents.list` 行上，见 store 的 `quickStartForAgent`），取不到才回落
+ * `SUGGESTIONS`。
+ *
+ * ⚠️ 按 `paneAgentId`（本窗格）取，不是全局选中 agent：拆分视图下两个窗格要各显示
+ * 各自 agent 的开场白（同 pane 身份/模型的口径）。
+ */
+const welcomeSuggestions = computed<string[]>(
+  () => agents.quickStartForAgent(paneAgentId.value) ?? SUGGESTIONS,
+);
 
 /**
  * 上游 `chat.history` 的 message.content 数组里，part.type 是 OpenAI/Anthropic 风格的
@@ -1478,15 +1734,6 @@ function resolveMessageId(
   return null;
 }
 
-/** `MessageIdSource` → tooltip 里展示的字段名。 */
-const MESSAGE_ID_SOURCE_LABEL: Record<MessageIdSource, string> = {
-  responseId: "responseId",
-  transcriptId: "__openclaw.id",
-  recordId: "id",
-  idempotencyKey: "idempotencyKey",
-  derived: "本地派生",
-};
-
 /** 跨来源合并去重（正文 `MEDIA:` 与 `content` 块可能指向同一个文件）。 */
 function dedupeContentImages(images: readonly ContentImageBlock[]): ContentImageBlock[] {
   const out: ContentImageBlock[] = [];
@@ -1659,11 +1906,6 @@ function onThreadScroll(): void {
   if (shouldAutoLoadOlder({ cursor: historyCursor.value, loading: loadingOlderHistory.value, metrics })) {
     void loadOlderHistory();
   }
-}
-
-function jumpToBottom(): void {
-  followScroll.value = true;
-  void scrollToBottom(true);
 }
 
 async function scrollToBottom(force = false): Promise<void> {
@@ -1949,28 +2191,90 @@ function canCopyMessage(msg: ChatMessage): boolean {
 /**
  * 是否可打开「详情」面板（右侧展开完整消息）。
  *
- * 对齐上游 `resolveMessageActionDetails`：只对**助手消息**提供「详情」入口，
+ * 对齐上游 `resolveMessageActionDetails`：只对**助手**产出提供「详情」入口，
  * 且必须有正文（或思考过程）。用户消息无需在右侧面板展开（内容已在气泡里完整呈现）。
+ *
+ * 合并后按**组**判定：组内任一段满足条件即可，展开时展示组内**助手正文 + 媒体**
+ * （`openRunDetail` 合成一条虚拟消息交给抽屉，见 `runDetailMessage`）。
+ * ⚠️ 不含过程内容：组的 `toolResult` / `tool` 段文本（即气泡里「思考过程 · N 步」里的东西）
+ * 不进详情。
  */
-function canOpenDetail(msg: ChatMessage): boolean {
-  if (msg.role !== "assistant") return false;
-  return (msg.text ?? "").trim().length > 0 || Boolean(msg.thinking);
+function canOpenRunDetailOf(msg: ChatMessage): boolean {
+  return canOpenRunDetail(turnRunOf(msg));
+}
+
+/** 打开「详情」：合成一条含组内助手正文 / 媒体（**不含思考、不含工具过程输出**）的虚拟消息。 */
+function openRunDetail(msg: ChatMessage): void {
+  const detail = runDetailMessage(turnRunOf(msg), turnRunKey(msg));
+  if (detail) emit("openDetail", detail);
 }
 
 /**
- * 是否有可展示的消息元信息（决定积分/操作行是否出现）。
+ * 是否有可展示的单元元信息（决定积分/操作行是否出现）。
  *
- * 有可复制内容时也要出现 —— 这行同时承载「复制 / 删除」操作按钮。
+ * 与原来单条口径的差别：**整组只判一次** —— 组内多段不再各自重复一行。
+ * 有可复制内容时也要出现 —— 这行同时承载「复制 / 删除 / id」操作按钮。
  *
  * 上下文占用原本在此行显示；现在迁到了输入框右下角（持续展示最后一条带
  * usage 的消息的占用），所以这里的判断不再含上下文。
  */
-function hasMessageMeta(msg: ChatMessage): boolean {
-  return (
-    Boolean(msg.spendResult) ||
-    msg.spendLoading === true ||
-    canCopyMessage(msg)
-  );
+function hasRunMeta(msg: ChatMessage): boolean {
+  return Boolean(runSpendResultOf(msg)) || runSpendLoadingOf(msg) || canCopyRunOf(msg);
+}
+
+// ── 组级复制（产品口径：只复制组内正文，不含工具结果） ──
+
+function canCopyRunOf(msg: ChatMessage): boolean {
+  return canCopyRun(turnRunOf(msg));
+}
+function runCopyStateOf(msg: ChatMessage): CopyState | "" {
+  return copyStates.value[turnRunKey(msg)] ?? "";
+}
+function runCopyTitleOf(msg: ChatMessage): string {
+  const state = runCopyStateOf(msg);
+  if (state === "copied") return "已复制";
+  if (state === "error") return "复制失败";
+  return canCopyRunOf(msg) ? "复制这一回复的正文" : "无可复制内容";
+}
+async function copyRun(msg: ChatMessage): Promise<void> {
+  const text = runCopyText(turnRunOf(msg));
+  if (!text) return;
+  const ok = await copyToClipboard(text);
+  setCopyState(turnRunKey(msg), ok ? "copied" : "error", ok ? COPY_FEEDBACK_MS : COPY_ERROR_MS);
+  if (ok) {
+    ElMessage({ message: "已复制到剪贴板", type: "success", grouping: true });
+  } else {
+    ElMessage({ message: "复制失败，请手动选择文本复制", type: "error", grouping: true });
+  }
+}
+
+// ── 组级「复制消息 id」：一个回复 = 多个段 ⇒ 只复制最后一段的 id ──
+
+const RUN_ID_COPY_SUFFIX = "#ids";
+function runIdCopyKey(msg: ChatMessage): string {
+  return turnRunKey(msg) + RUN_ID_COPY_SUFFIX;
+}
+function runIdCopyStateOf(msg: ChatMessage): CopyState | "" {
+  return copyStates.value[runIdCopyKey(msg)] ?? "";
+}
+function runIdCopyTitleOf(msg: ChatMessage): string {
+  const state = runIdCopyStateOf(msg);
+  if (state === "copied") return "已复制消息 id";
+  if (state === "error") return "复制失败";
+  const id = runLastMessageId(turnRunOf(msg));
+  if (!id) return "无可复制的消息 id";
+  return `复制这条回复的消息 id\n${id}`;
+}
+async function copyRunIds(msg: ChatMessage): Promise<void> {
+  const id = runLastMessageId(turnRunOf(msg));
+  if (!id) return;
+  const ok = await copyToClipboard(id);
+  setCopyState(runIdCopyKey(msg), ok ? "copied" : "error", ok ? COPY_FEEDBACK_MS : COPY_ERROR_MS);
+  if (ok) {
+    ElMessage({ message: "已复制消息 id", type: "success", grouping: true });
+  } else {
+    ElMessage({ message: "复制失败，请手动选择文本复制", type: "error", grouping: true });
+  }
 }
 
 /**
@@ -2029,24 +2333,14 @@ const copyStates = ref<Record<string, CopyState>>({});
 const copyTimers = new Map<string, number>();
 
 /**
- * 反馈键：`msg.id` 给「复制正文」用，`msg.id + "#id"` 给「复制消息 id」用。
- * 两条按钮共用一个状态机但互不影响，避免点 A 亮 B。
+ * 反馈键：`msg.id` 给「复制正文」用。
+ *
+ * 助手侧现在按**组**复制：正文 / 消息 id 各自的反馈键是「组 key」与「组 key + #ids」
+ * （见下方组级复制小节），与单条消息互不干扰。
  */
-const MESSAGE_ID_COPY_SUFFIX = "#id";
-
-function messageIdCopyKey(msg: ChatMessage): string {
-  return msg.id + MESSAGE_ID_COPY_SUFFIX;
-}
 
 function copyStateOf(msg: ChatMessage): CopyState | "" {
   return copyStates.value[msg.id] ?? "";
-}
-
-function copyTitleOf(msg: ChatMessage): string {
-  const state = copyStateOf(msg);
-  if (state === "copied") return "已复制";
-  if (state === "error") return "复制失败";
-  return canCopyMessage(msg) ? "复制为 Markdown" : "无可复制内容";
 }
 
 function setCopyState(key: string, state: CopyState, clearAfterMs: number): void {
@@ -2084,60 +2378,9 @@ async function copyMessage(msg: ChatMessage): Promise<void> {
 }
 
 // ── 复制消息 id ──
-
-/**
- * 要复制的消息 id 文本。
- *
- * 优先网关原值（`rawId`，如 `chatcmpl-…`），取不到时回落本地稳定键 `msg.id`
- * （此时带 `resp-` / `oc-` 前缀，属于「只在本机有意义」的兜底值，
- * tooltip 会把来源标为「本地派生」以免误用）。
- */
-function messageIdText(msg: ChatMessage): string {
-  return (msg.rawId ?? msg.id ?? "").trim();
-}
-
-/** 是否有可复制的 id（实际上稳定键永远存在，留个判断防御空值）。 */
-function canCopyMessageId(msg: ChatMessage): boolean {
-  return messageIdText(msg).length > 0;
-}
-
-function idCopyStateOf(msg: ChatMessage): CopyState | "" {
-  return copyStates.value[messageIdCopyKey(msg)] ?? "";
-}
-
-/** 悬浮提示：既说明这个 id 来自哪个字段，也把原值摊开方便肉眼核对。 */
-function idCopyTitleOf(msg: ChatMessage): string {
-  const state = idCopyStateOf(msg);
-  if (state === "copied") return "已复制消息 id";
-  if (state === "error") return "复制失败";
-  if (!canCopyMessageId(msg)) return "无可复制的消息 id";
-  const source = msg.rawIdSource
-    ? MESSAGE_ID_SOURCE_LABEL[msg.rawIdSource]
-    : "本地派生";
-  return `复制消息 id（来源 ${source}）\n${messageIdText(msg)}`;
-}
-
-/**
- * 复制该条消息的 id。
- *
- * 与「复制正文」共用反馈状态机（键加 `#id` 后缀隔离），成功/失败提示文案区分开，
- * 避免用户分不清复制的是正文还是 id。
- */
-async function copyMessageId(msg: ChatMessage): Promise<void> {
-  const text = messageIdText(msg);
-  if (!text) return;
-  const ok = await copyToClipboard(text);
-  setCopyState(
-    messageIdCopyKey(msg),
-    ok ? "copied" : "error",
-    ok ? COPY_FEEDBACK_MS : COPY_ERROR_MS,
-  );
-  if (ok) {
-    ElMessage({ message: `已复制消息 id：${text}`, type: "success", grouping: true });
-  } else {
-    ElMessage({ message: "复制失败，请手动选择文本复制", type: "error", grouping: true });
-  }
-}
+//
+// 助手侧「复制消息 id」已改为**组级**（一个回复 = 多个段 ⇒ 每行一个 id），
+// 实现见上方「组级『复制消息 id』」小节（`copyRunIds` / `runIdCopyTitleOf`）。
 
 /**
  * 悬浮复制按钮的标题：复用 copyStateOf 反馈态，避免「复制成功了按钮文案不更新」。
@@ -2264,17 +2507,26 @@ function openDeleteConfirm(msg: ChatMessage, trigger: HTMLElement | null): void 
 /**
  * 点删除按钮：已勾过「不再询问」则直接删；浮层已开着则再点一次收起。
  */
-function requestDeleteMessage(msg: ChatMessage, evt: MouseEvent): void {
+/**
+ * 删除**整组**（一个回合的所有段）。
+ *
+ * 合并后「一条回复」= 一组消息：只删中间某一段会留下半截回复，所以删除粒度是**整组**。
+ * 确认浮层用组 key 当 id，`removeMessage` 认出它是组 key 后逐条删除、并逐条记进
+ * `deletedMessages.v1`（否则刷新一次整组复活）。
+ */
+function requestDeleteRun(msg: ChatMessage, evt: MouseEvent): void {
+  const key = turnRunKey(msg);
   if (shouldSkipDeleteConfirm()) {
-    removeMessage(msg.id);
+    removeMessage(key);
     return;
   }
-  if (deleteConfirmId.value === msg.id) {
+  if (deleteConfirmId.value === key) {
     closeDeleteConfirm();
     return;
   }
   const trigger = evt.currentTarget instanceof HTMLElement ? evt.currentTarget : null;
-  openDeleteConfirm(msg, trigger);
+  // 浮层只需要 id（删谁），展示载体用组内首条消息；id 换成组 key ⇒ 确认时按组删。
+  openDeleteConfirm({ ...msg, id: key }, trigger);
 }
 
 /** 浮层里点「删除」：按需记住「不再询问」，然后删除。 */
@@ -2301,6 +2553,17 @@ function confirmDeleteMessage(): void {
  * 否则刷新一次就复活。代价：网关侧 transcript 未变，换浏览器/换客户端仍能看到该条。
  */
 function removeMessage(id: string): void {
+  // 组 key（= 组内首条消息的 id）⇒ 删整组：合并后一条回复就是一组，只删首条会留下
+  // 「尾巴」（后面的正文段 / Activity 还挂在界面上），且刷新后又会整组复活。
+  const run = turnRunByKey(turnRunPlan.value, id);
+  if (run && run.length > 0) {
+    for (const member of run) removeSingleMessage(member.id);
+    return;
+  }
+  removeSingleMessage(id);
+}
+
+function removeSingleMessage(id: string): void {
   const index = messages.value.findIndex((msg) => msg.id === id);
   if (index >= 0) {
     // 删消息同时回收它的附件 objectURL（气泡没了，预览图不该继续占内存）。
@@ -2462,8 +2725,8 @@ async function requestChatHistory<T>(params: {
   } catch (err) {
     if (!isChatHistoryParamsRejected(err)) throw err;
     // ⚠️ 重试必须**同时把 `limit` 收窄**，不能只删新增字段：老网关的 schema 每个字段都带
-    // `maximum`，本端产物又一贯比网关新（500/1000 是新值），原样重发会被同一个
-    // `invalid chat.history params` **再拒一次** ⇒ 降级等于没写，症状仍是「历史一条都不显示」。
+    // `maximum`，本端产物又一贯比网关新，原样重发会被同一个 `invalid chat.history params`
+    // **再拒一次** ⇒ 降级等于没写，症状仍是「历史一条都不显示」。
     return await gateway.request<T>("chat.history", {
       sessionKey: params.sessionKey,
       limit: CHAT_HISTORY_FALLBACK_PAGE_SIZE,
@@ -2502,6 +2765,8 @@ async function loadHistory(options?: { skipCache?: boolean }): Promise<void> {
     await scrollToBottom(true);
     void fetchMissingSpendResults();
     void loadModelList();
+    // 缓存秒回也要画压缩节点：否则「切回旧会话」这一最常见路径上没有边界标记
+    void loadCompactionCheckpoints(requestKey, isCurrent);
   }
   // 回源快照：只认「请求发出之后」新增的尾部消息（见 `preserveLocalTailMessages`）。
   const snapshot = messages.value;
@@ -2563,6 +2828,8 @@ async function loadHistory(options?: { skipCache?: boolean }): Promise<void> {
     void fetchMissingSpendResults();
     // 加载完成后从历史补充模型列表
     void loadModelList();
+    // 压缩节点：历史就位之后才定位（依赖消息的 rawId 与时间戳）
+    void loadCompactionCheckpoints(requestKey, isCurrent);
   } catch (err) {
     // 失败一律不落缓存（保持上一次的好数据）。
     //
@@ -2896,8 +3163,20 @@ async function steerPendingTask(item: PendingTask): Promise<void> {
 
 /** 非流式发送；流式阶段先加入待执行列表。 */
 async function submitComposer(): Promise<void> {
-  // 积分不足校验：剩余积分 <= 0 时禁止发送（按钮已禁用，这里兜底 Enter 路径）
-  if (!sending.value && insufficientCredits.value) return;
+  // 积分不足：**只在真的要发出去（消耗积分）时才拦**，拦的时候给明确提示。
+  // 此前是「按钮禁用 + 输入框禁用 + 静默 return」三连，用户表现为「界面整个死了、
+  // 点了没反应也不知道为什么」。现在控件全程可用，Enter / 点发送都会走到这里拿提示。
+  //
+  // ⚠️ `sending` 分支（把本条并入待执行队列）**不拦**：入队本身不消耗积分，
+  // 真正执行时由 `resumePendingTasksAfterReload` 按当时余额判定。
+  if (!sending.value && insufficientCredits.value) {
+    ElMessage({
+      message: "当前积分为 0，发送需要先充值",
+      type: "warning",
+      grouping: true,
+    });
+    return;
+  }
   if (sending.value) {
     enqueuePendingTask();
   } else {
@@ -3001,7 +3280,9 @@ async function collectFullExportPages(
       // 但那种响应里没有 hasMore/nextOffset ⇒ 下一轮被判 missing-offset 正常收尾。
       payload = await requestChatHistory<ChatHistoryResponse>({
         sessionKey: requestKey,
-        limit: CHAT_HISTORY_PAGE_SIZE,
+        // ⚠️ 导出取大页（500），不要换成视图的 `CHAT_HISTORY_PAGE_SIZE`(100)：
+        // 小页会让 `FULL_EXPORT_MAX_PAGES`(50) 只能覆盖 5000 条，长会话被提前截断。
+        limit: FULL_EXPORT_PAGE_SIZE,
         offset: step.offset,
         maxChars: FULL_EXPORT_MAX_CHARS,
       });
@@ -3590,6 +3871,9 @@ watch(
     releaseChatAttachmentPayloads(attachments.value);
     attachments.value = [];
     messages.value = [];
+    // ⚠️ 压缩节点同理：不清的话，上一个会话的节点会短暂画在新会话的流顶部
+    compactionCheckpoints.value = [];
+    expandedCompactionIds.value = new Set();
     // 切换会话：重置历史分页游标，避免把上一个会话的翻页进度带到新会话
     resetHistoryCursor();
     loadingOlderHistory.value = false;
@@ -3890,7 +4174,7 @@ function formatBalance(value: number | null | undefined): string {
     </header>
 
     <!-- 积分不足横幅：网关返回的 balance 为 0 时常驻提示，充值后带回正余额会自动消失 -->
-    <el-alert
+    <!-- <el-alert
       v-if="insufficientCredits"
       class="credits-alert"
       type="warning"
@@ -3898,18 +4182,9 @@ function formatBalance(value: number | null | undefined): string {
       show-icon
     >
       <template #title>积分不足，请前往充值页面充值</template>
-    </el-alert>
+    </el-alert> -->
 
     <div ref="threadRef" class="chat-thread" @scroll.passive="onThreadScroll">
-      <!-- 用户上滑看历史时，流式新消息不再把视口拽回底部；这里给一个「跳到底部」入口 -->
-      <button
-        v-if="!followScroll && (messages.length > 0 || streamingText)"
-        class="thread-jump-bottom"
-        type="button"
-        @click="jumpToBottom"
-      >
-        ↓ 下方有新消息
-      </button>
       <div class="chat-inner">
         <!-- 无限滚动的触发哨兵：1px 高、无视觉，进视口即自动加载更早一页
              （IntersectionObserver，见 observeHistoryTopSentinel）。
@@ -3973,9 +4248,14 @@ function formatBalance(value: number | null | undefined): string {
             {{ assistantName }} · 基于网关的会话智能体，随时提问或下达指令
           </div>
           <div class="empty-suggestions">
+            <!--
+              推荐文案来自用户可编辑的 `agent-config.json`，**允许出现重复项** ——
+              只用文案做 key 会撞 Vue 的 duplicate key 警告（并可能导致节点复用错乱），
+              因此拼上下标一起做 key。
+            -->
             <el-button
-              v-for="s in SUGGESTIONS"
-              :key="s"
+              v-for="(s, si) in welcomeSuggestions"
+              :key="`sug-${si}-${s}`"
               class="suggestion"
               round
               @click="useSuggestion(s)"
@@ -3985,7 +4265,67 @@ function formatBalance(value: number | null | undefined): string {
           </div>
         </div>
 
+        <!-- 压缩节点（定位不到插入点的那些）：画在整段历史最前面 -->
+        <template v-for="cp in topCompactionNodes" :key="`cp-top-${cp.checkpointId}`">
+          <div class="compaction-node">
+            <button
+              v-if="compactionHasDetails(cp)"
+              class="compaction-node__toggle"
+              type="button"
+              :aria-expanded="isCompactionNodeExpanded(cp.checkpointId)"
+              @click="toggleCompactionNode(cp.checkpointId)"
+            >
+              <span class="compaction-node__tag">压缩</span>
+              <span class="compaction-node__title">{{ formatCompactionSummary(cp) }}</span>
+              <span class="compaction-node__caret" :class="{ open: isCompactionNodeExpanded(cp.checkpointId) }">
+                <el-icon><ArrowRightBold /></el-icon>
+              </span>
+            </button>
+            <div v-else class="compaction-node__static">
+              <span class="compaction-node__tag">压缩</span>
+              <span class="compaction-node__title">{{ formatCompactionSummary(cp) }}</span>
+            </div>
+            <div v-if="isCompactionNodeExpanded(cp.checkpointId)" class="compaction-node__body">
+              <div class="compaction-node__meta">{{ formatCompactionReason(cp.reason) }}</div>
+              <div v-if="cp.summary" class="compaction-node__summary">
+                <MarkdownView :text="cp.summary" />
+              </div>
+            </div>
+          </div>
+        </template>
+
         <template v-for="msg in visibleMessages" :key="msg.id">
+          <!-- 压缩节点：画在「压缩后保留下来的第一条消息」前面，标出被压缩掉的那一段的边界。
+               折叠态只有一行（虚线分隔 + 「压缩」标签 + token 变化），展开才出摘要正文；
+               视觉上刻意与气泡区分：居中、虚线、弱化色，不占头像列。 -->
+          <template v-for="cp in compactionNodesBefore(msg)" :key="`cp-${cp.checkpointId}`">
+            <div class="compaction-node">
+              <button
+                v-if="compactionHasDetails(cp)"
+                class="compaction-node__toggle"
+                type="button"
+                :aria-expanded="isCompactionNodeExpanded(cp.checkpointId)"
+                @click="toggleCompactionNode(cp.checkpointId)"
+              >
+                <span class="compaction-node__tag">压缩</span>
+                <span class="compaction-node__title">{{ formatCompactionSummary(cp) }}</span>
+                <span class="compaction-node__caret" :class="{ open: isCompactionNodeExpanded(cp.checkpointId) }">
+                  <el-icon><ArrowRightBold /></el-icon>
+                </span>
+              </button>
+              <div v-else class="compaction-node__static">
+                <span class="compaction-node__tag">压缩</span>
+                <span class="compaction-node__title">{{ formatCompactionSummary(cp) }}</span>
+              </div>
+              <div v-if="isCompactionNodeExpanded(cp.checkpointId)" class="compaction-node__body">
+                <div class="compaction-node__meta">{{ formatCompactionReason(cp.reason) }}</div>
+                <div v-if="cp.summary" class="compaction-node__summary">
+                  <MarkdownView :text="cp.summary" />
+                </div>
+              </div>
+            </div>
+          </template>
+
           <!-- 用户消息：右侧蓝底气泡 -->
           <div v-if="msg.role === 'user'" class="row row-user">
             <div class="bubble-user-wrap">
@@ -4110,8 +4450,14 @@ function formatBalance(value: number | null | undefined): string {
             </span>
           </div>
 
-          <!-- 助手消息：左侧头像 + 内容 -->
-          <div v-else-if="msg.role === 'assistant'" class="row row-assistant">
+          <!-- 一个回合 = 一个回复单元：两个 user（或 system）边界之间的**所有**助手产出
+               （正文段 + 中间的 Activity 折叠块 / 工具卡）合成一个 row —— 一个头像、
+               一次名称/时间、组尾一行积分与操作。分组口径见 `utils/chatTurnGroups.ts`。 -->
+          <div
+            v-else-if="isTurnRunStart(msg)"
+            class="row row-assistant"
+            :class="{ 'row-assistant--live-tail': isLiveTailRun(msg) }"
+          >
             <span class="msg-avatar">
               <ChatAvatar
                 role="assistant"
@@ -4124,120 +4470,180 @@ function formatBalance(value: number | null | undefined): string {
               />
             </span>
             <div class="content">
-              <div class="content-meta">
+              <div v-if="runHasAssistantSegmentOf(msg)" class="content-meta">
                 <span class="content-name">{{ assistantName }}</span>
-                <span v-if="msg.ts" class="content-time">{{ formatTime(msg.ts) }}</span>
+                <span v-if="runTsOf(msg)" class="content-time">{{ formatTime(runTsOf(msg)) }}</span>
               </div>
 
-              <!-- 思考过程：可折叠块 -->
-              <div v-if="msg.thinking" class="thinking-fold">
-                <el-button
-                  class="thinking-fold-head"
-                  text
-                  size="small"
-                  @click="toggleThinking(msg.id)"
-                >
-                  <span>思考过程</span>
-                  <span class="thinking-fold-icon" :class="{ open: expandedThinkingIds.has(msg.id) }"><el-icon><ArrowRightBold /></el-icon></span>
-                </el-button>
-                <div v-if="expandedThinkingIds.has(msg.id)" class="thinking-fold-body">
-                  {{ msg.thinking }}
-                </div>
-              </div>
+              <template v-for="seg in turnRunOf(msg)" :key="seg.id">
+                <!-- 助手段：思考折叠块 + 正文 + 媒体（与合并前单条消息的渲染完全一致） -->
+                <div v-if="seg.role === 'assistant'" class="run-segment">
 
-              <MarkdownView :text="msg.text" />
-
-              <!-- 助手回复 / 工具结果里 `content` 数组内嵌的图片块（旧版 `chat-message.ts`
-                   的 `renderMessageImages` 对应物）。⚠️ 网关会把 toolResult 里图片的
-                   base64 抹掉只留占位 `omitted:true`（见 `utils/contentMedia.ts` 文件头），
-                   那种块在**解析期**就已跳过 —— 所以这里不会出现裂图。
-                   `:empty { display:none }` 兜住「有块但都解析不出地址」的空容器。 -->
-              <div v-if="msg.contentImages?.length" class="content-media__images">
-                <template v-for="(image, i) in msg.contentImages" :key="`${msg.id}-img-${i}`">
-                  <!-- 包一层 <a>：图片也算「附件」，点击只**下载**（`download=1` 让网关回
-                       attachment）。以前是裸 <img> + JS 打开，那样会把整个聊天页顶掉。 -->
-                  <a
-                    v-if="contentMediaUrlOf(image.url)"
-                    class="content-media__image-link"
-                    :href="contentImageHref(image) ?? undefined"
-                    :download="downloadFileName(image.alt, '附件图片')"
-                    :title="contentImageTooltip(image)"
+                <!-- 思考过程：可折叠块 -->
+                <div v-if="seg.thinking" class="thinking-fold">
+                  <el-button
+                    class="thinking-fold-head"
+                    text
+                    size="small"
+                    @click="toggleThinking(seg.id)"
                   >
-                    <img
-                      class="content-media__image"
-                      :src="contentMediaUrlOf(image.url)"
-                      :alt="contentImageAlt(image)"
-                      :width="image.width"
-                      :height="image.height"
-                    />
+                    <span>思考过程</span>
+                    <span class="thinking-fold-icon" :class="{ open: expandedThinkingIds.has(seg.id) }"><el-icon><ArrowRightBold /></el-icon></span>
+                  </el-button>
+                  <div v-if="expandedThinkingIds.has(seg.id)" class="thinking-fold-body">
+                    {{ seg.thinking }}
+                  </div>
+                </div>
+
+                <MarkdownView :text="seg.text" />
+
+                <!-- 助手回复 / 工具结果里 `content` 数组内嵌的图片块（旧版 `chat-message.ts`
+                     的 `renderMessageImages` 对应物）。⚠️ 网关会把 toolResult 里图片的
+                     base64 抹掉只留占位 `omitted:true`（见 `utils/contentMedia.ts` 文件头），
+                     那种块在**解析期**就已跳过 —— 所以这里不会出现裂图。
+                     `:empty { display:none }` 兜住「有块但都解析不出地址」的空容器。 -->
+                <div v-if="seg.contentImages?.length" class="content-media__images">
+                  <template v-for="(image, i) in seg.contentImages" :key="`${seg.id}-img-${i}`">
+                    <!-- 包一层 <a>：图片也算「附件」，点击只**下载**（`download=1` 让网关回
+                         attachment）。以前是裸 <img> + JS 打开，那样会把整个聊天页顶掉。 -->
+                    <a
+                      v-if="contentMediaUrlOf(image.url)"
+                      class="content-media__image-link"
+                      :href="contentImageHref(image) ?? undefined"
+                      :download="downloadFileName(image.alt, '附件图片')"
+                      :title="contentImageTooltip(image)"
+                    >
+                      <img
+                        class="content-media__image"
+                        :src="contentMediaUrlOf(image.url)"
+                        :alt="contentImageAlt(image)"
+                        :width="image.width"
+                        :height="image.height"
+                      />
+                    </a>
+                  </template>
+                </div>
+
+                <!-- 内嵌非图片附件：音频（TTS）出播放器，视频 / 文档出可点开的文件卡片。
+                     `AudioPlayer` 内部自己走 `buildAssistantMediaUrl`，所以传**原始引用**；
+                     卡片同理，`href` 由渲染期白名单给出（不安全就不带 href → 纯展示）。 -->
+                <template v-for="(att, i) in seg.contentAttachments ?? []" :key="`${seg.id}-att-${i}`">
+                  <AudioPlayer v-if="att.kind === 'audio'" :source="att.url" :label="att.label" />
+                  <a
+                    v-else
+                    class="content-media__card"
+                    :class="{ 'content-media__card--previewable': !!contentAttachmentHref(att) }"
+                    :href="contentAttachmentHref(att) ?? undefined"
+                    :download="downloadFileName(att.label)"
+                    :title="att.label"
+                    :aria-label="att.label"
+                  >
+                    <ChatIcon class="content-media__card-icon" name="paperclip" />
+                    <span class="content-media__card-name">{{ att.label }}</span>
                   </a>
                 </template>
-              </div>
 
-              <!-- 内嵌非图片附件：音频（TTS）出播放器，视频 / 文档出可点开的文件卡片。
-                   `AudioPlayer` 内部自己走 `buildAssistantMediaUrl`，所以传**原始引用**；
-                   卡片同理，`href` 由渲染期白名单给出（不安全就不带 href → 纯展示）。 -->
-              <template v-for="(att, i) in msg.contentAttachments ?? []" :key="`${msg.id}-att-${i}`">
-                <AudioPlayer v-if="att.kind === 'audio'" :source="att.url" :label="att.label" />
-                <a
-                  v-else
-                  class="content-media__card"
-                  :class="{ 'content-media__card--previewable': !!contentAttachmentHref(att) }"
-                  :href="contentAttachmentHref(att) ?? undefined"
-                  :download="downloadFileName(att.label)"
-                  :title="att.label"
-                  :aria-label="att.label"
+                <!-- 正文里出现音频文件引用（如 /root/media/outbound/xxx.mp3）时给出播放控件 -->
+                <AudioPlayer
+                  v-for="ref in audioRefsFor(seg)"
+                  :key="ref.raw"
+                  :source="ref.raw"
+                  :label="ref.label"
+                />
+                </div>
+
+                <!-- 工具结果段：连续多条折叠成一个「思考过程」块（折叠头只在块首条渲染） -->
+                <div
+                  v-else-if="seg.role === 'toolResult' && isToolGroupStart(seg)"
+                  class="run-segment"
                 >
-                  <ChatIcon class="content-media__card-icon" name="paperclip" />
-                  <span class="content-media__card-name">{{ att.label }}</span>
-                </a>
+                <div class="chat-activity-group">
+                  <button
+                    class="chat-activity-group__summary"
+                    type="button"
+                    :aria-expanded="isToolGroupExpanded(seg)"
+                    @click="toggleToolGroup(toolGroupKey(seg))"
+                  >
+                    <span class="chat-activity-group__icon">⚡</span>
+                    <span class="chat-activity-group__label"
+                      >思考过程 · {{ toolGroupOf(seg).length }} 步</span
+                    >
+                    <span
+                      class="collapse-chevron"
+                      :class="{
+                        'collapse-chevron--collapsed': !isToolGroupExpanded(seg),
+                      }"
+                      aria-hidden="true"
+                      ><el-icon><ArrowDownBold /></el-icon></span
+                    >
+                  </button>
+                  <div
+                    v-if="isToolGroupExpanded(seg)"
+                    class="chat-activity-group__body"
+                  >
+                    <template v-for="t in toolGroupOf(seg)" :key="t.id">
+                      <div class="chat-tool-msg">
+                        <div class="chat-tool-msg__head">
+                          <span class="chat-tool-msg__icon">⚡</span>
+                          <span class="chat-tool-msg__label">tool</span>
+                        </div>
+                        <pre v-if="t.text" class="chat-tool-msg__body">{{ t.text }}</pre>
+                      </div>
+                    </template>
+                  </div>
+                </div>
+                </div>
+
+                <!-- 工具调用（role:"tool"）：结构化卡片（本部署通常只下发 toolResult） -->
+                <div v-else-if="seg.role === 'tool'" class="run-segment">
+                <div class="chat-tool-msg">
+                  <div class="chat-tool-msg__head">
+                    <span class="chat-tool-msg__icon">🔧</span>
+                    <span class="chat-tool-msg__label">{{ seg.toolName || "tool" }}</span>
+                    <span v-if="seg.status" class="chat-tool-msg__status">{{ seg.status }}</span>
+                  </div>
+                  <pre v-if="seg.text" class="chat-tool-msg__body">{{ seg.text }}</pre>
+                </div>
+                </div>
               </template>
 
-              <!-- 正文里出现音频文件引用（如 /root/media/outbound/xxx.mp3）时给出播放控件 -->
-              <AudioPlayer
-                v-for="ref in audioRefsFor(msg)"
-                :key="ref.raw"
-                :source="ref.raw"
-                :label="ref.label"
-              />
-
-              <!-- 消息元信息行：积分 + 上下文占用，两者都拿不到时不渲染 -->
-              <div v-if="hasMessageMeta(msg)" class="content-credits">
-                <template v-if="msg.spendResult">
-                  <!-- <span class="credits-item">
-                    <span class="credits-label">消耗积分</span>
-                    <span class="credits-value spend">{{ formatCredits(msg.spendResult.spend) }}</span>
-                  </span>
-                  <span class="credits-divider" /> -->
+              <!-- 单元底行：积分 + 操作，**一个回复单元只出现一次**。
+                   积分口径：取组内**末段**的 spendResult（不求和），任一段还在查就显示
+                   「积分计算中」—— 与实时 final 帧的口径一致。 -->
+              <div v-if="hasRunMeta(msg) && !isLiveTailRun(msg)" class="content-credits">
+                <template v-if="runSpendResultOf(msg)">
                   <span class="credits-item">
                     <span class="credits-label">剩余积分</span>
-                    <span class="credits-value balance">{{ formatBalance(msg.spendResult.balance) }}</span>
+                    <span class="credits-value balance">{{ formatBalance(runSpendResultOf(msg)?.balance) }}</span>
                   </span>
-                  <span v-if="msg.provider && msg.model" class="credits-divider" />
-                  <span v-if="msg.provider && msg.model" class="credits-item credits-item-model" :title="`${msg.provider}/${msg.model}`">
-                    <!-- <span class="credits-label">生成模型</span> -->
-                    <span class="credits-value model">{{ msg.model }}</span>
+                  <span v-if="runModelPartsOf(msg)" class="credits-divider" />
+                  <span
+                    v-if="runModelPartsOf(msg)"
+                    class="credits-item credits-item-model"
+                    :title="`${runModelPartsOf(msg)?.provider}/${runModelPartsOf(msg)?.model}`"
+                  >
+                    <span class="credits-value model">{{ runModelPartsOf(msg)?.model }}</span>
                   </span>
                 </template>
-                <span v-else-if="msg.spendLoading" class="credits-loading">
+                <span v-else-if="runSpendLoadingOf(msg)" class="credits-loading">
                   <el-icon class="is-loading"><Loading /></el-icon>
                   <span>积分计算中</span>
                 </span>
 
-                <!-- 操作按钮：删除 / 复制（移植自上游 chat-message.ts 的 footer actions） -->
+                <!-- 操作按钮：详情 / 删除 / 复制 / id（删除与复制都是**整组**粒度） -->
                 <span
-                  v-if="msg.spendResult || msg.spendLoading"
+                  v-if="runSpendResultOf(msg) || runSpendLoadingOf(msg)"
                   class="credits-divider"
                 />
                 <span class="msg-actions">
                   <el-button
-                    v-if="canOpenDetail(msg)"
+                    v-if="canOpenRunDetailOf(msg)"
                     class="msg-action msg-action--detail"
                     text
                     size="small"
                     title="查看详情"
                     aria-label="查看详情"
-                    @click="emit('openDetail', msg)"
+                    @click="openRunDetail(msg)"
                   >
                     <el-icon><View /></el-icon>
                   </el-button>
@@ -4245,9 +4651,9 @@ function formatBalance(value: number | null | undefined): string {
                     class="msg-action msg-action--delete"
                     text
                     size="small"
-                    title="删除这条消息"
-                    aria-label="删除消息"
-                    @click="requestDeleteMessage(msg, $event)"
+                    title="删除这条回复"
+                    aria-label="删除回复"
+                    @click="requestDeleteRun(msg, $event)"
                   >
                     <el-icon><Delete /></el-icon>
                   </el-button>
@@ -4255,28 +4661,28 @@ function formatBalance(value: number | null | undefined): string {
                     class="msg-action msg-action--copy"
                     text
                     size="small"
-                    :class="copyStateOf(msg) ? `is-${copyStateOf(msg)}` : ''"
-                    :title="copyTitleOf(msg)"
+                    :class="runCopyStateOf(msg) ? `is-${runCopyStateOf(msg)}` : ''"
+                    :title="runCopyTitleOf(msg)"
                     aria-label="复制为 Markdown"
-                    :disabled="!canCopyMessage(msg)"
-                    @click="copyMessage(msg)"
+                    :disabled="!canCopyRunOf(msg)"
+                    @click="copyRun(msg)"
                   >
-                    <el-icon v-if="copyStateOf(msg) === 'copied'"><Check /></el-icon>
-                    <el-icon v-else-if="copyStateOf(msg) === 'error'"><WarningFilled /></el-icon>
+                    <el-icon v-if="runCopyStateOf(msg) === 'copied'"><Check /></el-icon>
+                    <el-icon v-else-if="runCopyStateOf(msg) === 'error'"><WarningFilled /></el-icon>
                     <el-icon v-else><CopyDocument /></el-icon>
                   </el-button>
                   <el-button
                     class="msg-action msg-action--id"
                     text
                     size="small"
-                    :class="idCopyStateOf(msg) ? `is-${idCopyStateOf(msg)}` : ''"
-                    :title="idCopyTitleOf(msg)"
+                    :class="runIdCopyStateOf(msg) ? `is-${runIdCopyStateOf(msg)}` : ''"
+                    :title="runIdCopyTitleOf(msg)"
                     aria-label="复制消息 id"
-                    :disabled="!canCopyMessageId(msg)"
-                    @click="copyMessageId(msg)"
+                    :disabled="!runLastMessageId(turnRunOf(msg))"
+                    @click="copyRunIds(msg)"
                   >
-                    <el-icon v-if="idCopyStateOf(msg) === 'copied'"><Check /></el-icon>
-                    <el-icon v-else-if="idCopyStateOf(msg) === 'error'"><WarningFilled /></el-icon>
+                    <el-icon v-if="runIdCopyStateOf(msg) === 'copied'"><Check /></el-icon>
+                    <el-icon v-else-if="runIdCopyStateOf(msg) === 'error'"><WarningFilled /></el-icon>
                     <el-icon v-else><DocumentCopy /></el-icon>
                   </el-button>
                 </span>
@@ -4284,95 +4690,10 @@ function formatBalance(value: number | null | undefined): string {
             </div>
           </div>
 
-          <!-- 工具结果：折叠进「思考过程」卡片（移植上游 chat-message.ts
-               `renderActivityDisclosure`）。连续多条 toolResult 合并为一个折叠块。
-               默认折叠；不再标红、不再显示 "includes errors"（工具执行过程按
-               正常思考过程中性展示）。每条 toolResult 只带 `text`（无 toolName），
-               上游 `extractToolCards` 兜底 name="tool"。 -->
-          <div
-            v-else-if="msg.role === 'toolResult' && isToolGroupStart(msg)"
-            class="row row-assistant"
-          >
-            <span class="msg-avatar">
-              <ChatAvatar
-                role="assistant"
-                :name="assistantName"
-                :avatar="assistantAvatar"
-                :avatar-status="assistantAvatarStatus"
-                :agent-id="assistantAvatarAgentId"
-                :token="settings.token"
-                :size="32"
-              />
-            </span>
-            <div class="content">
-              <div class="chat-activity-group">
-                <button
-                  class="chat-activity-group__summary"
-                  type="button"
-                  :aria-expanded="isToolGroupExpanded(msg)"
-                  @click="toggleToolGroup(toolGroupKey(msg))"
-                >
-                  <span class="chat-activity-group__icon">⚡</span>
-                  <span class="chat-activity-group__label"
-                    >思考过程 · {{ toolGroupOf(msg).length }} 步</span
-                  >
-                  <span
-                    class="collapse-chevron"
-                    :class="{
-                      'collapse-chevron--collapsed': !isToolGroupExpanded(msg),
-                    }"
-                    aria-hidden="true"
-                    ><el-icon><ArrowDownBold /></el-icon></span
-                  >
-                </button>
-                <div
-                  v-if="isToolGroupExpanded(msg)"
-                  class="chat-activity-group__body"
-                >
-                  <template v-for="t in toolGroupOf(msg)" :key="t.id">
-                    <div class="chat-tool-msg">
-                      <div class="chat-tool-msg__head">
-                        <span class="chat-tool-msg__icon">⚡</span>
-                        <span class="chat-tool-msg__label">tool</span>
-                      </div>
-                      <pre v-if="t.text" class="chat-tool-msg__body">{{ t.text }}</pre>
-                    </div>
-                  </template>
-                </div>
-              </div>
-            </div>
-          </div>
-          <!-- 同一连续 run 里后续 toolResult：折叠头已在首条渲染，这里静默跳过 -->
-          <template v-else-if="msg.role === 'toolResult'"></template>
+          <!-- 组内非首条：整组已由首条渲染，这里静默跳过 -->
+          <template v-else-if="isTurnRunMember(msg)"></template>
 
-          <!-- 工具调用（role:"tool"）：结构化卡片（对齐旧版 chat-tool-cards）。
-               与 toolResult 折叠块并列；本部署通常只下发 toolResult，此分支为防御性实现。 -->
-          <div
-            v-else-if="msg.role === 'tool'"
-            class="row row-assistant"
-          >
-            <span class="msg-avatar">
-              <ChatAvatar
-                role="assistant"
-                :name="assistantName"
-                :avatar="assistantAvatar"
-                :avatar-status="assistantAvatarStatus"
-                :agent-id="assistantAvatarAgentId"
-                :token="settings.token"
-                :size="32"
-              />
-            </span>
-            <div class="content">
-              <div class="chat-tool-msg">
-                <div class="chat-tool-msg__head">
-                  <span class="chat-tool-msg__icon">🔧</span>
-                  <span class="chat-tool-msg__label">{{ msg.toolName || "tool" }}</span>
-                  <span v-if="msg.status" class="chat-tool-msg__status">{{ msg.status }}</span>
-                </div>
-                <pre v-if="msg.text" class="chat-tool-msg__body">{{ msg.text }}</pre>
-              </div>
-            </div>
-          </div>
+
 
           <div v-else class="row row-system">
             <span class="system-text">{{ msg.text }}</span>
@@ -4381,8 +4702,14 @@ function formatBalance(value: number | null | undefined): string {
 
         <!-- 流式中：思考 + 正文 + 引导徽标共存于同一气泡（workbuddy 风格）。
              早期实现是 v-if/v-else-if 三段互斥，导致思考阶段"挡住"正文看不到 —— 现在改为单 row、单头像、单 content 容器，按顺序渲染各部分。 -->
-        <div v-if="sending" class="row row-assistant">
-          <span class="msg-avatar">
+        <div
+          v-if="sending"
+          class="row row-assistant"
+          :class="{ 'row-assistant--continuation': liveTailMerges }"
+        >
+          <!-- 并入上一组时不再出现第二个头像：留一个**等宽占位**，让正文与组内内容左对齐 -->
+          <span v-if="liveTailMerges" class="msg-avatar msg-avatar--ghost" aria-hidden="true" />
+          <span v-else class="msg-avatar">
             <ChatAvatar
               role="assistant"
               :name="assistantName"
@@ -4415,13 +4742,13 @@ function formatBalance(value: number | null | undefined): string {
               </div>
             </div>
 
-            <!-- 正文 -->
-            <template v-if="streamingText">
-              <div class="content-meta">
+            <!-- 正文（压缩提示在 `visibleStreamingText` 里已被挡掉，见该文件头注释） -->
+            <template v-if="visibleStreamingText">
+              <div v-if="!liveTailMerges" class="content-meta">
                 <span class="content-name">{{ assistantName }}</span>
                 <span class="content-time">生成中</span>
               </div>
-              <MarkdownView :text="streamingMediaSplit.text" :streaming="true" />
+              <MarkdownView :text="visibleStreamingText" :streaming="true" />
 
               <!-- 流式过程中正文里出现的媒体：`MEDIA:` 行剥离后立刻渲染，
                    交互（播放 / 预览 / 下载）与落库后的消息气泡完全同一套。 -->
@@ -4680,7 +5007,6 @@ function formatBalance(value: number | null | undefined): string {
           v-model="input"
           class="composer-input"
           rows="1"
-          :disabled="insufficientCredits"
           :placeholder="composerPlaceholder"
           @keydown="onKeydown"
           @paste="onInputPaste"
@@ -4761,7 +5087,7 @@ function formatBalance(value: number | null | undefined): string {
               <el-button
                 text
                 class="chat-export-conversation"
-                aria-label="导出对话为 Markdown"
+                aria-label="导出对话为 Markdown（全量）"
                 :loading="exportingFullConversation"
                 @click="exportConversation"
               >
@@ -4900,7 +5226,7 @@ function formatBalance(value: number | null | undefined): string {
               v-else
               type="primary"
               class="send-button send-button-primary"
-              :disabled="insufficientCredits || (!input.trim() && attachments.length === 0)"
+              :disabled="!input.trim() && attachments.length === 0"
               title="发送（Enter）"
               aria-label="发送"
               @click="submitComposer"
@@ -5088,6 +5414,91 @@ function formatBalance(value: number | null | undefined): string {
   color: var(--wb-text-tertiary);
 }
 
+/* ============== 压缩节点（Compaction） ============== */
+/*
+ * 视觉口径：与消息气泡**明确区分** ——
+ *   ① 居中、整行虚线分隔（气泡是左右分列、实心底）；
+ *   ② 弱化色 + 小号字，一眼看出是「流程标记」而不是对话内容；
+ *   ③ 折叠态只有一行，摘要正文必须点开才出现（不抢正文的注意力）。
+ * 这些样式**只影响界面**：节点不写回 transcript，也不参与发给模型的上下文。
+ */
+.compaction-node {
+  margin: 10px 0;
+  padding: 6px 0;
+  border-top: 1px dashed var(--oc-border, #dcdfe6);
+  border-bottom: 1px dashed var(--oc-border, #dcdfe6);
+  text-align: center;
+}
+
+.compaction-node__toggle,
+.compaction-node__static {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 2px 4px;
+  background: none;
+  border: 0;
+  color: var(--oc-text-secondary, #909399);
+  font-size: 12px;
+  line-height: 20px;
+  cursor: pointer;
+}
+
+.compaction-node__static {
+  cursor: default;
+}
+
+.compaction-node__toggle:hover {
+  color: var(--oc-text-regular, #606266);
+}
+
+.compaction-node__caret {
+  display: inline-flex;
+  transition: transform 0.15s ease;
+  transform: rotate(0deg);
+}
+
+.compaction-node__caret.open {
+  transform: rotate(90deg);
+}
+
+.compaction-node__tag {
+  flex-shrink: 0;
+  padding: 0 6px;
+  border: 1px solid var(--oc-border, #dcdfe6);
+  border-radius: 8px;
+  color: var(--oc-text-secondary, #909399);
+  font-size: 11px;
+}
+
+.compaction-node__title {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.compaction-node__body {
+  margin: 6px auto 0;
+  max-width: 720px;
+  text-align: left;
+}
+
+.compaction-node__meta {
+  color: var(--oc-text-secondary, #909399);
+  font-size: 11px;
+}
+
+.compaction-node__summary {
+  margin-top: 4px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--oc-fill-light, #f5f7fa);
+  color: var(--oc-text-regular, #606266);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
 /* ============== 积分不足横幅 ============== */
 
 .credits-alert {
@@ -5131,27 +5542,6 @@ html.dark .credits-alert :deep(.el-alert__title) {
   position: relative;
   flex: 1;
   overflow-y: auto;
-}
-
-/* 用户上滑看历史时出现的「跳到底部」入口（对齐旧版 chatNewMessagesBelow 指示条） */
-.thread-jump-bottom {
-  position: absolute;
-  left: 50%;
-  bottom: 16px;
-  transform: translateX(-50%);
-  z-index: 5;
-  padding: 6px 14px;
-  border: 1px solid var(--el-color-primary-light-5, #b3d8ff);
-  border-radius: 16px;
-  background: var(--el-color-primary-light-9, #ecf5ff);
-  color: var(--el-color-primary, #409eff);
-  font-size: 12px;
-  cursor: pointer;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
-}
-
-.thread-jump-bottom:hover {
-  background: var(--el-color-primary-light-8, #d9ecff);
 }
 
 /* 顶部无限滚动哨兵：只给 IntersectionObserver 命中用，不参与视觉（1px 且不吃 margin） */
@@ -5503,6 +5893,23 @@ html.dark .credits-alert :deep(.el-alert__title) {
 .row-assistant {
   gap: 12px;
   align-items: flex-start;
+}
+
+/* 一个回合合并成一个回复单元之后，组内各段之间的间距（头像 / 名称时间 / 底行
+   只在组级出现一次，段与段只需要「内容块之间」的呼吸感）。 */
+.run-segment + .run-segment {
+  margin-top: 14px;
+}
+
+/* 本组的流式尾巴并进来时：本行不再额外留 24px，与上一段连成一个单元 */
+.row-assistant--live-tail {
+  margin-bottom: 0;
+}
+
+/* 并入上一组的流式行：头像位置留空占位（宽度与头像一致，正文左对齐不变） */
+.msg-avatar--ghost {
+  width: 32px;
+  height: 32px;
 }
 
 .content {

@@ -1,10 +1,3 @@
-import {
-  clearDeviceAuthToken,
-  loadDeviceAuthToken,
-  loadOrCreateDeviceIdentity,
-  signDevicePayload,
-  storeDeviceAuthToken,
-} from "./device";
 /**
  * Gateway WebSocket 客户端。
  *
@@ -24,6 +17,13 @@ import {
   type GatewayClientMode,
   type GatewayClientName,
 } from "./protocol";
+import {
+  clearDeviceAuthToken,
+  loadDeviceAuthToken,
+  loadOrCreateDeviceIdentity,
+  signDevicePayload,
+  storeDeviceAuthToken,
+} from "./device";
 
 export type GatewayEventFrame = {
   type: "event";
@@ -138,12 +138,7 @@ export type GatewayBrowserClientOptions = {
   instanceId?: string;
   onHello?: (hello: GatewayHelloOk) => void;
   onEvent?: (evt: GatewayEventFrame) => void;
-  onClose?: (info: {
-    code: number;
-    reason: string;
-    error?: GatewayErrorInfo;
-    willRetry: boolean;
-  }) => void;
+  onClose?: (info: { code: number; reason: string; error?: GatewayErrorInfo; willRetry: boolean }) => void;
   onGap?: (info: { expected: number; received: number }) => void;
   /** 连接握手计时（诊断用）：`ok=false` 表示这次握手失败。 */
   onConnectTiming?: (info: { ms: number; ok: boolean }) => void;
@@ -186,8 +181,7 @@ function isTrustedRetryEndpoint(url: string): boolean {
   try {
     const gatewayUrl = new URL(url, window.location.href);
     const host = gatewayUrl.hostname.trim().toLowerCase();
-    const isLoopback =
-      host === "localhost" || host === "::1" || host === "[::1]" || isLoopbackIPv4Host(host);
+    const isLoopback = host === "localhost" || host === "::1" || host === "[::1]" || isLoopbackIPv4Host(host);
     if (isLoopback) return true;
     const pageUrl = new URL(window.location.href);
     return gatewayUrl.host === pageUrl.host;
@@ -289,12 +283,7 @@ export class GatewayBrowserClient {
           : `无法创建 Gateway WebSocket：${err instanceof Error ? err.message : String(err)}`,
       };
       this.flushPending(new Error(error.message));
-      this.notifyClose({
-        code: BROWSER_WEBSOCKET_CLOSE_CODE,
-        reason: "websocket error",
-        error,
-        willRetry: false,
-      });
+      this.notifyClose({ code: BROWSER_WEBSOCKET_CLOSE_CODE, reason: "websocket error", error, willRetry: false });
       return;
     }
     const generation = ++this.connectGeneration;
@@ -325,7 +314,9 @@ export class GatewayBrowserClient {
         // 网关明确给了「多久之后再来」（starting / unavailable）就按它说的等，
         // 否则退回指数退避。
         const hinted = connectError?.retryAfterMs;
-        this.scheduleReconnect(typeof hinted === "number" && hinted > 0 ? hinted : undefined);
+        this.scheduleReconnect(
+          typeof hinted === "number" && hinted > 0 ? hinted : undefined,
+        );
       }
     });
     ws.addEventListener("error", () => {
@@ -374,19 +365,14 @@ export class GatewayBrowserClient {
       gatewayUrl: this.opts.url,
       role: params.role,
     });
-    const storedTokenCanRead = storedDeviceTokenScopesAllowRead(
-      params.role,
-      storedEntry?.scopes ?? [],
-    );
+    const storedTokenCanRead = storedDeviceTokenScopesAllowRead(params.role, storedEntry?.scopes ?? []);
     const storedToken = storedTokenCanRead ? storedEntry?.token : undefined;
     const shouldUseDeviceRetryToken =
       this.pendingDeviceTokenRetry &&
       Boolean(explicitGatewayToken) &&
       Boolean(storedToken) &&
       isTrustedRetryEndpoint(this.opts.url);
-    const resolvedDeviceToken = !(explicitGatewayToken || authPassword)
-      ? (storedToken ?? undefined)
-      : undefined;
+    const resolvedDeviceToken = !(explicitGatewayToken || authPassword) ? (storedToken ?? undefined) : undefined;
     return {
       authToken: explicitGatewayToken ?? resolvedDeviceToken,
       authDeviceToken: shouldUseDeviceRetryToken ? (storedToken ?? undefined) : undefined,
@@ -513,19 +499,9 @@ export class GatewayBrowserClient {
         Boolean(selectedAuth.storedToken) &&
         (selectedAuth.resolvedDeviceToken === selectedAuth.storedToken ||
           selectedAuth.authDeviceToken === selectedAuth.storedToken);
-      const code = readConnectErrorDetailCode(
-        err instanceof GatewayRequestError ? err.details : undefined,
-      );
-      if (
-        usedStoredToken &&
-        deviceIdentity &&
-        code === ConnectErrorDetailCodes.AUTH_DEVICE_TOKEN_MISMATCH
-      ) {
-        clearDeviceAuthToken({
-          deviceId: deviceIdentity.deviceId,
-          gatewayUrl: this.opts.url,
-          role,
-        });
+      const code = readConnectErrorDetailCode(err instanceof GatewayRequestError ? err.details : undefined);
+      if (usedStoredToken && deviceIdentity && code === ConnectErrorDetailCodes.AUTH_DEVICE_TOKEN_MISMATCH) {
+        clearDeviceAuthToken({ deviceId: deviceIdentity.deviceId, gatewayUrl: this.opts.url, role });
       }
       if (
         !this.deviceTokenRetryBudgetUsed &&
@@ -622,12 +598,7 @@ export class GatewayBrowserClient {
     }
   }
 
-  private notifyClose(info: {
-    code: number;
-    reason: string;
-    error?: GatewayErrorInfo;
-    willRetry: boolean;
-  }): void {
+  private notifyClose(info: { code: number; reason: string; error?: GatewayErrorInfo; willRetry: boolean }): void {
     try {
       this.opts.onClose?.(info);
     } catch (err) {
@@ -684,11 +655,7 @@ export class GatewayBrowserClient {
     );
   }
 
-  private requestOnSocket<T = unknown>(
-    ws: WebSocket,
-    method: string,
-    params?: unknown,
-  ): Promise<T> {
+  private requestOnSocket<T = unknown>(ws: WebSocket, method: string, params?: unknown): Promise<T> {
     if (this.ws !== ws || ws.readyState !== WebSocket.OPEN) {
       return Promise.reject(new Error("gateway not connected"));
     }

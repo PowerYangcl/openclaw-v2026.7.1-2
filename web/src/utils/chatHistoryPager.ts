@@ -21,24 +21,29 @@
  */
 
 /**
- * 单页历史条数（`chat.history` 的 `limit`）。
+ * **页面视图**单页历史条数（`chat.history` 的 `limit`，首屏 + 向上翻页共用）。
  *
- * 从 200 提到 500 的依据（实测 1328 条会话，页面同源上下文发 RPC，只算网关侧）：
+ * 实测基准（1328 条会话，页面同源上下文发 RPC，只算网关侧）：
  *
  * | limit | 响应体积 | 网关中位耗时 | 拉完全部需 |
  * |-------|----------|--------------|------------|
+ * | 100   | ~110KB   | ~99ms        | 14 次      |
  * | 200   | 221.4KB  | 99ms         | 7 次       |
  * | 500   | 814.1KB  | 107ms        | 3 次       |
  * | 1000  | 1260.9KB | 176ms        | 2 次       |
  *
- * 500 是拐点：耗时代价 +8ms（1.08x，感知不到），往返次数 7→3。
- * 1000 单帧涨到 1.26MB 且耗时 1.78x，收益（3→2 次）远不及代价，故不取。
+ * 口径：**视图请求取小页（100）** —— 单帧更小（~110KB vs 814KB），弱网 / 预发环境下
+ * 首屏与每次翻页的传输与解析峰值都更低；代价是翻完全部历史要多几次往返（3 → 14），
+ * 但翻页由无限滚动按需触发，用户几乎感知不到。
+ * 需要**一次性拉全**的路径不要用这个常量：全量导出按 `FULL_EXPORT_PAGE_SIZE`(500) 取大页，
+ * 避免 50 页的本地闸门被小页提前耗尽（见 `utils/fullChatExport.ts`）。
+ *
  * 协议上限为 1000（`ChatHistoryParamsSchema.limit`），改这里不必动网关。
  *
  * ⚠️ 首屏（offset=0）另有约 100ms 固定成本（疑似 totalMessages 全量计数），
  * 与 limit 无关 —— 调这个常量压不掉它。
  */
-export const CHAT_HISTORY_PAGE_SIZE = 500;
+export const CHAT_HISTORY_PAGE_SIZE = 100;
 
 /**
  * 单条消息正文的字符上限。
@@ -52,10 +57,12 @@ export const CHAT_HISTORY_MAX_CHARS = 200_000;
 /**
  * 入参降级时用的**保守页大小**（`requestChatHistory` 第二次尝试才用）。
  *
- * 为什么要「降」而不是沿用 `CHAT_HISTORY_PAGE_SIZE`：老网关的 schema 是
+ * 为什么要显式指定而不是沿用 `CHAT_HISTORY_PAGE_SIZE`：老网关的 schema 是
  * `additionalProperties: false` **且**每个字段带 `maximum`。只删新增字段、把 `limit`
  * 原样重发，会被同一个 `invalid chat.history params` **再拒一次** —— 降级等于没写，
- * 症状与「历史一条都不显示」完全相同。100 在所有历史版本的 schema 里都合法。
+ * 症状与「历史一条都不显示」完全相同。100 在所有历史版本的 schema 里都合法，
+ * 所以它与 `CHAT_HISTORY_PAGE_SIZE` 取同值：**改视图页大小时别顺手改这个常量**，
+ * 它代表的是「老网关也认的保守上限」，不是当前的视图页大小。
  */
 export const CHAT_HISTORY_FALLBACK_PAGE_SIZE = 100;
 

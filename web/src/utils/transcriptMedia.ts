@@ -47,18 +47,7 @@ export type TranscriptMediaItem = {
   mediaType?: string;
 };
 
-const IMAGE_EXTENSIONS = [
-  "png",
-  "jpg",
-  "jpeg",
-  "gif",
-  "webp",
-  "bmp",
-  "svg",
-  "heic",
-  "heif",
-  "avif",
-];
+const IMAGE_EXTENSIONS = ["png", "jpg", "jpeg", "gif", "webp", "bmp", "svg", "heic", "heif", "avif"];
 const AUDIO_EXTENSIONS = ["aac", "flac", "m2a", "m4a", "mp3", "oga", "ogg", "opus", "wav"];
 const VIDEO_EXTENSIONS = ["m4v", "mov", "mp4", "webm"];
 

@@ -1,10 +1,6 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from "vue-router";
 import { useGatewayStore } from "@/stores/gateway";
-import {
-  captureUrlOverridesOnce,
-  entryLandingPath,
-  sanitizeInternalPath,
-} from "@/utils/urlOverrides";
+import { captureUrlOverridesOnce, entryLandingPath, sanitizeInternalPath } from "@/utils/urlOverrides";
 
 // 必须早于 createWebHistory()：先解析并清理地址栏里的 #token= / ?token=，
 // 否则 token 会被路由的 redirect 参数裹挟，登录后又写回地址栏。
@@ -50,12 +46,7 @@ const routes: RouteRecordRaw[] = [
     },
     children: [
       // { path: "overview", name: "overview", component: () => import("@/views/OverviewView.vue"), meta: { title: "概览", icon: "Odometer" } },
-      {
-        path: "chat",
-        name: "chat",
-        component: () => import("@/views/ChatView.vue"),
-        meta: { title: "对话", icon: "ChatDotRound" },
-      },
+      { path: "chat", name: "chat", component: () => import("@/views/ChatView.vue"), meta: { title: "对话", icon: "ChatDotRound" } },
       // { path: "sessions", name: "sessions", component: () => import("@/views/SessionsView.vue"), meta: { title: "会话", icon: "Files" } },
       // { path: "channels", name: "channels", component: () => import("@/views/ChannelsView.vue"), meta: { title: "通道", icon: "Connection" } },
       // { path: "agents", name: "agents", component: () => import("@/views/AgentsView.vue"), meta: { title: "智能体", icon: "UserFilled" } },
@@ -112,12 +103,11 @@ router.beforeEach((to) => {
   return { name: "login", query: { redirect: sanitizeInternalPath(to.fullPath) } };
 });
 
-export const navRoutes =
-  routes
-    .find((r) => r.path === "/")
-    ?.children?.map((child) => ({
-      name: String(child.name ?? ""),
-      path: `/${String(child.path ?? "")}`,
-      title: String((child.meta as { title?: string } | undefined)?.title ?? child.name ?? ""),
-      icon: String((child.meta as { icon?: string } | undefined)?.icon ?? "Menu"),
-    })) ?? [];
+export const navRoutes = routes
+  .find((r) => r.path === "/")
+  ?.children?.map((child) => ({
+    name: String(child.name ?? ""),
+    path: `/${String(child.path ?? "")}`,
+    title: String((child.meta as { title?: string } | undefined)?.title ?? child.name ?? ""),
+    icon: String((child.meta as { icon?: string } | undefined)?.icon ?? "Menu"),
+  })) ?? [];

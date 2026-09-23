@@ -21,10 +21,28 @@
  *   跨源 `fetch` 必失败，拦下来只会让本来能用的下载变不能用。
  * - **超大文件不接管**：字节要在内存里过一道，超过 `BLOB_DOWNLOAD_MAX_BYTES` 时
  *   回落到原生下载（HTTP 站点仍会被浏览器拦，但至少不制造 OOM）。
+ *
+ * ## 兜底失败必须**回落原生下载**（2026-09-21 修复）
+ * 预发实测：接管了点击（`preventDefault`）之后 fetch 失败 —— 最常见的成因是**站点前面
+ * 的 CDN / 反代把 http 请求 301 到 https**，于是 fetch 变成「跨源重定向」，而媒体路由
+ * 不带 CORS 头 ⇒ `TypeError: Failed to fetch`；同样情况下**原生 `<a>` 导航却能跟随
+ * 重定向把文件下下来**（导航不受 CORS 约束）。
+ *
+ * 旧实现失败后只弹提示，等于「既没下到，也把原本能用的原生下载堵死了」，而提示还让
+ * 用户去点一个永远不会出现的下载气泡 —— 这就是用户报的「不能下载」。现在：
+ *   ① 失败 → `saveUrlViaNativeAnchor` 立刻回落到原生下载（气泡出现，用户可点「保留」）；
+ *   ② 同时 `probeMediaAvailability` 尽力问一次 `?meta=1`，把**真实原因**（网关报告
+ *      不可用 / 网络层失败）写进提示，而不是一律甩锅给「浏览器拦截」。
  */
 
 /** 内存中转的上限：超过就放弃兜底，回落原生下载。 */
 export const BLOB_DOWNLOAD_MAX_BYTES = 200 * 1024 * 1024;
+
+/**
+ * 强制下载的查询键名。与 `utils/assistantMedia.ts`、网关 `control-ui.ts` 对齐
+ * （这里刻意不 import，避免多一层依赖）。
+ */
+const DOWNLOAD_QUERY_KEY = "download";
 
 export type BlobDownloadDecision = {
   /** 目标地址。 */
@@ -89,4 +107,113 @@ export async function saveUrlViaBlob(url: string, fileName: string): Promise<num
   // 立刻 revoke 会让部分浏览器的下载中断，留一点缓冲
   window.setTimeout(() => URL.revokeObjectURL(objectUrl), 10_000);
   return blob.size;
+}
+
+/** 回落锚点打的标记：带它的锚点不再被窗格捕获委托接管（否则会无限递归）。 */
+export const NATIVE_DOWNLOAD_ATTR = "data-openclaw-native-download";
+
+/** 这个元素是不是「已回落」的原生下载锚点。 */
+export function isNativeDownloadAnchor(el: Element | null | undefined): boolean {
+  return el?.getAttribute?.(NATIVE_DOWNLOAD_ATTR) === "1";
+}
+
+/**
+ * 回落：用浏览器**原生** `<a download>` 触发一次下载。
+ *
+ * 为什么必须留着这条路：`blob:` 兜底要求同源 fetch 成功；一旦站点前面有 CDN / 反代
+ * 把 http 301 到 https（跨源重定向）或直接拒绝非导航请求，`fetch` 必失败，而原生
+ * 导航能跟随重定向拿到文件。失败时只弹提示 = 用户彻底下不到东西。
+ *
+ * 挂到 `document.body` **并**打标记：双保险，确保它不会被窗格上的捕获委托再次接管。
+ * 返回是否真的触发了点击（地址为空时返回 false）。
+ */
+export function saveUrlViaNativeAnchor(url: string, fileName: string): boolean {
+  const target = typeof url === "string" ? url.trim() : "";
+  if (!target) return false;
+  const anchor = document.createElement("a");
+  anchor.setAttribute(NATIVE_DOWNLOAD_ATTR, "1");
+  anchor.href = target;
+  anchor.download = typeof fileName === "string" && fileName.trim() ? fileName.trim() : "附件";
+  anchor.rel = "noopener";
+  anchor.style.display = "none";
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  return true;
+}
+
+/** `?meta=1` 探测的结果。 */
+export type MediaAvailabilityProbe =
+  | { status: "available" }
+  | { status: "unavailable"; reason: string }
+  /** 探测本身没结论（网络失败 / 该路由不认识 `meta`）—— 不要据此误报「文件不可用」。 */
+  | { status: "unknown"; detail: string };
+
+/**
+ * 把「下载地址」改写成「可用性探测地址」（`?download=1` → `?meta=1`）。
+ *
+ * 解析不出来（相对地址 + 没有 base）时返回 `null`。
+ */
+export function buildMediaMetaUrl(url: string, baseHref?: string): string | null {
+  const raw = typeof url === "string" ? url.trim() : "";
+  if (!raw) return null;
+  const base = typeof baseHref === "string" && baseHref.trim() ? baseHref.trim() : undefined;
+  try {
+    const parsed = new URL(raw, base);
+    parsed.searchParams.delete(DOWNLOAD_QUERY_KEY);
+    parsed.searchParams.set("meta", "1");
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 尽力问一次网关「这个附件到底可不可用」。
+ *
+ * 只在**兜底已经失败**之后才调用，因此不必省这一次请求；结论用于把提示写准：
+ * 是「网关说文件不在允许目录 / 已删除」，还是「网络层取不到字节」。
+ */
+export async function probeMediaAvailability(url: string): Promise<MediaAvailabilityProbe> {
+  const metaUrl = buildMediaMetaUrl(
+    url,
+    typeof window === "undefined" ? undefined : window.location.href,
+  );
+  if (!metaUrl) return { status: "unknown", detail: "地址无法解析" };
+  try {
+    const res = await fetch(metaUrl, { credentials: "same-origin" });
+    if (!res.ok) return { status: "unknown", detail: `探测返回 HTTP ${res.status}` };
+    const payload = (await res.json().catch(() => null)) as {
+      available?: boolean;
+      reason?: string;
+    } | null;
+    if (payload?.available === true) return { status: "available" };
+    if (payload?.available === false) {
+      const reason =
+        typeof payload.reason === "string" && payload.reason.trim()
+          ? payload.reason.trim()
+          : "网关未说明原因";
+      return { status: "unavailable", reason };
+    }
+    return { status: "unknown", detail: "该路由没有返回可用性信息" };
+  } catch {
+    return { status: "unknown", detail: "探测请求也失败了（网络层）" };
+  }
+}
+
+/**
+ * 兜底失败后给用户的**第二行**提示（主文案由调用方拼）。
+ *
+ * 一律不抛：探测失败也只是少一句解释。
+ */
+export async function describeDownloadFailure(url: string, error: unknown): Promise<string> {
+  const detail = error instanceof Error ? error.message : String(error ?? "");
+  const probe = await probeMediaAvailability(url);
+  if (probe.status === "unavailable") {
+    return `网关报告该附件不可用：${probe.reason}。`;
+  }
+  if (probe.status === "unknown") {
+    return `直读失败：${detail || "未知错误"}；探测无结论：${probe.detail}`;
+  }
+  return "若浏览器提示「不安全下载 / 无法从网站上提取文件」，请在下载气泡里点「保留」。";
 }

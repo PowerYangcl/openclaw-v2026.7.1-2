@@ -46,9 +46,7 @@ function resolveNativeBinary() {
 const binary = resolveNativeBinary();
 const result = spawnSync(binary, process.argv.slice(2), { stdio: "inherit" });
 if (result.error) {
-  console.error(
-    `[esbuild-cli] 无法启动 esbuild 原生二进制：${result.error.message}\n  路径：${binary}`,
-  );
+  console.error(`[esbuild-cli] 无法启动 esbuild 原生二进制：${result.error.message}\n  路径：${binary}`);
   process.exit(1);
 }
 process.exit(result.status ?? 1);

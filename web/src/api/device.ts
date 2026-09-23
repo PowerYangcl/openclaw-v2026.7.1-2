@@ -113,11 +113,7 @@ export async function loadOrCreateDeviceIdentity(): Promise<DeviceIdentity> {
         if (derivedId !== parsed.deviceId) {
           const updated: StoredIdentity = { ...parsed, deviceId: derivedId };
           storage?.setItem(DEVICE_IDENTITY_STORAGE_KEY, JSON.stringify(updated));
-          return {
-            deviceId: derivedId,
-            publicKey: parsed.publicKey,
-            privateKey: parsed.privateKey,
-          };
+          return { deviceId: derivedId, publicKey: parsed.publicKey, privateKey: parsed.privateKey };
         }
         return {
           deviceId: parsed.deviceId,
@@ -143,10 +139,7 @@ export async function loadOrCreateDeviceIdentity(): Promise<DeviceIdentity> {
 }
 
 /** 用设备私钥签名握手载荷。 */
-export async function signDevicePayload(
-  privateKeyBase64Url: string,
-  payload: string,
-): Promise<string> {
+export async function signDevicePayload(privateKeyBase64Url: string, payload: string): Promise<string> {
   const key = base64UrlDecode(privateKeyBase64Url);
   const data = new TextEncoder().encode(payload);
   const sig = await signAsync(data, key);

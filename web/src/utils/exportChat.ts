@@ -209,7 +209,10 @@ export function collectMessageAttachments(msg: ChatMessage): ExportAttachment[] 
  * `- 类型 · 名（无可用下载链接）`——形态上明确说明「这条附件导出不出来」，
  * 而不是静默丢掉。
  */
-function attachmentMarkdown(msg: ChatMessage, resolve: AttachmentDownloadResolver): string[] {
+function attachmentMarkdown(
+  msg: ChatMessage,
+  resolve: AttachmentDownloadResolver,
+): string[] {
   const items = collectMessageAttachments(msg);
   if (items.length === 0) return [];
   const lines: string[] = ["**附件**", ""];
@@ -221,9 +224,7 @@ function attachmentMarkdown(msg: ChatMessage, resolve: AttachmentDownloadResolve
       continue;
     }
     if (item.kind === "image") {
-      lines.push(
-        `- ![${item.label}](${withoutDownloadFlag(href)}) · [下载 ${item.label}](${href})`,
-      );
+      lines.push(`- ![${item.label}](${withoutDownloadFlag(href)}) · [下载 ${item.label}](${href})`);
     } else {
       lines.push(`- [${text}](${href})`);
     }

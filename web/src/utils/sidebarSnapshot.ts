@@ -20,7 +20,11 @@
  * - 写入前裁剪条数，读回时做形状校验，解析失败一律当作「没有快照」，绝不抛异常。
  * - 超过 `TTL_MS` 视为过期（长期不回访的旧结构不应一直冒出来）。
  */
-import type { AgentIdentityResult, GatewayAgentRow, GatewaySessionRow } from "@/api/types";
+import type {
+  AgentIdentityResult,
+  GatewayAgentRow,
+  GatewaySessionRow,
+} from "@/api/types";
 
 /** 快照的 localStorage 键。 */
 const SNAPSHOT_KEY = "openclaw.web.sidebarSnapshot.v1";
@@ -155,8 +159,7 @@ function sanitizeIdentities(value: unknown): Record<string, AgentIdentityResult>
 
 function sanitizeSnapshot(value: unknown, now: number): SidebarSnapshot | null {
   if (!isRecord(value)) return null;
-  const savedAt =
-    typeof value.savedAt === "number" && Number.isFinite(value.savedAt) ? value.savedAt : 0;
+  const savedAt = typeof value.savedAt === "number" && Number.isFinite(value.savedAt) ? value.savedAt : 0;
   if (!savedAt || now - savedAt > TTL_MS) return null;
   const agents = sanitizeAgents(value.agents);
   const sessions = sanitizeSessions(value.sessions);
@@ -198,12 +201,9 @@ export function writeSidebarSnapshot(
   const previous = sanitizeSnapshot(buckets[key], Date.now());
   const next: SidebarSnapshot = {
     agents: patch.agents !== undefined ? sanitizeAgents(patch.agents) : (previous?.agents ?? []),
-    sessions:
-      patch.sessions !== undefined ? sanitizeSessions(patch.sessions) : (previous?.sessions ?? []),
+    sessions: patch.sessions !== undefined ? sanitizeSessions(patch.sessions) : (previous?.sessions ?? []),
     identities:
-      patch.identities !== undefined
-        ? sanitizeIdentities(patch.identities)
-        : (previous?.identities ?? {}),
+      patch.identities !== undefined ? sanitizeIdentities(patch.identities) : (previous?.identities ?? {}),
     defaultId: patch.defaultId !== undefined ? patch.defaultId : (previous?.defaultId ?? ""),
     mainKey: patch.mainKey !== undefined ? patch.mainKey : (previous?.mainKey ?? "main"),
     savedAt: Date.now(),

@@ -2,9 +2,9 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, URL } from "node:url";
-import tailwindcss from "@tailwindcss/vite";
-import vue from "@vitejs/plugin-vue";
 import { defineConfig, loadEnv, type Plugin, type UserConfig } from "vite";
+import vue from "@vitejs/plugin-vue";
+import tailwindcss from "@tailwindcss/vite";
 
 // OpenClaw Web Control UI — Vite config.
 //
