@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, URL } from "node:url";
@@ -107,6 +108,52 @@ function readGitShortSha(): string | null {
   }
 }
 
+/**
+ * 工作区有未提交改动时的**内容指纹**（`dirty-<hash8>`；干净工作区返回 ""）。
+ *
+ * 为什么必须存在：buildId 的默认成分是「包版本 + HEAD 短 SHA」，而**未提交的改动
+ * 不会改变 HEAD** —— 改完代码直接出包（发版常态），两次构建的 buildId 一字不差 ⇒
+ * service worker 脚本字节相同 ⇒ 浏览器判定「没有更新」⇒ 缓存名不轮换 ⇒
+ * `PRECACHE_URLS` 里的 `./`（index.html）永远是旧的 ⇒ 「发版后用户永远拿到旧 chunk」。
+ *
+ * 指纹取自 `git status --porcelain -uall` 的每一行 + 其中**已跟踪/未跟踪文件的当前内容**
+ * （忽略的文件如 dist/、node_modules/ 不在 porcelain 输出里，不会拖慢构建）：
+ * 任何一次真实的内容改动都会让指纹变化；同一状态下重复构建得到同一个 id。
+ */
+function readGitDirtyFingerprint(): string {
+  let porcelain = "";
+  try {
+    porcelain = execFileSync("git", ["-C", repoRoot, "status", "--porcelain", "-uall"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+    });
+  } catch {
+    return "";
+  }
+  const lines = porcelain
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .sort();
+  if (lines.length === 0) return "";
+
+  const hash = createHash("sha1");
+  for (const line of lines) {
+    hash.update(line);
+    // porcelain 行格式：`XY <path>`（XY 为状态码，含重命名的 `a -> b` 也以路径结尾）。
+    const filePath = path.join(repoRoot, line.slice(3));
+    try {
+      const stat = fs.statSync(filePath);
+      if (!stat.isFile()) continue;
+      hash.update(`:${stat.size}:`);
+      hash.update(fs.readFileSync(filePath));
+    } catch {
+      hash.update(":missing");
+    }
+  }
+  return `dirty-${hash.digest("hex").slice(0, 8)}`;
+}
+
 function resolveControlUiBuildId(): string {
   const explicit =
     process.env.OPENCLAW_CONTROL_UI_BUILD_ID?.trim() || process.env.OPENCLAW_VERSION?.trim();
@@ -115,7 +162,11 @@ function resolveControlUiBuildId(): string {
   }
   const version = readPackageVersion();
   const gitSha = readGitShortSha();
-  return normalizeBuildId(gitSha ? `${version}-${gitSha}` : version);
+  const base = gitSha ? `${version}-${gitSha}` : version;
+  // ⚠️ 未提交改动不会改变 HEAD：不拼 dirty 指纹的话，「改完直接出包」的两版
+  // buildId 相同 ⇒ SW 缓存永不轮换（详见 readGitDirtyFingerprint 的注释）。
+  const dirty = readGitDirtyFingerprint();
+  return normalizeBuildId(dirty ? `${base}-${dirty}` : base);
 }
 
 /**

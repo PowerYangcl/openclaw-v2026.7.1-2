@@ -86,6 +86,8 @@ export const useGatewayStore = defineStore("gateway", () => {
     client = null;
     hello.value = null;
     setError(null);
+    // 换网关 / 重连后旧缓存没有意义（可能是另一台机器上的会话与模型目录）。
+    clearSharedCache();
     phase.value = everConnected.value ? "reconnecting" : "connecting";
 
     client = new GatewayBrowserClient({
@@ -288,6 +290,95 @@ export const useGatewayStore = defineStore("gateway", () => {
     }
   }
 
+  /**
+   * 只读目录类 RPC 的**并发去重 + 短 TTL 缓存**。
+   *
+   * ## 为什么需要它（首屏实测）
+   * `web/tests/smoke/probe-first-paint-rpc.mjs` 抓到的首屏 RPC 序列：
+   * 进一次聊天页共 18 条 RPC，其中
+   * - `sessions.list` **2 条**（侧栏 `loadSessions` + 窗格 `loadContextWindow`，入参完全一样），
+   *   各自 ~150-290ms；
+   * - `models.list` **2 条**（`onMounted` 的 `loadModelList` + `loadHistory` 命中缓存时又拉一次），
+   *   合计 ~417ms；
+   * - `config.get` 1 条 ~301ms，而它只是给侧栏取 agent 描述，是**静态配置**。
+   *
+   * 同一屏里把同一份只读数据拉两遍，白等一次往返；网关是单线程 Node，
+   * 这些重复请求还会和真正的 `chat.history` 抢事件循环。这里把它们收敛成一次。
+   *
+   * ## 使用边界（重要）
+   * 只给「**只读、短期内可容忍陈旧、无副作用**」的目录类方法用
+   * （`sessions.list` / `models.list` / `config.get` 这一类）。
+   * **绝对不要**用于 `chat.history`（用户就是要看最新）、`chat.send` / `sessions.patch`
+   * 等有状态或写操作的方法 —— 缓存住它们会吞掉写操作或让用户看到旧数据。
+   *
+   * 键 = `method` + 规范化后的 params（键序无关），所以同方法不同入参互不污染。
+   * 连接重建（`connect()`）时整表清空：换网关后旧数据没有意义。
+   */
+  const SHARED_CACHE_MAX_ENTRIES = 32;
+  const sharedCache = new Map<string, { at: number; value: unknown }>();
+  const sharedInflight = new Map<string, Promise<unknown>>();
+
+  function sharedCacheKey(method: string, params: unknown): string {
+    let normalized = "";
+    try {
+      normalized = params === undefined ? "" : JSON.stringify(sortJsonKeys(params));
+    } catch {
+      normalized = String(params);
+    }
+    return `${method}\u0000${normalized}`;
+  }
+
+  /** 递归按键排序，让 `{a,b}` 与 `{b,a}` 命中同一个缓存键。 */
+  function sortJsonKeys(value: unknown): unknown {
+    if (Array.isArray(value)) return value.map(sortJsonKeys);
+    if (value && typeof value === "object") {
+      const out: Record<string, unknown> = {};
+      for (const key of Object.keys(value as Record<string, unknown>).sort()) {
+        out[key] = sortJsonKeys((value as Record<string, unknown>)[key]);
+      }
+      return out;
+    }
+    return value;
+  }
+
+  async function requestShared<T = unknown>(
+    method: string,
+    params: unknown,
+    ttlMs: number,
+    options?: { force?: boolean },
+  ): Promise<T> {
+    const key = sharedCacheKey(method, params);
+    const hit = sharedCache.get(key);
+    if (!options?.force && hit && Date.now() - hit.at < ttlMs) {
+      return hit.value as T;
+    }
+    const inflight = sharedInflight.get(key);
+    if (inflight) return inflight as Promise<T>;
+    const task = (async (): Promise<T> => {
+      try {
+        const value = await request<T>(method, params);
+        sharedCache.set(key, { at: Date.now(), value });
+        // 简单 LRU 上限：目录类数据条目本来就少，防的是「无限增长的入参组合」。
+        while (sharedCache.size > SHARED_CACHE_MAX_ENTRIES) {
+          const oldest = sharedCache.keys().next().value;
+          if (oldest === undefined) break;
+          sharedCache.delete(oldest);
+        }
+        return value;
+      } finally {
+        sharedInflight.delete(key);
+      }
+    })();
+    sharedInflight.set(key, task);
+    return task;
+  }
+
+  /** 清空 `requestShared` 的缓存（断开 / 重连时调用）。 */
+  function clearSharedCache(): void {
+    sharedCache.clear();
+    sharedInflight.clear();
+  }
+
   function onEvent(listener: (evt: GatewayEventFrame) => void): () => void {
     eventListeners.add(listener);
     return () => eventListeners.delete(listener);
@@ -325,6 +416,8 @@ export const useGatewayStore = defineStore("gateway", () => {
     disconnect,
     autoConnect,
     request,
+    requestShared,
+    clearSharedCache,
     onEvent,
     waitForConnection,
   };

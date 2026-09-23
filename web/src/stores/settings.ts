@@ -12,24 +12,31 @@
  * - **UI 偏好 → localStorage（跨 tab 共享）**：`themeMode` / `selectedModel`。
  *   纯展示偏好，共享无副作用，用户换 tab 后应保持一致。
  *
- * ## 会话隔离
+ * ## 会话：每个 agent 只一条「规范主会话」（2026-09-23）
  *
- * `sessionKey` 默认由入口 token 指纹派生（`id-<hash8>`）：
- * 不同 token → 不同 sessionKey → 不同会话 → 消息互不可见。
- * `?session=` / `#session=` 显式指定时优先级最高，且不再跟随 token 变化。
+ * `sessionKey` 只能是规范主会话形态 `agent:<agentId>:<mainKey>`
+ * （见 `utils/canonicalSession.ts`）：入口默认 `agent:resume-assistant:main`，
+ * 侧栏切换 agent 时落到该 agent 的主会话。
+ *
+ * 旧策略会按入口 token 指纹派生 `agent:<id>:id-<hash8>` —— 同一个 agent 名下于是
+ * 同时累积出 `:main` 与 `:id-xxxxxxxx` 多条会话（本机 cet4 实测两条并存），
+ * 这正是本次要消除的现象；任何非规范形态一律**改写**为该 agent 的主会话。
  */
 import { defineStore } from "pinia";
 import { computed, ref, watch } from "vue";
 import { deriveDefaultGatewayUrl } from "@/api/gateway";
 import { getUrlOverrides } from "@/utils/urlOverrides";
 import { resolveGatewayHttpBase } from "@/utils/avatar";
+import {
+  DEFAULT_AGENT_SESSION_KEY,
+  canonicalMainSessionKey,
+  isCanonicalMainSessionKey,
+} from "@/utils/canonicalSession";
 
 /** 登录态：per-tab（sessionStorage），刷新保留、跨 tab 隔离。 */
 const SESSION_KEY = "openclaw.web.session.v1";
 /** UI 偏好：跨 tab 共享（localStorage）。 */
 const PREFS_KEY = "openclaw.web.prefs.v1";
-/** 默认会话 key（无入口 token 时使用，例如纯设备身份配对）。 */
-const DEFAULT_SESSION_KEY = "main";
 
 export type UiSettings = {
   gatewayUrl: string;
@@ -52,7 +59,7 @@ type PrefsState = Pick<UiSettings, "themeMode" | "selectedModel">;
  *
  * 为什么必须区分「空串」与「缺失」：解析时用的是 `??` 链
  * （`overrides ?? 派生值 ?? 存储值 ?? 默认值`），而 `""` 不是 nullish，
- * 一旦存储里落下空串，整条链就会在此截断，`DEFAULT_SESSION_KEY` 永远取不到 ——
+ * 一旦存储里落下空串，整条链就会在此截断，最后那档固定 key 永远取不到 ——
  * 表现就是 `chat.history` 收到 `sessionKey: ""` 报
  * "must not have fewer than 1 characters"。
  */
@@ -143,11 +150,12 @@ function persistPrefs(patch: Partial<PrefsState>): void {
 }
 
 /**
- * 由入口 token 派生稳定、短小、可读的会话 key。
+ * 由入口 token 派生稳定、短小、可读的会话 key（FNV-1a 32 位哈希）。
  *
- * 用 FNV-1a 32 位哈希（纯前端、无依赖、稳定）：同一个 token 永远得到同一个 key，
- * 刷新后能续上历史；不同 token 得到不同 key，实现会话隔离。
- * 无 token（纯设备身份）时返回 null，由调用方回落到 `main`。
+ * ⚠️ **单会话口径（2026-09-23）起不再用于 `sessionKey`**（见 `utils/canonicalSession.ts`）。
+ * 保留实现而不是删掉：「每个入口 token 一个会话」是一套自洽的（前）策略，
+ * 将来若要恢复，只需把 `sessionKey` 的初始化换回这个函数即可；删掉会让那段口径
+ * 与代码彻底失联、只剩注释。
  */
 export function deriveSessionKeyFromToken(token: string): string | null {
   const value = token.trim();
@@ -176,29 +184,17 @@ export const useSettingsStore = defineStore("settings", () => {
   );
   const token = ref<string>(nonEmpty(overrides.token) ?? persistedSession.token ?? "");
 
-  /** `?session=` 显式指定 → 冻结，不再由 token 派生。 */
-  const explicitSessionKey = nonEmpty(overrides.session);
-  const frozenSessionKey = Boolean(explicitSessionKey);
-
   /**
-   * 本次页面加载是否「从 URL 入口进来」。
+   * 会话 key。初值取「存储值归一化」后的结果，没有存储值时用入口默认会话
+   * （`agent:resume-assistant:main`）。
    *
-   * 带 `token` 或 `session` 说明是一次新的入口（可能是新身份签发的链接），
-   * 此时按 token 指纹派生会话 key；**两者都没有**则是普通刷新 / 直接访问，
-   * 必须沿用上次的会话 key —— 否则刷新会静默跳到 `id-<token哈希>` 那个空会话，
-   * 用户看到的「历史消息」会凭空换一批（曾表现为「删掉的消息刷新又出现」）。
+   * ⚠️ 归一化**不是格式化**：历史 `agent:cet4:id-4daf4b7d` 这类存储值会被改写成
+   * `agent:cet4:main`。这是「不保留其他会话」的落地点 —— 旧值沿用一次，
+   * 那条旧会话就在界面上复活一次。
    */
-  const enteringViaUrl = Boolean(nonEmpty(overrides.token) || explicitSessionKey);
-
   const sessionKey = ref<string>(
-    explicitSessionKey ??
-      (enteringViaUrl ? deriveSessionKeyFromToken(token.value) : undefined) ??
-      persistedSession.sessionKey ??
-      deriveSessionKeyFromToken(token.value) ??
-      DEFAULT_SESSION_KEY,
+    canonicalMainSessionKey(nonEmpty(persistedSession.sessionKey) ?? DEFAULT_AGENT_SESSION_KEY),
   );
-  // 硬不变量：sessionKey 绝不能为空（网关 schema 要求 minLength 1）。
-  if (!sessionKey.value) sessionKey.value = DEFAULT_SESSION_KEY;
 
   const themeMode = ref<UiSettings["themeMode"]>(persistedPrefs.themeMode);
   const selectedModel = ref<string>(persistedPrefs.selectedModel);
@@ -217,13 +213,13 @@ export const useSettingsStore = defineStore("settings", () => {
   persistPrefs({ themeMode: themeMode.value, selectedModel: selectedModel.value });
 
   /**
-   * 入口 token 变化即代表身份变化：重新派生会话 key，保证「换 token = 换会话」。
-   * 令牌为空（如主动清空 / 设备身份自带会话）时回落默认 key。
+   * ⚠️ 入口 token 变化**不再派生会话 key**（旧行为见 `deriveSessionKeyFromToken` 的注释）。
+   * 「换 token = 换会话」产生的正是 `agent:<id>:id-<hash8>` 那类多余会话。
+   * 保留 watch 只为把任何偏移拉回规范形态（例如别处直接写了 `settings.sessionKey = ...`）。
    */
-  watch(token, (next) => {
-    if (frozenSessionKey) return;
-    const derived = deriveSessionKeyFromToken(next) ?? DEFAULT_SESSION_KEY;
-    if (derived !== sessionKey.value) sessionKey.value = derived;
+  watch(token, () => {
+    if (isCanonicalMainSessionKey(sessionKey.value)) return;
+    sessionKey.value = canonicalMainSessionKey(sessionKey.value);
   });
 
   // 登录态写入 sessionStorage（per-tab）
@@ -283,10 +279,16 @@ export const useSettingsStore = defineStore("settings", () => {
     persistSession({ gatewayUrl: next });
   }
 
-  /** 显式指定会话 key（如「会话」页点进某个历史会话）。 */
+  /**
+   * 显式指定会话 key（侧栏点智能体、窗格头下拉、`gateway.sessionKey = ...` 代理写入）。
+   *
+   * ⚠️ 入参一律经 `canonicalMainSessionKey` 归一：切 agent 有效（落到该 agent 的主会话），
+   * 但**切不到主会话以外的会话**（`id-xxxx` / 子会话 / cron 会话都会被改写）。
+   * 把这条收敛到唯一写入口，比在每个调用点各写一遍判断可靠得多。
+   */
   function setSessionKey(next: string): void {
-    const key = next.trim() || DEFAULT_SESSION_KEY;
-    sessionKey.value = key;
+    const key = canonicalMainSessionKey(next || DEFAULT_AGENT_SESSION_KEY);
+    if (sessionKey.value !== key) sessionKey.value = key;
     persistSession({ sessionKey: key });
   }
 

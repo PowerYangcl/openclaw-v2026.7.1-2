@@ -33,6 +33,7 @@ import { useSettingsStore } from "@/stores/settings";
 import { useAgentsStore } from "@/stores/agents";
 import { formatTime, formatDateTimeMinute } from "@/utils/format";
 import { sessionKeysMatch, qualifySessionKey } from "@/utils/sessionListSelection";
+import { isCanonicalMainSessionKey } from "@/utils/canonicalSession";
 import {
   clearBackgroundAssistantMessages,
   clearChatMessageCache,
@@ -49,6 +50,12 @@ import {
 } from "@/utils/chatRunState";
 import { isReplyFinishedAgentEvent } from "@/utils/agentLifecycle";
 import { readModelOverride, writeModelOverride } from "@/utils/modelOverrides";
+import {
+  formatSlashCommandHelp,
+  isInterceptedSlashCommand,
+  parseSlashCommand,
+  type SlashCommandInvocation,
+} from "@/utils/slashCommand";
 import { localizeChatError } from "@/utils/chatErrorCopy";
 import {
   CHAT_HISTORY_FALLBACK_PAGE_SIZE,
@@ -540,6 +547,27 @@ watch(
     setChatMessageCache(key, [...list]);
   },
   { deep: true },
+);
+
+/**
+ * 首屏历史还在路上 ⇒ 画骨架屏，**不要**先闪一下「有什么可以帮你？」。
+ *
+ * 这是「刚进聊天页看着卡了很久」的主要观感来源之一：`loadHistory` 返回之前，模板走的是
+ * 下面的空态分支（`!messages.length && !streamingText`），于是用户先看到欢迎语 +
+ * 示例问题，几百毫秒后整块被真实消息顶掉 —— 既闪，又让人以为这个会话是空的。
+ * 换成骨架屏后，这一段时间里界面已经是「对话的形状」，数据到达时是**填充**而不是**替换**。
+ *
+ * 条件刻意收紧，只在「确实一条都没有 + 没有报错 + 没有正在生成的流」时用骨架：
+ * 一旦命中缓存（`messages` 非空）就完全不显示，避免把已有内容盖成灰条。
+ * 报错态优先级更高（模板里 `chat-empty-error` 分支排在前面），否则错误会被骨架永久遮住。
+ */
+const showHistorySkeleton = computed<boolean>(
+  () =>
+    loading.value &&
+    messages.value.length === 0 &&
+    !historyError.value &&
+    !streamingText.value &&
+    !streamingThinking.value,
 );
 
 /**
@@ -1961,10 +1989,12 @@ async function loadModelList(): Promise<void> {
 
   // 1) 后端目录
   try {
-    const res = await gateway.request<{
+    // `requestShared`：`loadModelList()` 在 onMounted 与 `loadHistory()` 命中缓存的分支里
+    // 各被调用一次（首屏实测 2×~120-300ms）。模型目录是低频变化的静态目录，60s TTL 安全。
+    const res = await gateway.requestShared<{
       models?: ModelCatalogEntry[];
       catalog?: ModelCatalogEntry[];
-    }>("models.list", {});
+    }>("models.list", {}, 60_000);
     const list = Array.isArray(res?.models)
       ? res!.models
       : Array.isArray(res?.catalog)
@@ -2018,18 +2048,17 @@ async function loadModelList(): Promise<void> {
  * 两条路都失败时静默降级：选择器显示「默认模型」文案，聊天与积分行不受影响。
  */
 async function loadDefaultModel(): Promise<void> {
+  // ⚠️ 走 agents store，**不要**自己再发一次 `agents.list`。
+  // 首屏原本这里与 store 的 `ensureLoaded()` 各发一条（实测 2×140ms），入参还是同一个
+  // `{}`。store 内部有 `inflightLoad` 去重 + 落盘快照，复用它是零成本的。
   try {
-    const res = await gateway.request<{
-      defaultId?: string;
-      agents?: Array<{ id?: string; model?: { primary?: string } }>;
-    }>("agents.list", {});
-    const list = Array.isArray(res?.agents) ? res.agents : [];
+    await agents.ensureLoaded();
     // 取**本窗格 agent** 的默认模型：拆分视图下不同窗格属于不同 agent，用网关
     // `defaultId` 那条会让「默认模型」标签与积分行显示成别的 agent 的模型。
-    // ⚠️ 局部变量刻意不叫 `agents` —— 那会 shadow 掉上面的 store 单例（原来是这么写的）。
+    const list = agents.agents;
     const agent =
       list.find((item) => item?.id === paneAgentId.value) ??
-      list.find((item) => item?.id === res?.defaultId) ??
+      list.find((item) => item?.id === agents.defaultId) ??
       list[0];
     const primary = typeof agent?.model?.primary === "string" ? agent.model.primary : "";
     const parts = splitModelKey(primary);
@@ -2038,13 +2067,13 @@ async function loadDefaultModel(): Promise<void> {
       return;
     }
   } catch {
-    // 网关未暴露 agents.list —— 继续尝试 sessions.list
+    // agents store 拿不到 —— 继续尝试 sessions.list
   }
 
   try {
-    const res = await gateway.request<{
+    const res = await gateway.requestShared<{
       defaults?: { modelProvider?: string; model?: string };
-    }>("sessions.list", {});
+    }>("sessions.list", {}, 1500);
     const provider = res?.defaults?.modelProvider?.trim() ?? "";
     const model = res?.defaults?.model?.trim() ?? "";
     if (provider && model) effectiveDefaultModel.value = { provider, model };
@@ -2066,11 +2095,14 @@ async function loadDefaultModel(): Promise<void> {
 async function loadContextWindow(): Promise<void> {
   let next: number | null = null;
   try {
-    const res = await gateway.request<SessionsListResult>("sessions.list", {
-      limit: 200,
-      includeGlobal: true,
-      includeUnknown: true,
-    });
+    // `requestShared`：与侧栏 `loadSessions()` 的入参**完全一致**，两边曾经各发一条
+    // （首屏实测 2×~150-290ms）。1.5s TTL 足够覆盖同一次首屏 / 同一次换会话，
+    // 又不至于让会话列表长时间陈旧。
+    const res = await gateway.requestShared<SessionsListResult>(
+      "sessions.list",
+      { limit: 200, includeGlobal: true, includeUnknown: true },
+      1500,
+    );
     // 顺手把整张列表留给窗格头的会话下拉 —— 旧版 chat-pane.ts:renderPaneHeader
     // 也是用同一份 `state.sessionsResult`，不额外发请求。
     sessionRows.value = res?.sessions ?? [];
@@ -2101,17 +2133,24 @@ const sessionRows = ref<SessionsListResult["sessions"]>([]);
 /**
  * 窗格头下拉里一条会话的展示名。
  *
- * 入口 token 派生的会话 key（裸 `id-<hash>` / `agent:<id>:id-<hash>`）拿不到
- * label / displayName，`sessionDisplayNameFor` 只能回落成裸 id —— 下拉里就是
- * 「id-xxxxxxxx」这样一行无意义的 id。这种 id 形态的展示名改用 **agent 展示
- * 名**（这类会话是各 agent 的网页入口会话，agent 名才是有效信息）；其余会话
- * （主会话 / 渠道联系人 / cron…）保持原解析结果不动。
+ * 本系统「每个 agent 只维护一条规范主会话」，所以窗格头下拉在用户心智里
+ * 等价于「选 agent」—— 选中项展示名要与左侧目录（agent 名）一字不差，
+ * 否则用户会以为窗格头显示的和左侧菜单是两回事。
+ *
+ * 两类会话的展示名都改用 **agent 展示名**（agent 名才是有效信息）：
+ *   - 规范主会话 `agent:<id>:<mainKey>`：`sessionDisplayNameFor` 会收敛成
+ *     「主会话」，这个字面量对用户没有区分度（左侧目录显示的是 agent 名）；
+ *   - 入口 token 派生的会话（裸 `id-<hash>` / `agent:<id>:id-<hash>`）：
+ *     拿不到 label / displayName，`sessionDisplayNameFor` 回落成裸 id。
+ *
+ * 其余会话（渠道联系人 / cron / 带 label 的子会话…）保持原解析结果不动。
  */
 function paneSessionOptionLabel(
   key: string,
   row?: { label?: string; displayName?: string } | null,
   agentId = "",
 ): string {
+  if (isCanonicalMainSessionKey(key)) return agents.nameForAgent(agentId);
   const name = agents.sessionDisplayNameFor(key, row);
   if (name && name !== key && !ENTRY_SESSION_ID_RE.test(name)) return name;
   return agents.nameForAgent(agentId);
@@ -2734,8 +2773,31 @@ async function requestChatHistory<T>(params: {
   }
 }
 
+/**
+ * `loadHistory` 的外壳：**无条件**保证「最新那次请求」收掉 `loading`。
+ *
+ * 为什么不让内层自己收（它以前只在 `isCurrent()` 为真时收）：两条都会让骨架屏永久卡住 ——
+ *
+ * ① 内层的 `try` 只包住了 `chat.history` 那一段；**缓存分支与本地存储读取都在 try 之外**
+ *    （`loadDeletedMessageIds` / `getChatMessageCache` 都要 `JSON.parse` localStorage）。
+ *    这些地方一旦抛错（脏数据 / 隐私模式 / 配额满），内层 `finally` 根本不执行 ⇒
+ *    `loading` 永远停在 true，而 `messages` 还是空的 ⇒ **骨架屏一直显示，且没有任何报错**。
+ * ② 会话归属（`paneAgentId`）可能在请求在途时变（裸 key 的 agent 前缀要等 `agents.list`），
+ *    此时内层的 `isCurrent()` 恒为 false，同样收不掉 `loading`。
+ *
+ * 外壳按「请求版本号」判定：只有最新那次请求负责收尾，被顶掉的旧请求不碰 `loading`。
+ */
 async function loadHistory(options?: { skipCache?: boolean }): Promise<void> {
+  const seq = ++historyRequestSeq;
   loading.value = true;
+  try {
+    await loadHistoryInner(seq, options);
+  } finally {
+    if (seq === historyRequestSeq) loading.value = false;
+  }
+}
+
+async function loadHistoryInner(seq: number, options?: { skipCache?: boolean }): Promise<void> {
   // 先同步已删集合（本地、便宜），后面缓存命中也要用。
   loadDeletedMessageIds();
   const deleted = deletedMessageIds.value;
@@ -2745,7 +2807,6 @@ async function loadHistory(options?: { skipCache?: boolean }): Promise<void> {
   // （预发等慢环境是必然而不是偶然）。没有这道闸时，旧会话的响应会写进新会话的视图，
   // 紧接着被 `messages` 的深 watch 以**新会话**为键写进缓存 ⇒ 那个会话随后切进去就是
   // 「没有历史 / 内容是别人的」，且缓存命中分支不再回源，只能等 TTL 过期或点刷新。
-  const seq = ++historyRequestSeq;
   const isCurrent = () =>
     seq === historyRequestSeq &&
     (qualifySessionKey(sessionKey.value, paneAgentId.value) ?? resolvedSessionKey()) === cacheKey;
@@ -2848,9 +2909,9 @@ async function loadHistory(options?: { skipCache?: boolean }): Promise<void> {
       // 排查时按 `[chat-pane]` 过滤（与生成失败的静默路径同一个前缀）。
       console.error("[chat-pane] 加载会话历史失败", { sessionKey: requestKey, raw, err });
     }
-  } finally {
-    if (isCurrent()) loading.value = false;
   }
+  // ⚠️ `loading` 的收尾**不在这里** —— 统一交给外壳 `loadHistory`：
+  // 它比的是请求版本号（而不是会话 key），且能覆盖本函数 try 之外的早退 / 抛错路径。
 }
 
 /**
@@ -3057,7 +3118,11 @@ async function send(
   steerCount.value = 0;
   steeredMessages.value = [];
   awaitingSteeredRun.value = false;
-  await scrollToBottom();
+  // ⚠️ 强制回到底部：用户上滑看历史时 `followScroll` 是 false，若沿用非强制版本，
+  // 自己刚发出去的那条会落在视口外（用户以为没发出去）。旧版还有「↓ 下方有新消息」
+  // 兜底，该入口已按要求整体删除 ⇒「发送」必须自己承担「把视口带回最新」这件事。
+  followScroll.value = true;
+  await scrollToBottom(true);
 
   // 附带模型选择：始终传 modelProvider/model（空串代表「使用默认模型」，
   // 让后端有机会清空 session 上的 providerOverride/modelOverride 并回到 agent 默认）。
@@ -3161,8 +3226,185 @@ async function steerPendingTask(item: PendingTask): Promise<void> {
   }
 }
 
+/**
+ * 往对话流里插一条**本地**提示（指令回显 / 指令结果）。
+ *
+ * 用 `role: "assistant"` 而不是 `"system"`：模板里 `system` 走 `.row-system` 分支，
+ * 正文是**纯文本**（不渲染 Markdown），而 `/help` 的清单是 Markdown 列表，挤在
+ * 一行居中灰字里根本没法看。assistant 走正常气泡（`MarkdownView`）、可复制、
+ * 可删除，观感与网关侧的回复一致。
+ *
+ * ⚠️ 这类消息**只存在于本地**（网关 transcript 里没有），刷新后就没了 ——
+ * 与旧版 `ui/` 的 `injectCommandResult` 同一口径。
+ */
+function pushLocalCommandNote(markdown: string): void {
+  messages.value.push({
+    id: `local-note-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+    role: "assistant",
+    text: markdown,
+    ts: Date.now(),
+  });
+  void scrollToBottom();
+}
+
+/**
+ * `/model`：不带参数打开模型选择器；带参数直接把本会话的模型覆盖写掉。
+ *
+ * `modelSelectorRef.openPanel()` 此前是**死代码**（`defineExpose` 了但没有任何
+ * 调用方），`/model` 正好是它的第一个真实入口。
+ *
+ * `default` 是显式取值：`modelOverrides` 里**空串有语义**（表示「使用网关默认模型」，
+ * 见 `utils/modelOverrides.ts` 文件头），所以这里写空串而不是删键。
+ */
+function applyModelCommand(args: string): void {
+  const requested = args.trim();
+  if (!requested) {
+    if (modelSelectorRef.value) {
+      modelSelectorRef.value.openPanel();
+      return;
+    }
+    // 选择器还没挂载（极端窄屏 / 首次渲染中）：至少把当前生效模型告诉用户。
+    const current = effectiveModelParts.value;
+    pushLocalCommandNote(
+      `当前会话模型：\`${current ? `${current.provider}/${current.model}` : "网关默认"}\`。` +
+        "用法：\`/model <provider/model>\`（\`default\` 恢复网关默认模型）。",
+    );
+    return;
+  }
+  const value = requested.toLowerCase() === "default" ? "" : requested;
+  selectedModelRef.value = value;
+  pushLocalCommandNote(
+    value
+      ? `已把当前会话的模型切换为 \`${value}\`（发下一条消息时生效）。`
+      : "已把当前会话的模型恢复为网关默认。",
+  );
+}
+
+/**
+ * `/clear`：调 `sessions.reset` 重置**网关侧**会话，再把本地视图清空并重新拉历史。
+ *
+ * 两件事缺一不可：
+ * - 只清本地 ⇒ 网关 transcript 还在，刷新页面消息全回来（看起来就是个 bug）；
+ * - 只调 RPC ⇒ `sessionKey` 没变，上面那个 `watch(() => sessionKey.value)` **不会触发**，
+ *   视图里会继续显示刚被重置掉的旧消息。
+ */
+async function clearConversation(): Promise<void> {
+  const key = resolvedSessionKey();
+  await gateway.request("sessions.reset", { key, reason: "reset" });
+  // 与「切换会话」同一套本地清理（见 `watch(() => sessionKey.value)`），
+  // 差别只是 key 没变、得自己动手。
+  const cacheKey = qualifySessionKey(sessionKey.value, paneAgentId.value) ?? key;
+  clearChatMessageCache(cacheKey);
+  messages.value = [];
+  compactionCheckpoints.value = [];
+  expandedCompactionIds.value = new Set();
+  resetHistoryCursor();
+  loadingOlderHistory.value = false;
+  steeredMessages.value = [];
+  expandedThinkingIds.value = new Set();
+  await loadHistory({ skipCache: true });
+  pushLocalCommandNote("会话已重置，历史已清空。");
+}
+
+// ⚠️ `startNewConversation()`（`/new` 的执行体：调 `sessions.create` 建会话、
+// 再 `emit("sessionChange")` 让布局层切过去）已于 2026-09-23 **整体删除**。
+// 本系统只维护一个固定主会话（见 `utils/canonicalSession.ts`），新建会话会直接违背该口径；
+// 指令本身在 `utils/slashCommand.ts` 里被标成 `blocked`，连网关都不会收到。
+// 需要恢复时从 git 历史取回即可，但**不要**只恢复 `case "new"` —— 那会让口径破洞。
+
+/**
+ * 执行 **web 层自己负责**的斜杠指令。
+ *
+ * 为什么这些不能像其它指令那样「原样发给网关」——逐条理由见
+ * `utils/slashCommand.ts` 的文件头；一句话：网关要么**没有**这条文本指令
+ * （`/clear`、`/redirect`，旧版 `ui/` 里就是 UI-only），要么它做的事**前端看不见结果**
+ * （`/export-session` 把文件写到服务端磁盘、`/stop` 不会把本地流式气泡收尾、
+ * `/model` 不会动本窗格的模型覆盖），要么**产品口径要求禁用**（`/new`：只维护一个主会话）。
+ *
+ * 未登记的指令名（例如插件动态注册的）**不在这里拦**，原样走 `send()` 交给网关 ——
+ * 前端维护的只是一份常用子集，拦下来会把网关其实支持的指令一起打死。
+ */
+async function runSlashCommand(invocation: SlashCommandInvocation): Promise<void> {
+  const name = invocation.command?.name ?? invocation.name;
+  const args = invocation.args;
+  // 已禁用的指令（`blocked`）：回一句说明就结束，**绝不外发**。
+  // 放在 switch 之前统一处理，将来再加禁用项不必逐个改 switch。
+  if (invocation.command?.scope === "blocked") {
+    pushLocalCommandNote(
+      `\`/${name}\` 已禁用：${invocation.command.disabledReason ?? "该指令当前不可用。"}`,
+    );
+    return;
+  }
+  try {
+    switch (name) {
+      case "help":
+        pushLocalCommandNote(formatSlashCommandHelp());
+        return;
+      case "stop":
+        if (!sending.value) {
+          pushLocalCommandNote("当前没有正在生成的回复。");
+          return;
+        }
+        await abort();
+        return;
+      case "clear":
+        await clearConversation();
+        return;
+      case "export-session":
+        await exportConversation();
+        return;
+      case "redirect":
+        if (!args) {
+          pushLocalCommandNote("用法：\`/redirect <消息>\` —— 打断当前回复，并用这条消息重新开始。");
+          return;
+        }
+        // `abort()` 内部 `finalizeStreaming()` 会把 `sending` 落回 false，
+        // 所以紧接着的 `send()` 不会被「正在发送」拦掉。
+        if (sending.value) await abort();
+        await send(args);
+        return;
+      case "steer":
+        if (!args) {
+          pushLocalCommandNote("用法：\`/steer <消息>\` —— 给正在进行的回复发一条引导，不中断整轮。");
+          return;
+        }
+        if (!sending.value) {
+          pushLocalCommandNote("当前没有正在进行的回复，无法引导。");
+          return;
+        }
+        await steer(args);
+        return;
+      case "model":
+        applyModelCommand(args);
+        return;
+      default:
+        return;
+    }
+  } catch (err) {
+    // 与发送 / 引导失败同一条提示路径（中文文案统一在 `notifyActionFailure` 里）。
+    notifyActionFailure(`/${name} 执行失败`, err);
+  }
+}
+
 /** 非流式发送；流式阶段先加入待执行列表。 */
 async function submitComposer(): Promise<void> {
+  // 斜杠指令**优先于**积分闸与「流式入队」两条分支：`/help`、`/stop`、`/clear`
+  // 这类既不消耗积分，也不该因为「余额为 0」或「正在生成」就被拦下。
+  //
+  // ⚠️ 只拦「web 层截获」的指令（`local` 自执行 + `blocked` 已禁用）。未登记的指令名
+  // （插件动态注册的、或本表没跟上的）一律原样交给 `send()` 走网关 —— 前端这份表是
+  // **常用子集**，不是权威全集。
+  //
+  // ⚠️ 判据**不能**写成 `scope === "local"`：那样 `blocked` 的 `/new` 会漏到 `send()`，
+  // 网关那边是认 `/new` 的，用户点一下就又建了一个会话 —— 正是本条要修的行为。
+  const invocation = parseSlashCommand(input.value);
+  if (invocation && isInterceptedSlashCommand(invocation.name)) {
+    input.value = "";
+    autosizeComposer();
+    await runSlashCommand(invocation);
+    return;
+  }
+
   // 积分不足：**只在真的要发出去（消耗积分）时才拦**，拦的时候给明确提示。
   // 此前是「按钮禁用 + 输入框禁用 + 静默 return」三连，用户表现为「界面整个死了、
   // 点了没反应也不知道为什么」。现在控件全程可用，Enter / 点发送都会走到这里拿提示。
@@ -3829,10 +4071,22 @@ onMounted(() => {
   void resumePendingTasksAfterReload();
   // 顶部哨兵此时才在 DOM 里，观察器要在 nextTick 之后挂（模板 ref 刚赋值）
   void nextTick(() => observeHistoryTopSentinel());
-  void loadHistory();
-  void loadDefaultModel();
-  // 模型目录先就绪，上下文窗口才有第三层兜底
-  void loadModelList().then(() => loadContextWindow());
+  // ⚠️ 这三条的**发起顺序被刻意串起来**，因为网关是单线程 Node：
+  // 首屏实测（`probe-first-paint-rpc.mjs`）四条目录类 RPC 与 `chat.history` 在同 1ms 内
+  // 齐发，`chat.history` 因此从「独占时 113ms」涨到 166ms —— 用户等的就是那一条，
+  // 别的都在跟它抢事件循环。
+  //
+  // 优先级：历史消息（用户唯一在看的）> 默认模型（只影响标签文案）
+  //         > 模型目录 / 上下文窗口（只影响选择器与占用率环）。
+  //
+  // 缓存命中时 `loadHistory` 秒回，模型目录其实在它的缓存分支里已经拉过了，
+  // 所以这里串起来对「二次进入」没有代价。
+  void loadHistory()
+    .finally(() => {
+      void loadDefaultModel();
+      // 模型目录先就绪，上下文窗口才有第三层兜底
+      void loadModelList().then(() => loadContextWindow());
+    });
 });
 
 onBeforeUnmount(() => {
@@ -3861,9 +4115,20 @@ onBeforeUnmount(() => {
  *
  * 旧的 `watch([route.query.session, settings.sessionKey])` 已下沉到布局层：
  * 窗格只认 `sessionKey` prop，拆分视图下 N 个窗格各监听自己的 prop，互不干扰。
+ *
+ * ⚠️ 监听的是**规范化后的** key，不是裸 `sessionKey`：
+ * 裸 key（`main` / 旧 token 派生的 `id-<hash8>`）的 agent 归属取自 `agents.defaultId`，
+ * 它要等 `agents.list` 回来才知道。归属一变，「生效会话」其实已经换了，
+ * 但裸 key 字符串没变 ⇒ 用裸 key 当源就**不会重发**，而第一次请求的响应又会因为
+ * 归属不一致被整包丢弃（见 `loadHistory` 的 `isCurrent`）⇒ 界面卡在骨架屏。
  */
+const qualifiedSessionKey = computed<string>(
+  // 刻意**不**用 `resolvedSessionKey()`：它带 emit 副作用，塞进 computed 会自激。
+  () => qualifySessionKey(sessionKey.value, paneAgentId.value) || sessionKey.value,
+);
+
 watch(
-  () => sessionKey.value,
+  qualifiedSessionKey,
   (next, previous) => {
     if (!next || next === previous) return;
     // 切走的那个会话的附件 payload 必须释放：objectURL 不释放会一路泄漏，
@@ -4025,9 +4290,20 @@ function onKeydown(event: KeyboardEvent): void {
   }
 }
 
+/**
+ * 点欢迎页的快捷开场白（agent 的 `quickStart`）：**直接发送**。
+ *
+ * 以前只把文案写进输入框并聚焦，用户还得再点一次「发送」—— 两下点击才能问出一句话。
+ *
+ * ⚠️ 走 `submitComposer()` 而不是 `send()`：斜杠指令拦截、积分不足提示、流式中入队
+ * 这三条闸门必须与「手打文字再回车」完全同一条路径；绕过它会在余额为 0 时静默失败，
+ * 也会让 `blocked` 档的指令漏给网关。
+ * 被闸门拦下时（例如积分为 0）文案会**留在输入框里**，用户可以改完再发 —— 这是刻意的，
+ * 不能先清空再发。
+ */
 function useSuggestion(text: string): void {
   input.value = text;
-  inputRef.value?.focus();
+  void submitComposer();
 }
 
 function formatCredits(value: number | null | undefined): string {
@@ -4231,6 +4507,42 @@ function formatBalance(value: number | null | undefined): string {
           </el-button>
         </div>
 
+        <!-- 历史在途：骨架屏（形状 = 真实对话：左助手 / 右用户交替）。
+             ⚠️ 必须排在错误态**之后**、空态**之前** —— 否则要么错误被骨架盖住，
+             要么又退回「先闪欢迎语」。判定见 `showHistorySkeleton`。 -->
+        <div
+          v-else-if="showHistorySkeleton"
+          class="chat-skeleton"
+          role="status"
+          aria-live="polite"
+          aria-label="正在加载会话历史"
+        >
+          <el-skeleton animated>
+            <template #template>
+              <div v-for="i in 3" :key="i" class="skel-turn-group">
+                <!-- 助手轮：头像在左，正文占满剩余宽度 -->
+                <div class="skel-turn skel-turn--assistant">
+                  <el-skeleton-item variant="circle" class="skel-avatar" />
+                  <div class="skel-body">
+                    <el-skeleton-item variant="text" style="width: 86%" />
+                    <el-skeleton-item variant="text" style="width: 97%" />
+                    <el-skeleton-item variant="text" style="width: 52%" />
+                  </div>
+                </div>
+                <!-- 用户轮：气泡在左、头像贴最右（与真实 `.row-user` 同一镜像）。
+                     气泡的尺寸/圆角交给 CSS 的 `.skel-bubble`（模板里写死宽度会与
+                     `.el-skeleton__text{width:100%}` 和响应式互相打架）。 -->
+                <div class="skel-turn skel-turn--user">
+                  <div class="skel-body">
+                    <el-skeleton-item variant="text" class="skel-bubble" />
+                  </div>
+                  <el-skeleton-item variant="circle" class="skel-avatar" />
+                </div>
+              </div>
+            </template>
+          </el-skeleton>
+        </div>
+
         <div v-else-if="!messages.length && !streamingText && !streamingThinking" class="chat-empty">
           <span class="empty-mark">
             <ChatAvatar
@@ -4245,7 +4557,7 @@ function formatBalance(value: number | null | undefined): string {
           </span>
           <div class="empty-title">有什么可以帮你？</div>
           <div class="empty-sub">
-            {{ assistantName }} · 基于网关的会话智能体，随时提问或下达指令
+            {{ assistantName }}
           </div>
           <div class="empty-suggestions">
             <!--
@@ -4680,6 +4992,7 @@ function formatBalance(value: number | null | undefined): string {
                     aria-label="复制消息 id"
                     :disabled="!runLastMessageId(turnRunOf(msg))"
                     @click="copyRunIds(msg)"
+                    v-show="false"
                   >
                     <el-icon v-if="runIdCopyStateOf(msg) === 'copied'"><Check /></el-icon>
                     <el-icon v-else-if="runIdCopyStateOf(msg) === 'error'"><WarningFilled /></el-icon>
@@ -5607,6 +5920,85 @@ html.dark .credits-alert :deep(.el-alert__title) {
   max-width: 1100px;
   margin: 0 auto;
   padding: 28px 16px 24px;
+}
+
+/* ============== 历史加载骨架屏 ==============
+   与右侧同宽的 `.chat-inner` 对齐（复用外边距），形状仿真实对话：左右交替的轮次。
+   只做「占位」，不做任何交互；`el-skeleton` 自己负责动画与深色模式。 */
+.chat-skeleton {
+  padding: 4px 0 8px;
+}
+
+/* 骨架条对比度：Element Plus 默认的 `--el-skeleton-color` 在浅色主题下几乎看不见
+   （实测截图里只剩一片白）。换成项目令牌 —— 基础色用 `--wb-border-strong`（浅色下
+   rgba(15,23,42,.16)），高光色用 `--wb-bg-hover`，明暗两套主题都自适应。 */
+:deep(.el-skeleton__item) {
+  --el-skeleton-color: var(--wb-border-strong);
+  --el-skeleton-to-color: var(--wb-bg-hover);
+}
+
+
+/* 轮次间距对齐真实消息行（`.row { margin-bottom: 24px }`）：骨架屏与真内容同节奏，
+   数据到达时才是**填充**而不是**重排**。
+   ⚠️ 组间规则必须写在轮次规则**之后**：跨组的第一个 `.skel-turn` 同时命中这两条，
+   同特异度下靠声明顺序决出胜负（先写的会被后写的覆盖）。 */
+.skel-turn + .skel-turn {
+  margin-top: 24px;
+}
+
+.skel-turn-group + .skel-turn-group {
+  margin-top: 32px;
+}
+
+.skel-turn {
+  display: flex;
+  align-items: flex-start;
+  /* 与 `.row-user` / `.row-assistant` 的 gap 一致 */
+  gap: 12px;
+}
+
+/* 用户轮：整体贴右、头像落在最右 —— 与真实 `.row-user { justify-content: flex-end }`
+   把 `.msg-avatar` 放在末尾是同一镜像关系。
+   ⚠️ 这里**不再**用 `flex-direction: row-reverse`：DOM 顺序本来就是 [气泡, 头像]，
+   row-reverse 会把气泡顶到最右、头像反而落到气泡左侧，看起来就是「左对齐的一段灰条」。 */
+.skel-turn--user {
+  justify-content: flex-end;
+}
+
+.skel-avatar {
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  /* 与 `.msg-avatar` 一致：头像顶比气泡顶低一点点 */
+  margin-top: 2px;
+}
+
+.skel-body {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  /* 助手正文段落之间的呼吸感（对齐 `.run-segment + .run-segment` 的 14px） */
+  gap: 14px;
+  padding-top: 2px;
+}
+
+/* 用户气泡占位：宽度只保留「一条短消息」的量（36%，并给一个下限），
+   高度 / 圆角照抄真实气泡 `.bubble-user`（padding 10px 16px + 14px×1.6 行高 ≈ 42px，
+   radius 18px、右下角 4px）。 */
+.skel-turn--user .skel-body {
+  flex: 0 1 auto;
+  width: 36%;
+  min-width: 132px;
+  padding-top: 0;
+  gap: 0;
+}
+
+.skel-turn--user .skel-bubble {
+  width: 100%;
+  height: 42px;
+  border-radius: 18px;
+  border-bottom-right-radius: 4px;
 }
 
 /* 空状态欢迎页 */

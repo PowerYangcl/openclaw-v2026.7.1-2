@@ -14,7 +14,16 @@
  *
  * 因此：**必须在创建 router 之前、且只执行一次**。入口见 `src/router/index.ts`。
  */
-const SENSITIVE_KEYS = ["token", "gatewayUrl", "session", "password"] as const;
+import { entryChatPath } from "@/utils/canonicalSession";
+/**
+ * 需要从地址栏抹掉的**敏感**参数。
+ *
+ * ⚠️ `session` **故意不在此列**（2026-09-23 起）：地址栏要长期显示会话标识
+ * （如 `chat?session=agent:cet4:main`，见 `utils/canonicalSession.ts`）——
+ * 抹掉它地址栏就失去了这个标识；而且它本身不敏感（就是一个会话 key）。
+ * 非规范形态（`id-<hash8>` 等）统一由 `ChatView` 用 `router.replace` 改写。
+ */
+const SENSITIVE_KEYS = ["token", "gatewayUrl", "password"] as const;
 
 export type UrlOverrides = {
   gatewayUrl?: string;
@@ -120,6 +129,8 @@ export function getUrlOverrides(): UrlOverrides {
  * - `chat`：带 `#token=`（上游 MAAS 静默登录）或 `?session=` 进入 —— 用户的目的是对话，
  *   落地页应该是 `/chat`，而不是先甩到概览页让用户自己点一下。
  * - `overview`：普通访问（无 token / 无 session），保持概览首页。
+ *
+ * ⚠️ 只描述「来源」，不再是会话 key 的决策依据（单会话口径见 `utils/canonicalSession.ts`）。
  */
 export type EntryIntent = "chat" | "overview";
 
@@ -133,7 +144,11 @@ export function getEntryIntent(): EntryIntent {
  *
  * 产品调整（2026-09-17）：落地页统一为 `/chat`，不再区分入口意图 —— 侧栏只保留「对话」，
  * 概览页不再作为默认首页。`getEntryIntent()` 仍保留，用于描述这次访问的来源。
+ *
+ * 会话口径（2026-09-23）：落地路径**带默认会话参数**
+ * （`chat?session=agent:resume-assistant:main`）—— 首屏地址栏就已经是最终形态，
+ * 不需要等 `ChatView` 挂载后再改写一次（那会出现「URL 闪一下」的观感）。
  */
 export function entryLandingPath(): string {
-  return "/chat";
+  return entryChatPath();
 }

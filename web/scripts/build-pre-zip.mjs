@@ -38,7 +38,17 @@ function createTimestamp(date = new Date()) {
 }
 
 async function main() {
-  await run("npm", ["run", "build:pre"], { cwd: webRoot });
+  // ⚠️ 版本号必须在**构建前**生成并注入 buildId（vite.config.ts 的
+  // resolveControlUiBuildId 读取 OPENCLAW_CONTROL_UI_BUILD_ID）：
+  // service worker 的缓存名 = `openclaw-control-<buildId>`，只有 buildId 变化
+  // SW 才会重装、轮换缓存、广播 sw-updated 触发页面刷新。buildId 若停留在
+  // 「版本 + HEAD SHA」（未提交改动时 HEAD 不动），发版后用户永远拿到旧缓存。
+  const version = `v${createTimestamp()}`;
+
+  await run("npm", ["run", "build:pre"], {
+    cwd: webRoot,
+    env: { ...process.env, OPENCLAW_CONTROL_UI_BUILD_ID: version },
+  });
 
   if (!fs.existsSync(path.join(distDir, "index.html"))) {
     throw new Error("构建完成后未找到 dist/index.html");
@@ -47,7 +57,6 @@ async function main() {
     throw new Error("未找到 deploy/update-config.json");
   }
 
-  const version = `v${createTimestamp()}`;
   const distArchive = path.join(deployDir, "dist.zip");
   const archiveName = `update-${version}.zip`;
   const outputArchive = path.join(deployDir, archiveName);

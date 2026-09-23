@@ -70,6 +70,10 @@ import { useSettingsStore } from "@/stores/settings";
 import { useAgentsStore } from "@/stores/agents";
 import type { ChatMessage } from "@/types/chat";
 import {
+  canonicalMainSessionKey,
+  needsSessionQueryNormalize,
+} from "@/utils/canonicalSession";
+import {
   PANE_DRAG_MIME,
   PANE_DROP_EDGE_PX,
   closePane,
@@ -150,17 +154,35 @@ function onWindowKeydown(event: KeyboardEvent): void {
 }
 
 /**
- * 当前会话 key：`?session=` 显式指定 > settings 里派生的 key > `main`。
+ * 当前会话 key：`?session=` 显式指定 > settings 存储值，**且一律归一为规范主会话**
+ * （`agent:<id>:<mainKey>`，见 `utils/canonicalSession.ts`）。
+ *
+ * 归一化放在这个 computed 里，因为它是全页「当前在看哪条会话」的唯一读取口 ——
+ * 在入口处收敛，比在模板与各调用点分别判断可靠。
  *
  * 刻意用 `||` 而不是 `??`：`?session=` 与 store 值都可能是空串（空串不是 nullish，
  * 用 `??` 会让空串穿透），而网关的 `chat.history` / `chat.send` 都要求至少 1 个字符。
  */
-const currentSessionKey = computed<string>(
-  () =>
-    (typeof route.query.session === "string" ? route.query.session.trim() : "") ||
-    settings.sessionKey.trim() ||
-    "main",
-);
+const currentSessionKey = computed<string>(() => {
+  const fromRoute = typeof route.query.session === "string" ? route.query.session.trim() : "";
+  return canonicalMainSessionKey(fromRoute || settings.sessionKey, agents.mainKey);
+});
+
+/**
+ * 把地址栏的 `session` 拉回规范形态（缺失 / 空 / `id-<hash8>` / 子会话…）。
+ *
+ * 只在**需要改写**时动 URL，且用 `replace`：这是「把异常值拉回规范」的兜底，
+ * 不是用户主动切换（那种走 `setCurrentSession` 的 `push`，保留后退）。
+ * 于是外部链接里的 `?session=agent:cet4:id-4daf4b7d` 一进来就会被改写为
+ * `?session=agent:cet4:main`，而地址栏不会堆出一条「改写前」的历史。
+ */
+function normalizeSessionQuery(): void {
+  if (!needsSessionQueryNormalize(route.query.session, agents.mainKey)) return;
+  void router.replace({
+    path: route.path,
+    query: { ...route.query, session: currentSessionKey.value },
+  });
+}
 
 // ---------------------------------------------------------------------------
 // 拆分视图布局
@@ -179,7 +201,9 @@ function readPersistedLayout(): ChatSplitLayout | undefined {
   try {
     const raw = window.localStorage.getItem(SPLIT_LAYOUT_KEY);
     if (!raw) return undefined;
-    return normalizeChatSplitLayout(JSON.parse(raw) as unknown);
+    const normalized = normalizeChatSplitLayout(JSON.parse(raw) as unknown);
+    // 归一化失败当作「没有布局」；成功则顺带把窗格会话归一到规范主会话。
+    return normalized ? normalizeLayoutSessions(normalized) : undefined;
   } catch {
     return undefined;
   }
@@ -195,6 +219,22 @@ function persistLayout(next: ChatSplitLayout | undefined): void {
   } catch {
     // 配额满 / 隐私模式下静默降级：布局只在本次会话内有效
   }
+}
+
+/**
+ * 把布局里每个窗格的会话归一到「该 agent 的规范主会话」。
+ *
+ * 持久化布局（localStorage）里可能带着 `agent:<id>:id-<hash8>` 这类旧 key ——
+ * 不收敛的话，拆分视图会出现「右侧窗格还在看那条早该废弃的会话」，
+ * 相当于把旧会话又保留了一份（见 `utils/canonicalSession.ts`）。
+ */
+function normalizeLayoutSessions(source: ChatSplitLayout): ChatSplitLayout {
+  let next = source;
+  for (const pane of panesOf(source)) {
+    const key = canonicalMainSessionKey(pane.sessionKey, agents.mainKey);
+    if (pane.sessionKey !== key) next = setPaneSession(next, pane.id, key);
+  }
+  return next;
 }
 
 /** `undefined` = 单窗格模式。 */
@@ -267,7 +307,7 @@ const layoutPanes = computed<ChatSplitPane[]>(() => (layout.value ? panesOf(layo
 const showPaneTabs = computed(() => narrow.value && layoutPanes.value.length > 1);
 
 /**
- * 路由 / settings 的会话变化 → 同步到**活动窗格**（拆分态）或单窗格。
+ * 路由 / settings 的会话变化 → 同步到**活动窗格**（拆分态）。
  *
  * 为什么要有这一步：侧栏点某个会话时只改 `settings.sessionKey`（不 push 路由），
  * 而组件实例不会重建，必须显式把新 key 写进布局里的活动窗格，否则点了没反应。
@@ -284,10 +324,15 @@ watch(
   },
 );
 
-/** 把某个会话设为「当前会话」：写 settings + 路由（侧栏高亮 / 刷新可复原）。 */
+/**
+ * 把某个会话设为「当前会话」：写 settings + 路由（侧栏高亮 / 刷新可复原）。
+ *
+ * ⚠️ 入参先归一到**该 agent 的规范主会话**（见 `utils/canonicalSession.ts`）：
+ * 「点侧栏切 agent」有效，但「切到主会话以外的会话」不会发生 —— 那正是同一个 agent
+ * 名下堆出多条会话的来源。会话 key 的唯一写入口也在这里 / `settings.setSessionKey`。
+ */
 function setCurrentSession(nextSessionKey: string, replace = false): void {
-  const key = nextSessionKey.trim();
-  if (!key) return;
+  const key = canonicalMainSessionKey(nextSessionKey, agents.mainKey);
   if (settings.sessionKey !== key) {
     settings.setSessionKey(key);
   }
@@ -308,17 +353,24 @@ function handleFocusPane(paneId: string): void {
   if (pane) setCurrentSession(pane.sessionKey, true);
 }
 
-/** 窗格内切换会话（窗格头下拉）。 */
+/**
+ * 窗格内切换会话（窗格头下拉）。
+ *
+ * 入参同样经 `setCurrentSession` 归一（→ 该 agent 的规范主会话），所以下拉里即使
+ * 列出了历史 `id-<hash8>` 会话，选中后也只会落到主会话上。
+ */
 function handlePaneSessionChange(paneId: string, nextSessionKey: string): void {
   const current = layout.value;
-  const key = nextSessionKey.trim();
-  if (!key) return;
+  const key = canonicalMainSessionKey(nextSessionKey, agents.mainKey);
   if (!current) {
     setCurrentSession(key);
     return;
   }
   const pane = findPane(current, paneId)?.pane;
-  if (!pane || pane.sessionKey === key) return;
+  if (!pane || pane.sessionKey === key) {
+    if (current.activePaneId === paneId) setCurrentSession(key);
+    return;
+  }
   const next = setPaneSession(current, paneId, key);
   applyLayout(next);
   if (next.activePaneId === paneId) setCurrentSession(key);
@@ -504,6 +556,9 @@ const workspaceFiles = computed<PreviewFile[]>(() => {
 });
 
 onMounted(() => {
+  // 首屏把地址栏的 session 拉回规范形态：带 token 的静默登录链接、旧书签
+  // （可能写着 `id-<hash8>`）、手改 URL 一律在这一步收敛。
+  normalizeSessionQuery();
   bindMediaQuery(NARROW_SPLIT_QUERY, narrow);
   bindMediaQuery(MOBILE_QUERY, mobile);
   window.addEventListener("keydown", onWindowKeydown);

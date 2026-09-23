@@ -17,7 +17,7 @@
  * —— 运行时身份优先，因为 `agents.list` 的行里通常没有 `name`。
  */
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { useRouter } from "vue-router";
+import { useRoute, useRouter } from "vue-router";
 import { useGatewayStore } from "@/stores/gateway";
 import { useSettingsStore } from "@/stores/settings";
 import { useAgentsStore } from "@/stores/agents";
@@ -25,15 +25,14 @@ import type { GatewaySessionRow, SessionsListResult } from "@/api/types";
 import { formatSidebarTime } from "@/utils/format";
 import {
   DEFAULT_AGENT_ID,
+  buildAgentMainSessionKey,
   normalizeAgentId,
   parseAgentSessionKey,
 } from "@/utils/sessionKey";
-import {
-  buildSidebarSessionRows,
-  pickRepresentativeSession,
-} from "@/utils/sessionListSelection";
+import { buildSidebarSessionRows } from "@/utils/sessionListSelection";
 import { resolveAgentAvatarValue, resolveAgentLabel } from "@/utils/avatar";
 import { readSidebarSnapshot, writeSidebarSnapshot } from "@/utils/sidebarSnapshot";
+import { canonicalMainSessionKey } from "@/utils/canonicalSession";
 import ChatAvatar from "@/components/ChatAvatar.vue";
 import RefreshButton from "@/components/RefreshButton.vue";
 
@@ -66,6 +65,7 @@ const gateway = useGatewayStore();
 const settings = useSettingsStore();
 const agents = useAgentsStore();
 const router = useRouter();
+const route = useRoute();
 
 /**
  * 首屏就用「上次见到的会话结构」渲染，`sessions.list` 回来后整表替换。
@@ -89,31 +89,6 @@ const agentDescriptions = ref<Record<string, string>>({});
 const token = computed(() => settings.token);
 const currentSessionKey = computed(() => settings.sessionKey);
 const selectedAgentId = computed(() => agents.selectedAgentId);
-
-/**
- * 某 agent 的「代表会话」——每个 agent 只保留一条。
- *
- * 保留优先级（用户确认的规则，实现见 `utils/sessionListSelection.ts`）：
- *   1) **当前会话**（仅当它属于该 agent 且网关里真实存在）；
- *   2) **规范主会话** `agent:<id>:<mainKey>`——即用户口径里的 "main 会话"；
- *   3) 其余里**最近更新**的一条；
- *   4) 当前会话（网关尚未落库）+ 5) 规范主会话 key 两档兜底。
- *
- * 背景：入口 token 不同会派生出不同的 `agent:<id>:id-<hash8>` 会话
- * （见 `stores/settings.ts` 的 `deriveSessionKeyFromToken`），历史累积下来
- * 同一 agent 会出现 `:main` 和 `:id-xxxxxxxx` 并存。这里在**展示层**收敛成一条。
- */
-function preferredSessionForAgent(agentId: string): string {
-  return pickRepresentativeSession({
-    agentId,
-    sessions: sessions.value,
-    currentSessionKey: currentSessionKey.value,
-    mainKey: agents.mainKey,
-    defaultAgentId: agents.defaultId,
-    // 这里**刻意**保留合成行（规则④⑤）：用户点了某个 agent 就必须能导航过去，
-    // 哪怕它的会话还没落库。与首屏渲染的取舍不同 —— 那边宁可留空也不能画残缺列表。
-  }).key;
-}
 
 /**
  * agentId → 该 agent 的**代表会话行**（只取网关里真实存在的那条，不合成）。
@@ -150,14 +125,17 @@ function agentTimeLabel(agentId: string): string {
   return formatSidebarTime(agentSessionRow(agentId)?.updatedAt);
 }
 
-async function loadSessions(): Promise<void> {
+async function loadSessions(options?: { force?: boolean }): Promise<void> {
   sessionsLoading.value = true;
   try {
-    const res = await gateway.request<SessionsListResult>("sessions.list", {
-      limit: 200,
-      includeGlobal: true,
-      includeUnknown: true,
-    });
+    // `requestShared`：与 `ChatPane.loadContextWindow()` 入参完全一致，曾经各发一条
+    // （首屏实测 2×~150-290ms）。点刷新按钮时传 `force`，保证用户要的是**当下**的数据。
+    const res = await gateway.requestShared<SessionsListResult>(
+      "sessions.list",
+      { limit: 200, includeGlobal: true, includeUnknown: true },
+      1500,
+      options,
+    );
     sessions.value = Array.isArray(res?.sessions) ? res.sessions : [];
     // 落盘快照：下次首屏直接用完整结构渲染（见 utils/sidebarSnapshot.ts）
     writeSidebarSnapshot(settings.gatewayUrl, { sessions: sessions.value });
@@ -174,10 +152,12 @@ async function loadSessions(): Promise<void> {
  */
 async function loadAgentDescriptions(): Promise<void> {
   try {
-    const res = await gateway.request<{
+    // `requestShared`：agent 描述来自**静态配置**，5 分钟 TTL。
+    // 原先每次侧栏挂载都发一条（首屏实测 301ms），而它几乎从不变。
+    const res = await gateway.requestShared<{
       config?: { agents?: { list?: Array<{ id?: string; description?: string }> } };
       resolved?: { agents?: { list?: Array<{ id?: string; description?: string }> } };
-    }>("config.get", {});
+    }>("config.get", {}, 300_000);
     const list = res?.config?.agents?.list ?? res?.resolved?.agents?.list ?? [];
     const next: Record<string, string> = {};
     for (const entry of list) {
@@ -220,16 +200,30 @@ function agentLabel(agent: (typeof agents.agents)[number]): string {
   return resolveAgentLabel(agent, agents.identities[normalizeAgentId(agent.id)] ?? null);
 }
 
+/**
+ * 选会话行。
+ *
+ * ⚠️ 会话 key 只能落到**规范主会话** `agent:<id>:<mainKey>`
+ * （见 `utils/canonicalSession.ts`）：切 agent 是允许的（用户明确点了一下），
+ * 但切不到 `id-<hash8>` 那类历史会话 —— 那正是「同一个 agent 名下堆出好几条会话」的来源。
+ */
 function selectSession(sessionKey: string): void {
-  if (!sessionKey) return;
-  settings.setSessionKey(sessionKey);
-  void router.push({ name: "chat", query: { session: sessionKey } });
+  const key = canonicalMainSessionKey(sessionKey, agents.mainKey);
+  settings.setSessionKey(key);
+  if (route.query.session === key) return;
+  void router.push({ name: "chat", query: { ...route.query, session: key } });
 }
 
+/**
+ * 点某个智能体 → 切到该 agent 的规范主会话。
+ *
+ * 刻意**不**用 `sessions.list` 里的「代表会话」：那条规则会优先选「最近更新的会话」，
+ * 于是可能把用户带到一条 `id-<hash8>` 旧会话上。主会话是固定且可预测的，
+ * 与「每个 agent 只维护一条会话」的口径一致。
+ */
 function selectAgent(agentId: string): void {
-  const next = preferredSessionForAgent(agentId);
   void agents.ensureIdentity(agentId);
-  selectSession(next);
+  selectSession(buildAgentMainSessionKey({ agentId, mainKey: agents.mainKey }));
   emit("select", agentId);
 }
 
@@ -261,8 +255,10 @@ onMounted(() => {
   void agents.ensureLoaded().finally(() => {
     agentsLoadSettled.value = true;
   });
-  void loadSessions();
-  void loadAgentDescriptions();
+  // agent 描述（`config.get`）**排在会话列表之后**：首屏实测这条要 300ms，
+  // 而它只影响 agent 行下方那行灰色描述文案，不值得和 `chat.history` /
+  // `sessions.list` 抢单线程网关的事件循环（见 ChatPane.onMounted 的同款说明）。
+  void loadSessions().finally(() => loadAgentDescriptions());
   unsubscribe = gateway.onEvent(handleEvent);
 });
 
@@ -316,7 +312,7 @@ watch(
           <RefreshButton
             class="chat-side__refresh"
             :loading="sessionsLoading"
-            @refresh="loadSessions"
+            @refresh="loadSessions({ force: true })"
           />
           <!-- 抽屉态的关闭按钮：抽屉会盖住顶栏（`Menu` 按钮也在那），
                没有它就只能靠点遮罩或按 Esc 关闭 —— 手机上点遮罩区域不一定好按。 -->
@@ -403,13 +399,25 @@ watch(
 
           <!-- 首次加载未落定：骨架占位（有快照时根本走不到这里）。
                绝不能用「当前会话兜底」的单行冒充完整菜单。 -->
-          <div v-if="!agents.agents.length && !agentsLoadSettled" class="chat-side__skeleton">
-            <span
-              v-for="i in 3"
-              :key="i"
-              class="chat-side__skeleton-row chat-side__skeleton-row--agent"
-            />
-          </div>
+          <!-- 骨架屏用 `el-skeleton`，不自绘灰条：动画节奏、圆角、深色模式、无障碍
+               （`aria-busy`）都由组件统一处理，也和右侧对话区的骨架（`ChatPane` 的
+               `.chat-skeleton`）共用同一套观感 —— 这就是「左右两栏一起加载」的形态。
+               每行形状对齐真实 agent 行：圆形头像 + 名称/描述两行。 -->
+          <el-skeleton
+            v-if="!agents.agents.length && !agentsLoadSettled"
+            class="chat-side__skeleton"
+            animated
+          >
+            <template #template>
+              <div v-for="i in 4" :key="i" class="chat-side__skel-row">
+                <el-skeleton-item variant="circle" class="chat-side__skel-avatar" />
+                <div class="chat-side__skel-lines">
+                  <el-skeleton-item variant="text" style="width: 64%" />
+                  <el-skeleton-item variant="text" style="width: 38%" />
+                </div>
+              </div>
+            </template>
+          </el-skeleton>
           <div v-else-if="!agents.agents.length" class="chat-side__empty">暂无智能体</div>
         </div>
       </section>
@@ -543,42 +551,45 @@ watch(
  * 作用是**占住结构**，让别人一眼看出「菜单还没到」，而不是以为菜单只有一项。
  */
 .chat-side__skeleton {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
   padding: 2px 8px;
 }
 
-.chat-side__skeleton-row {
-  display: block;
-  height: 14px;
-  border-radius: var(--wb-radius-sm);
-  background: var(--wb-bg-hover);
-  animation: chat-side-skeleton 1.4s ease-in-out infinite;
+/* 骨架条对比度：Element Plus 默认的 `--el-skeleton-color` 在浅色主题下几乎看不见
+   （实测截图里只剩一片白）。换成项目令牌 —— 基础色用 `--wb-border-strong`（浅色下
+   rgba(15,23,42,.16)），高光色用 `--wb-bg-hover`，明暗两套主题都自适应。 */
+:deep(.el-skeleton__item) {
+  --el-skeleton-color: var(--wb-border-strong);
+  --el-skeleton-to-color: var(--wb-bg-hover);
 }
 
-/* agent 行更高（两行文字），宽度错开一点更像真实列表 */
-.chat-side__skeleton-row--agent {
+
+/* 一行 = 圆形头像 + 名称/描述两行文本，与真实 agent 行同高（30px 头像 + 垂直居中）。 */
+.chat-side__skel-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+}
+
+.chat-side__skel-avatar {
+  width: 30px;
   height: 30px;
-  margin-bottom: 4px;
+  flex-shrink: 0;
 }
 
-.chat-side__skeleton-row:nth-child(2) {
-  width: 82%;
+.chat-side__skel-lines {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
 }
 
-.chat-side__skeleton-row:nth-child(3) {
-  width: 66%;
-}
-
-@keyframes chat-side-skeleton {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.45;
-  }
+/* `el-skeleton-item` 的高度由 `--el-skeleton-*` 决定，这里压到与 12px 描述行更接近的
+   观感；用 `:deep()` 是因为骨架节点由 Element Plus 渲染在子组件里。 */
+.chat-side__skel-lines :deep(.el-skeleton__item) {
+  height: 10px;
+  margin: 0;
 }
 
 /* ============== 智能体行（renderAgentRow 的 Vue 版） ============== */

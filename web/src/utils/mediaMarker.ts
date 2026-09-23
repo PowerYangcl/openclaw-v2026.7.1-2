@@ -670,7 +670,10 @@ export function splitMediaMarkers(text: unknown): MediaMarkerSplit {
     .join("\n")
     .replace(/[ \t]+\n/g, "\n")
     .replace(/[ \t]{2,}/g, " ")
-    .replace(/\n{2,}/g, "\n")
+    // 多个连续 MEDIA: 行被整行吞掉后，它们之间若有空行会残留成 2+ 个空行；
+    // 压到「一个空行」（\n\n）即可 —— ⚠️ 绝不能压成单个 \n：那会把正常的
+    // 段落空行（正文里 agent 写的 \n\n）也一并压平，段间距消失。
+    .replace(/\n{3,}/g, "\n\n")
     .trim();
 
   return { text: cleaned, media };
