@@ -203,12 +203,7 @@ function collectInternalizedBundledExtensionRuntimeDependencies(repoRoot, rootPa
 }
 
 function sectionSetContainsCore(sectionSet) {
-  return (
-    sectionSet.has("src") ||
-    sectionSet.has("packages") ||
-    sectionSet.has("ui") ||
-    sectionSet.has("web")
-  );
+  return sectionSet.has("src") || sectionSet.has("packages") || sectionSet.has("ui") || sectionSet.has("web");
 }
 
 function sectionSetIsSubsetOf(sectionSet, allowed) {

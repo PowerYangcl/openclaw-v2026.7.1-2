@@ -8,16 +8,16 @@
 
 ### 1.1 范围与技术栈
 
-| 维度     | 内容                                                                                                                                                                                                                                                         |
-| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 路径     | `ui/`（pnpm workspace 成员，package 名 `openclaw-control-ui`）                                                                                                                                                                                               |
-| 构建产物 | `dist/control-ui/index.html` + chunked assets（由 `ui/vite.config.ts:20` `outDir = "../dist/control-ui"`）                                                                                                                                                   |
-| 技术栈   | Vite 8 + Lit 3.3.3 + `@openclaw/uirouter` 0.1.0 + markdown-it / marked / highlight.js / dompurify / ghostty-web / `@openclaw/libterminal` / `@openclaw/media-core` / `@noble/ed25519`                                                                        |
-| 路由     | SPA（`@openclaw/uirouter`），22 个一级路由（chat / overview / activity / agents / channels / config / cron / debug / dreams / instances / logs / nodes / sessions / skill-workshop / skills / tasks / usage / workboard / worktrees / settings.\* / plugin） |
-| 持久态   | `localStorage`（键 `openclaw.control.settings.v1*`）+ `sessionStorage`（per-tab token）                                                                                                                                                                      |
-| i18n     | `ui/src/i18n/` 自有 registry，由 `scripts/control-ui-i18n.ts` 在 `pnpm ui:i18n:sync` 时再生成本地化包                                                                                                                                                        |
-| 测试     | vitest 单测 + Playwright e2e（`pnpm test:ui` / `pnpm test:ui:e2e`）                                                                                                                                                                                          |
-| 入口脚本 | `pnpm ui:install` / `pnpm ui:build` / `pnpm ui:dev`，由 `scripts/ui.js` 透传到 `pnpm --dir ui <script>`                                                                                                                                                      |
+| 维度 | 内容 |
+|---|---|
+| 路径 | `ui/`（pnpm workspace 成员，package 名 `openclaw-control-ui`） |
+| 构建产物 | `dist/control-ui/index.html` + chunked assets（由 `ui/vite.config.ts:20` `outDir = "../dist/control-ui"`） |
+| 技术栈 | Vite 8 + Lit 3.3.3 + `@openclaw/uirouter` 0.1.0 + markdown-it / marked / highlight.js / dompurify / ghostty-web / `@openclaw/libterminal` / `@openclaw/media-core` / `@noble/ed25519` |
+| 路由 | SPA（`@openclaw/uirouter`），22 个一级路由（chat / overview / activity / agents / channels / config / cron / debug / dreams / instances / logs / nodes / sessions / skill-workshop / skills / tasks / usage / workboard / worktrees / settings.* / plugin） |
+| 持久态 | `localStorage`（键 `openclaw.control.settings.v1*`）+ `sessionStorage`（per-tab token） |
+| i18n | `ui/src/i18n/` 自有 registry，由 `scripts/control-ui-i18n.ts` 在 `pnpm ui:i18n:sync` 时再生成本地化包 |
+| 测试 | vitest 单测 + Playwright e2e（`pnpm test:ui` / `pnpm test:ui:e2e`） |
+| 入口脚本 | `pnpm ui:install` / `pnpm ui:build` / `pnpm ui:dev`，由 `scripts/ui.js` 透传到 `pnpm --dir ui <script>` |
 
 ### 1.2 模块职责（`ui/src`）
 
@@ -52,25 +52,22 @@ ui/src/
 
 **A. 直接深路径 import `src/`（30+ 处）**—— `ui/vite.config.ts` 用 tsconfig paths 解析，但 `ui/src/api/types.ts`、`ui/src/app/config.ts`、`ui/src/api/gateway.ts`、`ui/src/lib/nodes/index.ts`、`ui/src/lib/clipboard.ts` 等仍出现 `../../../src/...` 字面量：
 
-| 文件                    | 直接依赖的 `src/` 文件                                                                                                                                                                     |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `ui/src/api/gateway.ts` | `src/gateway/device-auth.js`（`buildDeviceAuthPayload`）                                                                                                                                   |
-| `ui/src/api/types.ts`   | `src/infra/update-startup.js`、`src/config/sessions/types.js`、`src/cron/types-shared.js`、`src/shared/config-ui-hints-types.js`、`src/shared/fast-mode.js`、`src/shared/session-types.js` |
-| `ui/src/app/config.ts`  | `src/gateway/control-ui-contract.js`（`CONTROL_UI_BOOTSTRAP_CONFIG_PATH`、`ControlUiBootstrapConfig` 等常量与类型）                                                                        |
-| `ui/src/lib/...`        | `src/logging/redact.js`、`src/agents/tool-display*.ts`（被 `vite.config.ts` 的 `controlUiBrowserOnlySharedModuleAliases` 重定向到 `ui/src/lib/browser-redact.ts`）                         |
+| 文件 | 直接依赖的 `src/` 文件 |
+|---|---|
+| `ui/src/api/gateway.ts` | `src/gateway/device-auth.js`（`buildDeviceAuthPayload`） |
+| `ui/src/api/types.ts` | `src/infra/update-startup.js`、`src/config/sessions/types.js`、`src/cron/types-shared.js`、`src/shared/config-ui-hints-types.js`、`src/shared/fast-mode.js`、`src/shared/session-types.js` |
+| `ui/src/app/config.ts` | `src/gateway/control-ui-contract.js`（`CONTROL_UI_BOOTSTRAP_CONFIG_PATH`、`ControlUiBootstrapConfig` 等常量与类型） |
+| `ui/src/lib/...` | `src/logging/redact.js`、`src/agents/tool-display*.ts`（被 `vite.config.ts` 的 `controlUiBrowserOnlySharedModuleAliases` 重定向到 `ui/src/lib/browser-redact.ts`） |
 
 > **结论**：把 `ui/` 整个抽到独立仓库会立刻编译失败；移到 `web/` 必须先把上面这些类型/常量**全部镜像到 `web/` 内部**（`agent-claw-web/src/api/protocol.ts` 已经做了部分镜像，`src/api/types.ts` 仍待补齐）。
 
 **B. tsconfig path 别名穿透到 `extensions/`**：根 `tsconfig.json` 的 paths 里有
-
 ```jsonc
 "@openclaw/*": ["./extensions/*"]
 ```
-
 `ui/src/api/types.ts` 不直接 import 扩展名，但 `ui/vite.config.ts` 走 `resolveTsconfigPathAliasesForVite()` 会把所有 `@openclaw/*` 指到 `extensions/*`。**这一条对当前 `ui/` 是无 bug 的（UI 不 import `@openclaw/*`），但 `web/` 若新增任何 `@openclaw/*` 引用，会被解析到 `extensions/` —— 需要在 `web/vite.config.ts` 里强制只走 `packages/*`、`node_modules/*`。**
 
 **C. monorepo 关系**：
-
 - `pnpm-workspace.yaml:3` 含 `ui`，需改为 `web`
 - `nodeLinker: hoisted`（与单仓 Vite 工具链兼容）
 - `ui/.npmrc` 指定了 `npmmirror.com` registry（项目本地加速源）
@@ -80,7 +77,6 @@ ui/src/
 **D. 构建链**：`scripts/build-all.mjs:36,96-99` 把 `pnpm ui:build` 列为 build 阶段；`scripts/build-all.mjs:136` 把它列入依赖图；`pnpm build:docker` 也含它。需要新增 `web:build` 阶段并替换默认阶段。
 
 **E. 工具链覆盖**（影响替换时需要同步更新的脚本）：
-
 - `scripts/run-oxlint-shards.mjs:32,35` 把 `ui` 当作 lint root
 - `scripts/profile-tsgo.mjs:225` 分支 `first === "ui"`
 - `scripts/lib/tsgo-sparse-guard.mjs:16` 列 `ui/config`、`ui/src` 为 sparse root
@@ -172,15 +168,15 @@ web/
 
 **当前 `ui/` 中只有 `agent-claw-web` 没有的部分**（按决策处理）：
 
-| UI 现有能力                                                                                                                                                  | 处理（基于决策 1/2/3/5）                                                                                                                                               |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `ui/src/i18n/` 整套（含 `scripts/control-ui-i18n.ts` 同步流水线）                                                                                            | **决策 1：不迁移**。保留 ui/ 整段 i18n；web 上线时英文/浏览器 locale 兜底；`scripts/control-ui-i18n.ts` 继续运行。删除要等到 §3.6 收尾 PR（i18n 迁移到 vue-i18n 后）。 |
-| `ui/src/components/terminal/` + ghostty-web + `@openclaw/libterminal`                                                                                        | **决策 2：保留**。镜像到 `web/src/components/terminal/`；依赖保留；CSP wasm 例外不变。                                                                                 |
-| `ui/src/components/config-form.*`（配置 schema 表单）                                                                                                        | **决策 3：迁移**。重写到 `views/ConfigView.vue`（Element Plus 表单 + 自写 schema renderer）；迁移完成前 ui/ 的 ConfigForm 临时保留；迁移完成后 ui 整个页面被替换。     |
-| `ui/src/pages/skills/`、`skill-workshop/`、`workboard/`、`tasks/`、`nodes/`、`dreams/`、`debug/`、`instances/`、`activity/`、`plugin/` 及其 settings.\* 子页 | **决策 3：迁移**。全 22 页 parity 作为目标；agent-claw-web 已有的 11 个直接搬；其余 11 个在 web 端新写。每个页面写一个迁移 PR。                                        |
-| `ui/public/sw.js`（Service Worker）                                                                                                                          | web 默认不带 SW；如果 `vite-plugin-pwa` 引入需评估 CSP 兼容（网关注入的 CSP `default-src 'self'`）                                                                     |
-| `ui/index.html` 内联的主题切换 + 强制刷新脚本                                                                                                                | 沿用到 `web/index.html`，由网关注入的 basePath/terminalEnabled 配合                                                                                                    |
-| `@jdcloud/mobius`（Mobius Element Plus 封装）                                                                                                                | **决策 5：迁移后改 Element Plus 原生**。搬入时立即替换；不再引入 mobius。Mobius 特有属性（`type="primary-blue"` 等）逐处改为 Element Plus 原生 prop。                  |
+| UI 现有能力 | 处理（基于决策 1/2/3/5） |
+|---|---|
+| `ui/src/i18n/` 整套（含 `scripts/control-ui-i18n.ts` 同步流水线） | **决策 1：不迁移**。保留 ui/ 整段 i18n；web 上线时英文/浏览器 locale 兜底；`scripts/control-ui-i18n.ts` 继续运行。删除要等到 §3.6 收尾 PR（i18n 迁移到 vue-i18n 后）。 |
+| `ui/src/components/terminal/` + ghostty-web + `@openclaw/libterminal` | **决策 2：保留**。镜像到 `web/src/components/terminal/`；依赖保留；CSP wasm 例外不变。 |
+| `ui/src/components/config-form.*`（配置 schema 表单） | **决策 3：迁移**。重写到 `views/ConfigView.vue`（Element Plus 表单 + 自写 schema renderer）；迁移完成前 ui/ 的 ConfigForm 临时保留；迁移完成后 ui 整个页面被替换。 |
+| `ui/src/pages/skills/`、`skill-workshop/`、`workboard/`、`tasks/`、`nodes/`、`dreams/`、`debug/`、`instances/`、`activity/`、`plugin/` 及其 settings.* 子页 | **决策 3：迁移**。全 22 页 parity 作为目标；agent-claw-web 已有的 11 个直接搬；其余 11 个在 web 端新写。每个页面写一个迁移 PR。 |
+| `ui/public/sw.js`（Service Worker） | web 默认不带 SW；如果 `vite-plugin-pwa` 引入需评估 CSP 兼容（网关注入的 CSP `default-src 'self'`） |
+| `ui/index.html` 内联的主题切换 + 强制刷新脚本 | 沿用到 `web/index.html`，由网关注入的 basePath/terminalEnabled 配合 |
+| `@jdcloud/mobius`（Mobius Element Plus 封装） | **决策 5：迁移后改 Element Plus 原生**。搬入时立即替换；不再引入 mobius。Mobius 特有属性（`type="primary-blue"` 等）逐处改为 Element Plus 原生 prop。 |
 
 ### 2.3 `web/vite.config.ts` 关键调整（相对 `agent-claw-web/vite.config.ts`）
 
@@ -219,39 +215,35 @@ resolve: {
 ```jsonc
 {
   "scripts": {
-    "web:install": "node scripts/web.js install", // 替代 ui:install
-    "web:dev": "node scripts/web.js dev", // 替代 ui:dev
-    "web:build": "node scripts/web.js build", // 替代 ui:build（输出 web/dist）
-    "test:web": "vue-tsc --noEmit && pnpm --dir web test:unit", // 替代 test:ui
+    "web:install": "node scripts/web.js install",          // 替代 ui:install
+    "web:dev":     "node scripts/web.js dev",              // 替代 ui:dev
+    "web:build":   "node scripts/web.js build",            // 替代 ui:build（输出 web/dist）
+    "test:web":    "vue-tsc --noEmit && pnpm --dir web test:unit",     // 替代 test:ui
     "test:web:e2e": "node scripts/run-vitest.mjs run --config test/vitest/vitest.web-e2e.config.ts",
     // 老的 ui:build / ui:dev / ui:install / test:ui / test:ui:e2e 保留为兼容入口（背后跑 ui/），
     // 或在一段时间后删除，由 web:* 完全替代
-  },
+  }
 }
 ```
 
 **`scripts/web.js`**：镜像 `scripts/ui.js`，工作目录改为 `web/`、`command` 改为 `pnpm`。
 
 **`scripts/build-all.mjs`**：
-
 - 第 36 行 label `ui:build` 改为 `web:build`
 - 第 96-99 行缓存逻辑保留（web/vite.config.ts 也派生 build id）
 - 第 136 行依赖图里 `ui:build` 替换为 `web:build`
 - 第 149-160 行其他依赖 `ui:build` 的入口做同名替换
 
 **`src/infra/control-ui-assets.ts`**：
-
 - 把 `resolveControlUiRootSync` 的 candidates 列表中 `path.join(..., "dist/control-ui")` 全部新增 `path.join(..., "web/dist")` 候选（保留 `dist/control-ui` 兼容老 npm 包的 fallback）
 - 第 52-61 行 `existsSync(path.join(root, "ui", "vite.config.ts"))` 的 repo 检测逻辑同步加 `web/vite.config.ts`
 - `CONTROL_UI_DIST_PATH_SEGMENTS` 保留不变（`["dist", "control-ui", "index.html"]`），但新增 **第二解析路径** `["web", "dist", "index.html"]`：当 `dist/control-ui` 缺失但 `web/dist/index.html` 存在时返回 `web/dist` 作为 root
 
 **`src/config/types.gateway.ts`**：
-
 - `GatewayControlUiConfig.root` 的 docs 说明改为"默认 `dist/control-ui`，回退 `web/dist`"
 - 不新增配置项，保持外部 API 不变
 
 **`src/gateway/server-control-ui-root.ts`**：
-
 - 不需要改结构；`resolveGatewayControlUiAssetsBuilt` 已经会 fallback 到 `pnpm web:build`（改 `uiScript` 调用为 `webScript`，调 `scripts/web.js build`）
 
 ### 2.5 monorepo 与 tsconfig 调整
@@ -262,7 +254,6 @@ resolve: {
 **`tsconfig.extensions.json`**：`include` 中 `ui/src/**/*.d.ts` 改为 `web/src/**/*.d.ts`（或保留 ui 用于 cron 契约测试，见 §3.5）
 
 **`.gitignore`**：
-
 ```
 -web/dist
 /web/dist/
@@ -270,7 +261,6 @@ resolve: {
 ```
 
 **`web/.gitignore`**（新建）：
-
 ```
 node_modules/
 dist/
@@ -282,7 +272,6 @@ coverage/
 ```
 
 **`web/AGENTS.md`**（新建，模板如下）：
-
 ```md
 # Web Control UI Guide
 
@@ -301,11 +290,11 @@ It is the replacement for the legacy `ui/` (Lit).
 ## Build & dev
 
 - `pnpm web:install` — install workspace deps
-- `pnpm web:dev` — vite dev on :5273 (proxies /api and gateway bootstrap to 127.0.0.1:18789)
-- `pnpm web:build` — vite build → ./dist/
-- `pnpm typecheck` — vue-tsc --noEmit
-- `pnpm test:unit` — esbuild + node unit tests
-- `pnpm test:e2e` — CDP smoke scripts
+- `pnpm web:dev`     — vite dev on :5273 (proxies /api and gateway bootstrap to 127.0.0.1:18789)
+- `pnpm web:build`   — vite build → ./dist/
+- `pnpm typecheck`   — vue-tsc --noEmit
+- `pnpm test:unit`   — esbuild + node unit tests
+- `pnpm test:e2e`    — CDP smoke scripts
 
 ## Boundaries
 
@@ -325,7 +314,7 @@ It is the replacement for the legacy `ui/` (Lit).
 4. **调 vite**（§2.3，待 web/src/ 有内容后做）。
 5. **改根 scripts**：✅ 2026-09-13 — `package.json` 新增 `web:install` / `web:dev` / `web:build` / `test:web` / `test:web:e2e` / `lint:web:no-raw-window-open`；`ui:*` 全部保留。
 6. **改 server 解析**（决策 4a + §2.4 末尾两段）：✅ 2026-09-13 — `control-ui-assets.ts` 在 candidates 中**新增** `web/dist` 候选（保留 `dist/control-ui` 过渡 fallback，直到 ui/ 删除）；`scripts/web.js` 已生成；`ensureControlUiAssetsBuilt` 优先调 `web.js build`，找不到再回退 `ui.js`。**注意**：决策 4a 的"移除 dist/control-ui fallback"推迟到 ui/ 删除时（决策 1 的副作用）。
-7. **改 lint/test/scope 脚本**：✅ 2026-09-13 — `pnpm-workspace.yaml`、`scripts/build-all.mjs`、`scripts/test-projects.test-support.mjs`（10 处插入）、`scripts/run-oxlint-shards.mjs`、`scripts/profile-tsgo.mjs`、`scripts/lib/tsgo-sparse-guard.mjs`、`scripts/lib/ts-topology/scope.ts` + `types.ts`、`scripts/lib/test-group-report.mjs`、`scripts/test-env-mutation-report.ts`、`scripts/root-dependency-ownership-audit.mjs`、`scripts/github/barnacle-auto-response.mjs`、`src/cron/cron-protocol-conformance.test.ts`（新增 web/types.ts 可选断言）、`tsconfig.json`（include web/\*_/_）、`tsconfig.extensions.json`、`scripts/cli/gateway-cli/run.ts`（提示文案改 `pnpm web:build`/`pnpm web:dev`）、`.gitignore`（加 web/dist）、`src/config/types.gateway.ts`（root docs 注释）全部已加 web/ 分支。
+7. **改 lint/test/scope 脚本**：✅ 2026-09-13 — `pnpm-workspace.yaml`、`scripts/build-all.mjs`、`scripts/test-projects.test-support.mjs`（10 处插入）、`scripts/run-oxlint-shards.mjs`、`scripts/profile-tsgo.mjs`、`scripts/lib/tsgo-sparse-guard.mjs`、`scripts/lib/ts-topology/scope.ts` + `types.ts`、`scripts/lib/test-group-report.mjs`、`scripts/test-env-mutation-report.ts`、`scripts/root-dependency-ownership-audit.mjs`、`scripts/github/barnacle-auto-response.mjs`、`src/cron/cron-protocol-conformance.test.ts`（新增 web/types.ts 可选断言）、`tsconfig.json`（include web/**/*）、`tsconfig.extensions.json`、`scripts/cli/gateway-cli/run.ts`（提示文案改 `pnpm web:build`/`pnpm web:dev`）、`.gitignore`（加 web/dist）、`src/config/types.gateway.ts`（root docs 注释）全部已加 web/ 分支。
 8. **补 `web/src/api/types.ts`**（待 web/src/ 有内容后做）：把 `ui/src/api/types.ts` 用到的 `src/infra/update-startup.js`、`src/shared/fast-mode.js`、`src/cron/types-shared.js`、`src/shared/session-types.js`、`src/config/sessions/types.js`、`src/shared/config-ui-hints-types.js` 类型镜像到 `web/src/api/types.ts`（或 `web/src/api/internal-types.ts`）；agent-claw-web 已经做了 `GatewayAgentRow`、`SessionsListResultBase`、`SessionsPatchResultBase` 部分。
 9. **补 `web/src/api/gateway.ts`**（待 web/src/ 有内容后做）：把 `buildDeviceAuthPayload` 直接镜像（`agent-claw-web/src/api/protocol.ts` 已经导入了对应函数实现，校验协议字段一致）。
 10. **保证 bootstrap 契约**（待 web/src/ 有内容后做）：验证 `web/` 在 `pnpm web:build` 后，启动 gateway（`gateway.controlUi.root` 不指定）能命中 `web/dist/index.html`；浏览器打开 `http://127.0.0.1:18789/` 自动跳 `/chat`，并显示 assistantName。
@@ -348,11 +337,11 @@ It is the replacement for the legacy `ui/` (Lit).
 
 为符合"UI 层保持不变"约束，回滚 3 处非加法改动：
 
-| 文件                          | 原改动                                       | 回滚为                                                                                                                 |
-| ----------------------------- | -------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `scripts/build-all.mjs`       | `ui:build` → `web:build` (3 处)              | 恢复 `ui:build`，默认 build 流程不变                                                                                   |
-| `src/cli/gateway-cli/run.ts`  | 日志文案改 `pnpm web:build` / `pnpm web:dev` | 恢复 `pnpm ui:build` / `pnpm ui:dev`，附一段括号说明 web/ 是过渡期并行存在                                             |
-| `src/config/types.gateway.ts` | `root` 注释改为指向 web/dist                 | 恢复 `(defaults to dist/control-ui)`，附加一句说明 web/dist 由 `resolveControlUiRootSync` 并行探测、**不覆盖**该默认值 |
+| 文件 | 原改动 | 回滚为 |
+|---|---|---|
+| `scripts/build-all.mjs` | `ui:build` → `web:build` (3 处) | 恢复 `ui:build`，默认 build 流程不变 |
+| `src/cli/gateway-cli/run.ts` | 日志文案改 `pnpm web:build` / `pnpm web:dev` | 恢复 `pnpm ui:build` / `pnpm ui:dev`，附一段括号说明 web/ 是过渡期并行存在 |
+| `src/config/types.gateway.ts` | `root` 注释改为指向 web/dist | 恢复 `(defaults to dist/control-ui)`，附加一句说明 web/dist 由 `resolveControlUiRootSync` 并行探测、**不覆盖**该默认值 |
 
 外加：`src/infra/control-ui-assets.ts` 的 `ensureControlUiAssetsBuilt` build 流程从"优先 web.js 单次"改为"尝试 web.js，失败回退到 ui.js"——保留 ui.js 作为最终兜底，确保任何 ui-only 源码仓不会因为 web.js 失败而启动失败。
 
@@ -364,28 +353,28 @@ It is the replacement for the legacy `ui/` (Lit).
 
 #### 已落地（开放侧，全部为加法）
 
-| 文件                                            | 改动（**全部加法，不动现有 ui/ 流程**）                                                                                                                                                                                                                                                                                                                           |
-| ----------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pnpm-workspace.yaml`                           | 同时保留 `ui`、新增 `web`（web 在 ui 之后，pnpm 加载顺序不变）                                                                                                                                                                                                                                                                                                    |
-| `package.json` scripts                          | 新增 `web:install`/`web:dev`/`web:build`/`test:web`/`test:web:e2e`/`lint:web:no-raw-window-open`（**不动 ui:\* 任何现有脚本**）                                                                                                                                                                                                                                   |
-| `scripts/web.js`                                | 新建（从 `scripts/ui.js` 复制改写，`uiDir` → `webDir`，deps check 改 `vue`/`vue-tsc`/`@vitejs/plugin-vue`）                                                                                                                                                                                                                                                       |
-| `scripts/build-all.mjs`                         | **不动**（11:41 回滚 `web:build`，默认 ui:build 流程恢复）                                                                                                                                                                                                                                                                                                        |
-| `src/infra/control-ui-assets.ts`                | candidates 在原 `dist/control-ui` 之后**追加** `web/dist` 5 项（不抢占 ui/dist 优先级）；`resolveControlUiRepoRoot` 同时识别 `ui/vite.config.ts` 与 `web/vite.config.ts`（任一存在即识别）；`ensureControlUiAssetsBuilt` 改为"先 web.js、失败回退 ui.js"（**ui.js 仍是最终兜底**）；检查 `dist/control-ui/index.html` 或 `web/dist/index.html` 任一存在即视为就绪 |
-| `src/config/types.gateway.ts`                   | `GatewayControlUiConfig.root` 注释恢复为原 `defaults to dist/control-ui`，附 web/dist 是并行候选的说明                                                                                                                                                                                                                                                            |
-| `src/cli/gateway-cli/run.ts`                    | 日志文案恢复 `pnpm ui:build`/`pnpm ui:dev`，附一段括号提示 web/ 是并行存在                                                                                                                                                                                                                                                                                        |
-| `tsconfig.json`                                 | include 在 `ui/**/*` 之后**追加** `web/**/*`；exclude 追加 `web/dist`、`web/node_modules`                                                                                                                                                                                                                                                                         |
-| `tsconfig.extensions.json`                      | include 在 `ui/src/**/*.d.ts` 之后**追加** `web/src/**/*.d.ts`                                                                                                                                                                                                                                                                                                    |
-| `.gitignore`                                    | 在 `ui/dist` 之后**追加** `web/dist`、`/web/dist/`                                                                                                                                                                                                                                                                                                                |
-| `scripts/run-oxlint-shards.mjs`                 | lint 范围在 `src/ui` `packages` 之后**追加** `web`                                                                                                                                                                                                                                                                                                                |
-| `scripts/profile-tsgo.mjs`                      | 路径分组**追加** `web` 分支                                                                                                                                                                                                                                                                                                                                       |
-| `scripts/lib/tsgo-sparse-guard.mjs`             | sparse root 列表**追加** `web/src`                                                                                                                                                                                                                                                                                                                                |
-| `scripts/lib/ts-topology/scope.ts` + `types.ts` | ConsumerScope union **追加** `"web"`；classifyScope + extractOwner switch 同步加 `web` 分支（保持 switch 穷尽）                                                                                                                                                                                                                                                   |
-| `scripts/lib/test-group-report.mjs`             | 测试组分类**追加** `web` 分支                                                                                                                                                                                                                                                                                                                                     |
-| `scripts/test-env-mutation-report.ts`           | DEFAULT_SCAN_ROOTS 数组**追加** `"web"`                                                                                                                                                                                                                                                                                                                           |
-| `scripts/root-dependency-ownership-audit.mjs`   | DEFAULT_SCAN_ROOTS 与 core section 检测都**追加** `"web"`                                                                                                                                                                                                                                                                                                         |
-| `scripts/github/barnacle-auto-response.mjs`     | surfaces 检测**追加** `web` 分支                                                                                                                                                                                                                                                                                                                                  |
-| `scripts/test-projects.test-support.mjs`        | 10 处**追加** `web/` 分支（test target roots、e2e 识别、live test 路径、control-ui-e2e 等价物）                                                                                                                                                                                                                                                                   |
-| `src/cron/cron-protocol-conformance.test.ts`    | UI_FILES 数组**追加** web/ 三文件；新增 `canReadFile` 辅助；UI_FILES 循环改为"找不到的文件跳过而非 fail"（保证 web/src 不存在时测试不崩溃）                                                                                                                                                                                                                       |
+| 文件 | 改动（**全部加法，不动现有 ui/ 流程**） |
+|---|---|
+| `pnpm-workspace.yaml` | 同时保留 `ui`、新增 `web`（web 在 ui 之后，pnpm 加载顺序不变） |
+| `package.json` scripts | 新增 `web:install`/`web:dev`/`web:build`/`test:web`/`test:web:e2e`/`lint:web:no-raw-window-open`（**不动 ui:* 任何现有脚本**） |
+| `scripts/web.js` | 新建（从 `scripts/ui.js` 复制改写，`uiDir` → `webDir`，deps check 改 `vue`/`vue-tsc`/`@vitejs/plugin-vue`） |
+| `scripts/build-all.mjs` | **不动**（11:41 回滚 `web:build`，默认 ui:build 流程恢复） |
+| `src/infra/control-ui-assets.ts` | candidates 在原 `dist/control-ui` 之后**追加** `web/dist` 5 项（不抢占 ui/dist 优先级）；`resolveControlUiRepoRoot` 同时识别 `ui/vite.config.ts` 与 `web/vite.config.ts`（任一存在即识别）；`ensureControlUiAssetsBuilt` 改为"先 web.js、失败回退 ui.js"（**ui.js 仍是最终兜底**）；检查 `dist/control-ui/index.html` 或 `web/dist/index.html` 任一存在即视为就绪 |
+| `src/config/types.gateway.ts` | `GatewayControlUiConfig.root` 注释恢复为原 `defaults to dist/control-ui`，附 web/dist 是并行候选的说明 |
+| `src/cli/gateway-cli/run.ts` | 日志文案恢复 `pnpm ui:build`/`pnpm ui:dev`，附一段括号提示 web/ 是并行存在 |
+| `tsconfig.json` | include 在 `ui/**/*` 之后**追加** `web/**/*`；exclude 追加 `web/dist`、`web/node_modules` |
+| `tsconfig.extensions.json` | include 在 `ui/src/**/*.d.ts` 之后**追加** `web/src/**/*.d.ts` |
+| `.gitignore` | 在 `ui/dist` 之后**追加** `web/dist`、`/web/dist/` |
+| `scripts/run-oxlint-shards.mjs` | lint 范围在 `src/ui` `packages` 之后**追加** `web` |
+| `scripts/profile-tsgo.mjs` | 路径分组**追加** `web` 分支 |
+| `scripts/lib/tsgo-sparse-guard.mjs` | sparse root 列表**追加** `web/src` |
+| `scripts/lib/ts-topology/scope.ts` + `types.ts` | ConsumerScope union **追加** `"web"`；classifyScope + extractOwner switch 同步加 `web` 分支（保持 switch 穷尽） |
+| `scripts/lib/test-group-report.mjs` | 测试组分类**追加** `web` 分支 |
+| `scripts/test-env-mutation-report.ts` | DEFAULT_SCAN_ROOTS 数组**追加** `"web"` |
+| `scripts/root-dependency-ownership-audit.mjs` | DEFAULT_SCAN_ROOTS 与 core section 检测都**追加** `"web"` |
+| `scripts/github/barnacle-auto-response.mjs` | surfaces 检测**追加** `web` 分支 |
+| `scripts/test-projects.test-support.mjs` | 10 处**追加** `web/` 分支（test target roots、e2e 识别、live test 路径、control-ui-e2e 等价物） |
+| `src/cron/cron-protocol-conformance.test.ts` | UI_FILES 数组**追加** web/ 三文件；新增 `canReadFile` 辅助；UI_FILES 循环改为"找不到的文件跳过而非 fail"（保证 web/src 不存在时测试不崩溃） |
 
 #### 校验
 
@@ -441,12 +430,12 @@ openclaw-v2026.7.1-2/
 
 ### 3.2 `web/` 与仓库其余部分的依赖关系（替代后）
 
-| 方向              | 依赖                                                                                                                        |
-| ----------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `web/` → Gateway  | 运行时：HTTP bootstrap + WS + 命名空间路由（avatar / assistant-media / canvas / a2ui）                                      |
-| `web/` → packages | 编译时/类型：`@openclaw/normalization-core` 等已发布的 workspace 包（pnpm 自动 link）                                       |
-| `web/` ← Gateway  | 构建产物：网关启动时 `resolveGatewayControlUiRootState` 解析到 `web/dist`（若设 `gateway.controlUi.root` 也可指向其他位置） |
-| Gateway → `web/`  | 仅 HTTP/WS：读 `web/dist/index.html` 与 chunk 文件；不 import 任何 `.ts`                                                    |
+| 方向 | 依赖 |
+|---|---|
+| `web/` → Gateway | 运行时：HTTP bootstrap + WS + 命名空间路由（avatar / assistant-media / canvas / a2ui） |
+| `web/` → packages | 编译时/类型：`@openclaw/normalization-core` 等已发布的 workspace 包（pnpm 自动 link） |
+| `web/` ← Gateway | 构建产物：网关启动时 `resolveGatewayControlUiRootState` 解析到 `web/dist`（若设 `gateway.controlUi.root` 也可指向其他位置） |
+| Gateway → `web/` | 仅 HTTP/WS：读 `web/dist/index.html` 与 chunk 文件；不 import 任何 `.ts` |
 
 ### 3.3 集成契约（不变面）
 
@@ -464,7 +453,7 @@ openclaw-v2026.7.1-2/
 # config/openclaw.yaml（网关侧配置；保持兼容，不新增字段）
 gateway:
   controlUi:
-    enabled: true # 默认 true
+    enabled: true               # 默认 true
     # basePath: "/"             # 默认空 = 根
     # root: "/abs/path/to/web/dist"   # 留空时自动解析 web/dist（fallback dist/control-ui）
     # embedSandbox: "scripts"   # 现有值
@@ -474,13 +463,13 @@ gateway:
 
 ### 3.5 测试与契约保护
 
-| 测试                                                                  | 替代                                                          | 说明                                                 |
-| --------------------------------------------------------------------- | ------------------------------------------------------------- | ---------------------------------------------------- |
-| `pnpm test:ui` (vitest + Playwright)                                  | `pnpm test:web` (vue-tsc + esbuild unit + CDP smoke)          | 旧的 Playwright 单浏览器 e2e 在 web 里改用 CDP smoke |
-| `pnpm test:ui:e2e`                                                    | `pnpm test:web:e2e`                                           | 复用 `webapp-cdp-smoke` 技能                         |
-| `src/cron/cron-protocol-conformance.test.ts` 读 `ui/src/api/types.ts` | 改为读 `web/src/api/types.ts`（或保留 `ui/src` 直到 ui 删除） | 跨进程契约必须保留                                   |
-| `tsconfig.extensions.json` `ui/src/**/*.d.ts`                         | 改为 `web/src/**/*.d.ts`                                      | 类型暴露面                                           |
-| `scripts/test-projects.test-support.mjs` 把 `ui/src` 当 root          | 加 `web/src` 为 root，`ui/src` 留作过渡                       | 见 §1.3 E                                            |
+| 测试 | 替代 | 说明 |
+|---|---|---|
+| `pnpm test:ui` (vitest + Playwright) | `pnpm test:web` (vue-tsc + esbuild unit + CDP smoke) | 旧的 Playwright 单浏览器 e2e 在 web 里改用 CDP smoke |
+| `pnpm test:ui:e2e` | `pnpm test:web:e2e` | 复用 `webapp-cdp-smoke` 技能 |
+| `src/cron/cron-protocol-conformance.test.ts` 读 `ui/src/api/types.ts` | 改为读 `web/src/api/types.ts`（或保留 `ui/src` 直到 ui 删除） | 跨进程契约必须保留 |
+| `tsconfig.extensions.json` `ui/src/**/*.d.ts` | 改为 `web/src/**/*.d.ts` | 类型暴露面 |
+| `scripts/test-projects.test-support.mjs` 把 `ui/src` 当 root | 加 `web/src` 为 root，`ui/src` 留作过渡 | 见 §1.3 E |
 
 ### 3.6 清理清单（终态，独立 PR —— 全功能 parity + Element Plus + 终端迁移 + 11 长尾页面全部完成后）
 

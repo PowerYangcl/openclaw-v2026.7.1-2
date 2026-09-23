@@ -34,7 +34,8 @@ function resolveJdLlmConfig(): { apiKey: string; spendBaseUrl: string } | null {
   const spendProxyConfig = spendProxyEntry?.config as Record<string, unknown> | undefined;
   const pluginSpendBaseUrl =
     typeof spendProxyConfig?.spendBaseUrl === "string" ? spendProxyConfig.spendBaseUrl : "";
-  const providerSpendBaseUrl = typeof jdLlm.spendBaseUrl === "string" ? jdLlm.spendBaseUrl : "";
+  const providerSpendBaseUrl =
+    typeof jdLlm.spendBaseUrl === "string" ? jdLlm.spendBaseUrl : "";
   const legacyBaseUrl = typeof jdLlm.baseUrl === "string" ? jdLlm.baseUrl : "";
   const spendBaseUrl = providerSpendBaseUrl || pluginSpendBaseUrl || legacyBaseUrl;
   if (!apiKey || !spendBaseUrl) {
@@ -134,7 +135,10 @@ export async function handleJdSpendRequest(
   const rawSpend = record?.spend;
   // rawSpend × 1000 后保留两位小数：先整体放大到 ×1e5 取整，再 ÷100，
   // 全程只有一次浮点乘法,最终除法结果为精确两位小数，不会产生尾差。
-  const spend = typeof rawSpend === "number" ? Math.round(rawSpend * 1e5) / 100 : null;
+  const spend =
+    typeof rawSpend === "number"
+      ? Math.round(rawSpend * 1e5) / 100
+      : null;
 
   // balance：上游 spend ready 时 key.balance 是"上一轮"的旧值（不包含当次消费）。
   // handler 额外再 fetch 一次同 URL，等上游把当次消费累加完再覆盖。
@@ -142,7 +146,8 @@ export async function handleJdSpendRequest(
   // 重试失败/上游未返回 key 字段时回退到第一次结果。
   // 长重试（指数退避）由前端 fetchJdSpend 承担。
   const firstKey = record?.key as Record<string, unknown> | undefined;
-  let rawBalance: number | null = typeof firstKey?.balance === "number" ? firstKey.balance : null;
+  let rawBalance: number | null =
+    typeof firstKey?.balance === "number" ? firstKey.balance : null;
   try {
     const retryRes = await fetch(upstreamUrl, {
       method: "GET",
@@ -161,7 +166,8 @@ export async function handleJdSpendRequest(
   } catch {
     // 忽略额外请求错误，使用第一次结果
   }
-  const balance = rawBalance !== null ? Math.round(rawBalance * 1e5) / 100 : null;
+  const balance =
+    rawBalance !== null ? Math.round(rawBalance * 1e5) / 100 : null;
 
   sendJson(res, 200, { ok: true, spend, balance });
   return true;

@@ -1,0 +1,647 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>web 层 PC / 手机端适配评估 — openclaw 控制台</title>
+<style>
+  :root{
+    --ink:#0f172a; --ink2:#334155; --muted:#64748b; --line:#e2e8f0;
+    --bg:#f6f8fb; --card:#ffffff;
+    --blue:#2563eb; --blue-d:#1e3a8a; --sky:#0ea5e9;
+    --teal:#0f766e; --amber:#b45309; --red:#b91c1c; --green:#15803d;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",
+      Inter,ui-sans-serif,system-ui,"Segoe UI",sans-serif;
+    font-size:15px;line-height:1.72;-webkit-font-smoothing:antialiased}
+  code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
+
+  header.hero{background:linear-gradient(135deg,#0b1220,#1e3a8a 55%,#0ea5e9);color:#fff;
+    padding:44px 34px 38px}
+  header.hero .wrap{max-width:1280px;margin:0 auto}
+  header.hero h1{margin:0 0 10px;font-size:29px;letter-spacing:.2px}
+  header.hero p{margin:0;color:#dbeafe;max-width:900px}
+  .chips{margin-top:18px;display:flex;flex-wrap:wrap;gap:8px}
+  .chip{border:1px solid rgba(255,255,255,.4);border-radius:999px;padding:4px 12px;
+    font-size:12.5px;color:#eff6ff;background:rgba(255,255,255,.08)}
+
+  .decisions{background:#0b1220;color:#e5edf7;padding:26px 34px 30px}
+  .decisions .wrap{max-width:1280px;margin:0 auto}
+  .decisions h2{background:none;padding:0;color:#fff;font-size:19px;margin:0 0 4px}
+  .dec-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:14px;margin-top:16px}
+  .dec{border:1px solid rgba(148,163,184,.3);border-radius:10px;background:rgba(255,255,255,.04);padding:14px 16px}
+  .dec h3{background:none;padding:0;color:#fff;font-size:15px;margin:0 0 10px}
+  .dec dl{display:grid;grid-template-columns:104px minmax(0,1fr);gap:6px 10px;margin:0;font-size:13.5px}
+  .dec dt{color:#94a3b8}
+  .dec dd{margin:0;color:#dbe6f3}
+  .pick{display:inline-block;border-radius:5px;padding:1px 7px;font-size:12px;
+    background:#065f46;color:#d1fae5;margin-right:6px}
+  .warn{display:inline-block;border-radius:5px;padding:1px 7px;font-size:12px;
+    background:#7f1d1d;color:#fee2e2;margin-right:6px}
+
+  .layout{max-width:1280px;margin:0 auto;padding:28px 34px 90px;
+    display:grid;grid-template-columns:236px minmax(0,1fr);gap:34px;align-items:start}
+  aside.toc{position:sticky;top:24px;max-height:calc(100vh - 48px);overflow-y:auto;
+    background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px}
+  .toc-title{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:8px}
+  aside.toc a{display:block;padding:5px 8px;border-radius:7px;color:var(--ink2);
+    text-decoration:none;font-size:13.5px;border-left:2px solid transparent}
+  aside.toc a .n{color:#94a3b8;font-size:11.5px;margin-right:7px}
+  aside.toc a.sub{padding-left:24px;font-size:12.5px;color:var(--muted)}
+  aside.toc a:hover{background:#f1f5f9}
+  aside.toc a.active{background:#eff6ff;border-left-color:var(--blue);color:var(--blue-d);font-weight:600}
+  aside.toc a.active .n{color:var(--blue)}
+  main{min-width:0}
+  section{scroll-margin-top:20px;margin-bottom:34px}
+
+  h2{background:linear-gradient(135deg,#1e3a8a,#2563eb 58%,#0ea5e9);color:#fff;
+    padding:12px 18px;border-radius:9px;box-shadow:0 3px 10px rgba(37,99,235,.2);
+    font-size:18px;margin:0 0 16px}
+  h3{background:var(--blue);color:#fff;padding:8px 14px;border-radius:7px;font-size:15px;margin:22px 0 10px}
+  h4{background:#475569;color:#fff;padding:6px 12px;border-radius:6px;font-size:13.5px;margin:16px 0 8px}
+
+  .src{color:#94a3b8;font-size:12px;margin-left:6px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px}
+  .verdict{background:#eff6ff;border-left:4px solid var(--blue);border-radius:0 10px 10px 0;padding:12px 16px;margin:14px 0}
+  .verdict .tag{display:inline-block;background:var(--blue);color:#fff;border-radius:5px;
+    padding:1px 8px;font-size:12px;margin-right:8px}
+  .callout{border-radius:10px;padding:12px 16px;margin:14px 0;background:#f8fafc;border:1px solid var(--line)}
+  .callout.ok{background:#f0fdf4;border-color:#bbf7d0}
+  .callout.danger{background:#fef2f2;border-color:#fecaca}
+  .callout.a{background:#f0fdfa;border-color:#99f6e4}
+  .facts{margin:10px 0 0;padding-left:0;list-style:none}
+  .facts li{padding-left:18px;position:relative;margin-bottom:5px}
+  .facts li::before{content:"▸";position:absolute;left:0;color:var(--blue)}
+
+  .tablewrap{border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--card);margin:14px 0}
+  @media (max-width:900px){
+    /* 窄屏：宽表格在**自身容器内**横向滚动，别把整页撑破 */
+    .tablewrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+    .tablewrap table{min-width:640px}
+  }
+  table{border-collapse:collapse;width:100%;font-size:13.5px}
+  th{background:#f1f5f9;text-align:left;padding:9px 12px;font-weight:600;
+    border-bottom:1px solid var(--line);color:var(--ink2)}
+  td{padding:9px 12px;border-bottom:1px solid #f1f5f9;vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  th.col-a,td.col-a{background:#f0fdfa}
+  th.col-b,td.col-b{background:#fffbeb}
+  .win{color:var(--green);font-weight:600}
+  .lose{color:var(--red);font-weight:600}
+  .mid{color:var(--amber);font-weight:600}
+  .na{color:#94a3b8}
+  .num{font-variant-numeric:tabular-nums}
+
+  .flow{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:14px 0}
+  .fbox{border:1px solid var(--line);background:var(--card);border-radius:9px;padding:8px 12px;font-size:13px}
+  .fbox b{display:block;font-size:12px;color:var(--muted);font-weight:600}
+  .farrow{color:#94a3b8}
+  .phase{display:flex;gap:12px;margin:12px 0}
+  .phase .pid{flex:0 0 62px;height:62px;border-radius:10px;background:linear-gradient(135deg,#1e3a8a,#2563eb);
+    color:#fff;display:grid;place-items:center;font-weight:700;font-size:15px}
+  .phase .pbody{flex:1;min-width:0;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 16px}
+  .phase .pbody h4{margin:0 0 6px}
+  footer{border-top:1px solid var(--line);padding:18px 34px 40px;color:var(--muted);font-size:12.5px}
+  footer .wrap{max-width:1280px;margin:0 auto}
+  @media (max-width:900px){
+    .layout{grid-template-columns:1fr;padding:20px 16px 60px}
+    aside.toc{position:static;max-height:none;display:flex;flex-wrap:wrap;gap:4px}
+    aside.toc a.sub{display:none}
+    header.hero{padding:30px 16px 26px}
+    .decisions{padding:22px 16px}
+    /* 结论卡片：桌面是 minmax(330px,1fr) 的多列，320px 视口会被 330 撑破 */
+    .dec-grid{grid-template-columns:1fr}
+    .dec{padding:12px 14px}
+    .dec dl{grid-template-columns:88px minmax(0,1fr)}
+    .phase .pid{flex:0 0 52px;height:52px;font-size:14px;border-radius:9px}
+    .phase .pbody{padding:10px 12px}
+    footer{padding:16px}
+  }
+  @media (max-width:400px){
+    header.hero h1{font-size:23px}
+    .dec dl{grid-template-columns:1fr;gap:2px 0}
+    .dec dt{margin-top:6px}
+  }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <h1>web 层 PC / 手机端适配评估</h1>
+    <p>对照 <code>ui/</code>（旧 Lit 控制台）已有的响应式实现，拆解它「PC 与手机端适配」的四层机制，
+       并给出若在 <code>web/</code>（Vue 3 + Element Plus）实现同等适配时的改动清单与规模判断。
+       所有结论均带 <code>文件:行</code> 证据，来自本仓实测。</p>
+    <div class="chips">
+      <span class="chip">web/src ≈ 14.1k 行（views + components + layouts）</span>
+      <span class="chip">ui/src/styles/layout.mobile.css 951 行</span>
+      <span class="chip">ui 断点：1320 / 1100 / 768 / 400</span>
+      <span class="chip">web 现有响应式：1 处 hover 媒体查询 + 1 个间距断点</span>
+    </div>
+  </div>
+</header>
+
+<section class="decisions" id="s0">
+  <div class="wrap">
+    <h2>00 · 评估结论（先说结论）</h2>
+    <p style="color:#a8b6c9;font-size:13.5px;margin:6px 0 0">
+      三条结论彼此独立，可分别推进；D1 是 D2/D3 的前置（没有外壳与抽屉，手机端根本进不去对话页）。
+    </p>
+    <div class="dec-grid">
+
+      <div class="dec">
+        <h3>D1 · 手机端外壳（安全区 / 键盘 / 目录抽屉）</h3>
+        <dl>
+          <dt>选项</dt><dd>沿用现状 vs 补齐 viewport + PWA 元信息 + 目录改抽屉</dd>
+          <dt>建议</dt><dd><span class="pick">必须做</span>移动端能否「可用」完全取决于这一层</dd>
+          <dt>代价</dt><dd><span class="warn">代价</span>要动 <code>index.html</code> 与 <code>MainLayout</code>，
+              并新增遮罩/抽屉交互与一段 JS 状态</dd>
+          <dt>规模</dt><dd>3–6 文件，约 150–400 行（CSS 为主）</dd>
+        </dl>
+      </div>
+
+      <div class="dec">
+        <h3>D2 · 对话区（ChatPane）移动端降级</h3>
+        <dl>
+          <dt>选项</dt><dd>只做 CSS 兜底 vs 做「移动控件收纳 + 触控目标 + 短横屏」</dd>
+          <dt>建议</dt><dd><span class="pick">分期做</span>先补 P0（触控目标 / 不溢出 / 键盘），
+              再做控件收纳</dd>
+          <dt>代价</dt><dd><span class="warn">代价</span><code>ChatPane.vue</code> 单文件 5917 行，
+              改模板条件渲染有回归风险，必须配探针</dd>
+          <dt>规模</dt><dd>2–4 文件，约 800–1500 行（建议新增独立 mobile 样式文件）</dd>
+        </dl>
+      </div>
+
+      <div class="dec">
+        <h3>D3 · 8 个数据表格页（el-table）</h3>
+        <dl>
+          <dt>选项</dt><dd>全部卡片化 vs 列渐进隐藏 vs 暂不动（手机端入口隐藏）</dd>
+          <dt>建议</dt><dd><span class="pick">列渐进隐藏</span>与 ui 口径一致，改动最小、语义最稳</dd>
+          <dt>代价</dt><dd><span class="warn">代价</span>8 个视图逐个调列优先级，仍是线性工作量</dd>
+          <dt>规模</dt><dd>8 文件，约 600–1200 行</dd>
+        </dl>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<div class="layout">
+  <aside class="toc" id="toc">
+    <div class="toc-title">目录</div>
+    <a href="#s0" class="top"><span class="n">00</span>评估结论</a>
+    <a href="#s1"><span class="n">01</span>ui 层的四层适配机制</a>
+    <a href="#s2"><span class="n">02</span>断点清单与语义</a>
+    <a href="#s3"><span class="n">03</span>能力对照：ui vs web</a>
+    <a href="#s4"><span class="n">04</span>web 侧改动清单</a>
+    <a href="#s4-1" class="sub">4.1 外壳与安全区</a>
+    <a href="#s4-2" class="sub">4.2 布局骨架 / 抽屉</a>
+    <a href="#s4-3" class="sub">4.3 对话区交互降级</a>
+    <a href="#s4-4" class="sub">4.4 数据表格页</a>
+    <a href="#s5"><span class="n">05</span>规模估算与分期</a>
+    <a href="#s6"><span class="n">06</span>验收口径（可复用的探针）</a>
+    <a href="#s7"><span class="n">07</span>风险与待确认</a>
+  </aside>
+
+  <main>
+
+    <section id="s1">
+      <h2>01 · ui 层的四层适配机制</h2>
+      <p>ui 层不是「写了几条媒体查询」，而是四层各管一段职责的体系。任何一层缺席，手机端都会坏在
+        不同的地方 —— 这也是评估 web 侧工作量时最容易被低估的部分。</p>
+
+      <div class="flow">
+        <div class="fbox"><b>第 1 层</b>外壳：viewport / PWA / 主题引导</div>
+        <span class="farrow">→</span>
+        <div class="fbox"><b>第 2 层</b>CSS：断点体系 + 容器化布局</div>
+        <span class="farrow">→</span>
+        <div class="fbox"><b>第 3 层</b>JS：控件收纳 / 触控交互 / 形态降级</div>
+        <span class="farrow">→</span>
+        <div class="fbox"><b>第 4 层</b>测试：视口矩阵 + 触控尺寸断言</div>
+      </div>
+
+      <h3>第 1 层 · 外壳：viewport、PWA、主题引导</h3>
+      <p>三件事都在 <code>index.html</code> 里，且都是「不做就必坏」的：</p>
+      <ul class="facts">
+        <li><b>viewport 带 <code>viewport-fit=cover</code> 与 <code>interactive-widget=resizes-content</code></b>：
+            前者是刘海屏安全区的前提，后者决定手机键盘弹出时是**压缩内容高度**还是只缩小可视视口
+            —— 缺了它，输入框会被键盘顶到看不见的地方。<span class="src">— ui/index.html:6-9</span></li>
+        <li><b>PWA 元信息</b>：<code>&lt;link rel="manifest" href="/manifest.webmanifest"&gt;</code>，
+            配合样式里的 <code>@media (display-mode: standalone)</code> 让「添加到主屏」后按 App 形态排版。
+            <span class="src">— ui/index.html:35；ui/src/styles/layout.mobile.css（display-mode 2 处）</span></li>
+        <li><b>主题引导脚本</b>：把 <code>data-theme</code> / <code>data-theme-mode</code> 在挂载前同步写到
+            <code>&lt;html&gt;</code>，避免首屏闪白/闪黑；移动端状态栏颜色也依赖它。
+            <span class="src">— ui/index.html:37-95</span></li>
+      </ul>
+
+      <h3>第 2 层 · CSS 断点体系：一个主文件 + 全站媒体查询</h3>
+      <p>主力是 <code>ui/src/styles/layout.mobile.css</code>（<b>951 行</b>），分四段：
+        1320px（紧凑桌面）→ 1100px（<b>左侧目录改为 slide-over 抽屉</b>）→ 768px（手机，
+        含短横屏变体）→ 400px（小屏）。第 2 段的注释写得很直白：<i>“Tablet and smaller: switch the
+        left nav to a slide-over drawer.”</i><span class="src">— ui/src/styles/layout.mobile.css:5 / 92-93 / 273 / 753</span></p>
+      <p>抽屉不是纯 CSS：它靠 <code>.shell--nav-drawer-open</code> 状态类 + <code>.shell-nav-backdrop</code>
+        遮罩实现，说明<b>「开/关」是一个 JS 状态</b>，样式只负责表现。
+        <span class="src">— ui/src/styles/layout.mobile.css:108-153</span></p>
+      <p>除主文件外，各业务样式表也各自带断点，形成「全局骨架 + 局部降级」的分工。
+        全仓 <code>@media</code> 统计（按出现次数）：</p>
+      <div class="tablewrap">
+        <table>
+          <thead>
+            <tr><th style="width:32%">断点 / 条件</th><th style="width:14%">出现次数</th><th>语义</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>max-width: 1100px</code></td><td class="num">12</td><td>目录 → 抽屉，顶栏换成汉堡按钮</td></tr>
+            <tr><td><code>max-width: 768px</code></td><td class="num">11</td><td>手机主断点：单列、控件收纳、字号 16px</td></tr>
+            <tr><td><code>max-width: 600px / 480px / 400px</code></td><td class="num">10 / 7 / 5</td><td>逐级压缩内边距与控件</td></tr>
+            <tr><td><code>max-width: 720px / 760px</code></td><td class="num">9 / 8</td><td>局部（面包屑、卡片、表格工具条）</td></tr>
+            <tr><td><code>max-width: 932px and max-height: 500px and orientation: landscape</code></td><td class="num">8</td><td><b>短横屏</b>：手机上横过来时高度极紧，专门一套规则</td></tr>
+            <tr><td><code>hover: none and pointer: coarse</code></td><td class="num">7</td><td><b>触控设备</b>：hover 才出现的操作改为常显/点击</td></tr>
+            <tr><td><code>display-mode: standalone</code></td><td class="num">2</td><td>PWA 独立窗口形态</td></tr>
+            <tr><td><code>min-width: 1600px / 700px / 1101px</code></td><td class="num">3 / 2 / 2</td><td>反向：大屏才启用的增强</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>第 3 层 · JS：控件收纳与交互降级</h3>
+      <p>CSS 解决不了「桌面把三个下拉平铺、手机必须收进一个按钮」这类结构差异，ui 用一组
+        <b>移动控件容器</b>来做：<code>.chat-mobile-controls-wrapper</code> +
+        <code>.chat-controls-mobile-toggle</code>（带 <code>aria-expanded</code>/<code>aria-controls</code>）
+        + <code>.chat-controls-dropdown</code>，把「agent 过滤 / 会话选择 / 模型」三项收进同一个弹层。
+        <span class="src">— ui/src/pages/chat/chat-responsive.browser.test.ts:151-183</span></p>
+      <ul class="facts">
+        <li><b>单 agent 时降级为紧凑网格</b>：不渲染 agent 过滤时，会话与模型改为上下两行等高，
+            有专门断言。<span class="src">— 同文件:1658-1670</span></li>
+        <li><b>侧栏会话表按列优先级渐进隐藏</b>：≤900px 隐藏 Runtime、≤768px 再隐藏 Tokens、
+            ≤500px 再隐藏 Kind/Updated，但**保留 live 状态**。<span class="src">— layout.mobile.css:806 / 823 / 900</span></li>
+        <li><b>触控目标下限 43.5px</b>：所有移动按钮的宽高都被断言不得小于该值。
+            <span class="src">— chat-responsive.browser.test.ts:22, 941-953</span></li>
+        <li><b>输入区（composer）三档约束</b>：≤768px 字号强制 16px（防 iOS 聚焦自动放大）、
+            短横屏下输入区高度 ≤ 视口 38% 且消息区 ≥ 40%、展开态最多 5 行且内部可滚。
+            <span class="src">— 同文件:1251-1286, 1018-1126, 1320-1415</span></li>
+        <li><b>结果侧栏在手机端变覆盖层</b>：桌面是卡片内滚动，300px 级宽度改为
+            <code>position: fixed</code> 全屏覆盖并可滚。<span class="src">— 同文件:1706-1739</span></li>
+        <li><b>Tooltip 支持触控</b>：长按触发、移动阈值取消，避免手机上 hover 永远出不来。
+            <span class="src">— ui/src/components/tooltip.ts:192-221</span></li>
+      </ul>
+
+      <h3>第 4 层 · 测试：视口矩阵 + 几何断言</h3>
+      <p><code>chat-responsive.browser.test.ts</code> 是这套机制的「防回退网」：对
+        <b>320×568 / 375×812 / 430×932 / 768×1024 / 1024×768 / 1366×900 / 1440×900</b> 七个视口跑同一批
+        几何断言（首条消息不被顶栏压住、左右气泡左右对齐、圆角/内边距、桌面控件保持一行、
+        无横向溢出、弹层不出视口、触控尺寸）。<span class="src">— 同文件:13-21</span></p>
+      <div class="callout a">
+        <b>关键设计</b>：这些断言量的是 <b>getBoundingClientRect</b>（真实几何），不是「有没有某条 CSS 规则」。
+        所以它既约束了实现，也允许实现方式变化（Lit → Vue 也能照搬）。这是 web 侧可以直接复用的部分。
+      </div>
+    </section>
+
+    <section id="s2">
+      <h2>02 · 断点清单与语义</h2>
+      <p>把 ui 的断点按「屏幕形态」而不是「数值大小」理解，才能判断 web 侧要改哪些位置：
+        数值只是手段，<b>形态</b>才是要复刻的东西。</p>
+      <div class="tablewrap">
+        <table>
+          <thead>
+            <tr><th style="width:16%">形态</th><th style="width:22%">触发条件</th><th>要做的事（ui 现状）</th><th style="width:14%">web 现状</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>宽桌面</td><td><code>≥1101px</code></td><td>目录常驻 + 可折叠为图标轨道；对话可拆分多窗格</td>
+                <td class="mid">已有</td></tr>
+            <tr><td>紧凑桌面 / 平板</td><td><code>≤1320px</code></td><td>压缩内边距、缩小卡片间距</td>
+                <td class="lose">缺</td></tr>
+            <tr><td>平板竖屏 / 大手机</td><td><code>≤1100px</code></td><td><b>目录改 slide-over 抽屉 + 遮罩 + 汉堡按钮</b></td>
+                <td class="lose">缺（web 在此宽度只是「只渲染活动窗格」，
+                    <span class="src">ChatView.vue:153</span>）</td></tr>
+            <tr><td>手机竖屏</td><td><code>≤768px</code></td><td>单列、控件收纳进下拉、字号 16px、触控目标 ≥43.5px</td>
+                <td class="lose">缺</td></tr>
+            <tr><td>手机横屏（矮）</td><td><code>≤932px 且 ≤500px 高</code></td><td>输入区限高 38%、消息区保底 40%、最多 5 行可滚</td>
+                <td class="lose">缺</td></tr>
+            <tr><td>小屏手机</td><td><code>≤400px</code></td><td>再次压缩图标与文字，避免换行撑破</td>
+                <td class="lose">缺</td></tr>
+            <tr><td>触控设备</td><td><code>hover:none / pointer:coarse</code></td><td>hover 才显示的操作改常显；长按 tooltip</td>
+                <td class="mid">仅 1 处 <code>@media (hover:none)</code>
+                    <span class="src">ChatPane.vue:4483</span></td></tr>
+            <tr><td>PWA 独立窗口</td><td><code>display-mode: standalone</code></td><td>去浏览器栏后的高度/安全区修正</td>
+                <td class="lose">缺（无 manifest）</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout">
+        <b>一句话判断</b>：web 目前只有「宽桌面」一种形态被认真对待过；
+        <code>(max-width:1099px)</code> 那一条不是适配，而是**回避**（隐藏拆分入口、只渲染活动窗格）。
+      </div>
+    </section>
+
+    <section id="s3">
+      <h2>03 · 能力对照：ui vs web</h2>
+      <div class="tablewrap">
+        <table>
+          <thead>
+            <tr><th style="width:22%">能力</th><th style="width:32%" class="col-a">ui（Lit）</th>
+                <th style="width:32%" class="col-b">web（Vue 3 + Element Plus）</th><th style="width:14%">差距</th></tr>
+          </thead>
+          <tbody>
+            <tr><td>viewport / 安全区 / 键盘</td>
+                <td class="col-a"><code>viewport-fit=cover</code> + <code>interactive-widget=resizes-content</code>
+                    <span class="src">index.html:6</span></td>
+                <td class="col-b">仅 <code>width=device-width, initial-scale=1.0</code>
+                    <span class="src">web/index.html:5</span></td>
+                <td class="lose">缺</td></tr>
+            <tr><td>PWA / 主屏</td><td class="col-a">有 manifest + standalone 样式</td>
+                <td class="col-b">无（<code>public/</code> 只有 favicon）</td><td class="lose">缺</td></tr>
+            <tr><td>主题首屏引导</td><td class="col-a">挂载前写 <code>data-theme</code>/<code>data-theme-mode</code></td>
+                <td class="col-b">App.vue 内 <code>prefers-color-scheme</code> 监听
+                    <span class="src">web/src/App.vue:51</span></td><td class="mid">弱</td></tr>
+            <tr><td>移动端样式文件</td><td class="col-a"><code>layout.mobile.css</code> 951 行，4 段主断点</td>
+                <td class="col-b">无独立文件；样式散在 SFC 的 scoped 块</td><td class="lose">缺</td></tr>
+            <tr><td>目录 → 抽屉</td><td class="col-a">1100px 起 slide-over + 遮罩 + 汉堡</td>
+                <td class="col-b">侧栏常驻（<code>.chat-side</code>），无抽屉/遮罩</td><td class="lose">缺</td></tr>
+            <tr><td>窄屏对话</td><td class="col-a">单列 + 移动控件收纳</td>
+                <td class="col-b"><code>NARROW_SPLIT_QUERY</code> 下只渲染活动窗格
+                    <span class="src">web/src/views/ChatView.vue:147-160</span></td>
+                <td class="mid">半成品</td></tr>
+            <tr><td>触控目标</td><td class="col-a">断言 ≥43.5px</td>
+                <td class="col-b">Element Plus 默认尺寸（<code>text</code> 按钮更小）</td><td class="lose">缺</td></tr>
+            <tr><td>表格页降级</td><td class="col-a">列渐进隐藏（900/768/500 三档）</td>
+                <td class="col-b">8 个视图用 <code>el-table</code>，桌面列布局</td><td class="lose">缺</td></tr>
+            <tr><td>响应式回归测试</td><td class="col-a">7 视口几何断言套件</td>
+                <td class="col-b">无（现有 smoke 都是 1600×900 桌面）</td><td class="lose">缺</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="s4">
+      <h2>04 · web 侧改动清单</h2>
+      <p>按「改动落在哪个文件、依据是什么、量级多大、风险在哪」列出。全部为新增样式与少量条件渲染，
+        <b>不需要改网关协议或 stores 的数据口径</b>。</p>
+
+      <h3 id="s4-1">4.1 外壳与安全区</h3>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th style="width:26%">文件</th><th style="width:44%">改动</th><th style="width:14%">量级</th><th style="width:16%">风险</th></tr></thead>
+          <tbody>
+            <tr><td><code>web/index.html</code></td>
+                <td>viewport 补 <code>viewport-fit=cover, interactive-widget=resizes-content</code>；
+                    加 <code>manifest.webmanifest</code> 链接；挂载前写 <code>data-theme-mode</code></td>
+                <td>约 30 行</td><td class="mid">低</td></tr>
+            <tr><td><code>web/public/</code></td><td>新增 <code>manifest.webmanifest</code> + 图标</td>
+                <td>1 文件</td><td class="mid">低</td></tr>
+            <tr><td>全局样式（<code>index.css</code>/<code>App.vue</code>）</td>
+                <td><code>--safe-*</code> 变量 + <code>env(safe-area-inset-*)</code>；高度用 <code>100dvh</code>
+                    而非 <code>100vh</code>（移动端浏览器栏会吃掉 <code>vh</code>）</td>
+                <td>约 60 行</td><td class="mid">低–中</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3 id="s4-2">4.2 布局骨架 / 目录抽屉</h3>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th style="width:26%">文件</th><th style="width:44%">改动</th><th style="width:14%">量级</th><th style="width:16%">风险</th></tr></thead>
+          <tbody>
+            <tr><td><code>web/src/layouts/MainLayout.vue</code>（368 行）</td>
+                <td>引入「抽屉开/关」状态与遮罩；≤1100px 时侧栏从常驻改为覆盖层</td>
+                <td>约 120 行</td><td class="mid">中</td></tr>
+            <tr><td><code>web/src/components/ChatSidebar.vue</code>（670 行）</td>
+                <td>抽屉内的宽度/滚动高度自适应；顶栏汉堡按钮；点击条目后自动关闭抽屉</td>
+                <td>约 80 行</td><td class="mid">中</td></tr>
+            <tr><td>新增 <code>web/src/styles/mobile.css</code></td>
+                <td>承载 1320 / 1100 / 768 / 400 四段断点骨架（对齐 ui 的分工方式），
+                    避免把媒体查询继续塞进各 SFC</td>
+                <td>约 200 行</td><td class="mid">低</td></tr>
+            <tr><td><code>web/src/views/ChatView.vue</code>（520 行）</td>
+                <td>把 <code>(max-width:1099px)</code> 的「回避策略」升级为 768px 的真适配；
+                    拆分入口在手机上改为引导文案</td>
+                <td>约 40 行</td><td class="mid">中（现有拆分逻辑已稳定，注意别破坏）</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3 id="s4-3">4.3 对话区（ChatPane）交互降级</h3>
+      <div class="callout danger">
+        <b>最大的一块，也是最需要小心的</b>：<code>web/src/views/ChatPane.vue</code> 单文件
+        <b>5917 行</b>（模板 + 逻辑 + scoped 样式混在一起）。已有两块硬骨头：
+        窗格头会话下拉（<code>el-select</code> 弹层被 teleport 到 body，弹层宽度受宿主影响）、
+        per-pane 身份/模型隔离。移动端改动务必<b>新增样式文件 + 最少量的模板条件渲染</b>，不要重排结构。
+      </div>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th style="width:28%">改动项</th><th style="width:42%">做法（对齐 ui 口径）</th><th style="width:14%">量级</th><th style="width:16%">风险</th></tr></thead>
+          <tbody>
+            <tr><td>触控目标 ≥43.5px</td>
+                <td>窗格头动作按钮、输入区按钮、消息操作按钮统一最小尺寸；hover 才出现的操作在
+                    <code>hover:none</code> 下常显</td><td>约 150 行 CSS</td><td class="mid">低</td></tr>
+            <tr><td>移动控件收纳</td>
+                <td>≤768px 把「会话下拉 / 拆分 / 关闭」收进一个切换按钮的弹层，
+                    配 <code>aria-expanded</code>/<code>aria-controls</code></td><td>约 200 行（含 1 个新组件）</td>
+                <td class="mid">中</td></tr>
+            <tr><td>输入区三档约束</td>
+                <td>≤768px 字号 16px；短横屏输入区 ≤38% 视口高、消息区 ≥40%；展开态 ≤5 行可滚</td>
+                <td>约 120 行</td><td class="mid">中</td></tr>
+            <tr><td>消息元信息行</td>
+                <td>桌面 hover 才显示的时间/积分/操作行，手机上常显（否则点不到）</td>
+                <td>约 60 行</td><td class="mid">低</td></tr>
+            <tr><td>附件预览 / 弹层不出视口</td>
+                <td>预览内边距、模型/设置弹层限制在视口内（ui 有逐项断言）</td>
+                <td>约 100 行</td><td class="mid">中（el-select 弹层宽度坑，见风险节）</td></tr>
+            <tr><td>结果侧栏（若有）</td><td>手机端 <code>position: fixed</code> 覆盖层 + 内部滚动</td>
+                <td>约 60 行</td><td class="mid">低</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3 id="s4-4">4.4 数据表格页</h3>
+      <p>8 个视图用了 <code>el-table</code>：<code>SkillsView / AgentsView / LogsView / SessionsView /
+        CronView / ChannelsView / DebugView / UsageView</code>。<code>el-table</code> 在 320px 下横向必溢出，
+        ui 的解法是<b>按优先级砍列</b>（900/768/500 三档），web 可以照抄这套口径。</p>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th style="width:26%">改动</th><th style="width:50%">做法</th><th style="width:24%">量级</th></tr></thead>
+          <tbody>
+            <tr><td>列优先级声明</td><td>每页给列加 <code>class="col-optional-1/2/3"</code>，在 mobile 样式里逐档隐藏</td>
+                <td>8 文件 × 约 60–150 行</td></tr>
+            <tr><td>工具条与分页</td><td>筛选/搜索/分页在窄屏改为换行堆叠（ui 已如此）</td><td>约 120 行</td></tr>
+            <tr><td>必要时的卡片化</td><td>仅对「主键 + 状态 + 时间」极少列的页（如 Cron）改成卡片列表</td>
+                <td>按需，1–2 页</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section id="s5">
+      <h2>05 · 规模估算与分期</h2>
+      <div class="callout">
+        <b>总体判断：中等偏大，但可分期独立上线。</b>合计约
+        <b>12–18 个文件、2000–3500 行</b>（CSS 为主，新增 JS 状态很少）。
+        其中 P0+P1（外壳 + 抽屉骨架）就能让手机端**可用**；P2/P3 是体验与细节。
+      </div>
+
+      <div class="phase">
+        <div class="pid">P0</div>
+        <div class="pbody">
+          <h4>外壳与安全区（手机端能「打得开、看得见」）</h4>
+          <p><code>index.html</code> viewport / manifest / 主题引导；<code>env(safe-area-inset-*)</code>；
+            <code>100dvh</code> 高度。<b>3–6 文件，约 100–200 行。</b>
+            验收：真机（或 320×568 视口）打开对话页，输入框不被键盘遮挡、无横向滚动。</p>
+        </div>
+      </div>
+
+      <div class="phase">
+        <div class="pid">P1</div>
+        <div class="pbody">
+          <h4>布局骨架 + 目录抽屉（腾出内容宽度）</h4>
+          <p>新增 <code>mobile.css</code>（1320/1100/768/400）；<code>MainLayout</code> 抽屉状态 + 遮罩；
+            <code>ChatSidebar</code> 适配；<code>ChatView</code> 放宽窄屏策略。<b>4–6 文件，约 400–600 行。</b>
+            验收：320px 下内容占满宽度；点汉堡开抽屉、点遮罩/条目关闭。</p>
+        </div>
+      </div>
+
+      <div class="phase">
+        <div class="pid">P2</div>
+        <div class="pbody">
+          <h4>对话区交互降级（真正好用）</h4>
+          <p>触控目标、控件收纳、输入区三档、元信息常显、弹层不出视口。<b>2–4 文件，约 700–1100 行</b>
+            （<code>ChatPane.vue</code> 只做最小条件渲染 + 新增样式）。</p>
+        </div>
+      </div>
+
+      <div class="phase">
+        <div class="pid">P3</div>
+        <div class="pbody">
+          <h4>数据表格页 + 回归基线</h4>
+          <p>8 个 el-table 视图的列优先级；新增 <code>web/tests/smoke/responsive.e2e.mjs</code>
+            （视口矩阵 + 触控尺寸 + 无溢出）。<b>9–11 文件，约 700–1400 行。</b></p>
+        </div>
+      </div>
+
+      <h4>分期之外的依赖关系</h4>
+      <ul class="facts">
+        <li>P1 依赖 P0（没有 <code>100dvh</code> 与安全区，抽屉高度在手机上会算错）。</li>
+        <li>P2 依赖 P1（抽屉占位宽度会改变对话区可用宽度，断点需要一起回归）。</li>
+        <li>P3 与 P2 相互独立，可并行。</li>
+        <li>回归基线（P3 的后半段）建议**随 P0 一起建**，否则 P1/P2 的每一次调整都只能靠肉眼。</li>
+      </ul>
+    </section>
+
+    <section id="s6">
+      <h2>06 · 验收口径（可复用的探针）</h2>
+      <p>ui 的断言方式是「几何 + 视口矩阵」。web 已有 Playwright + 系统 Chrome 的探针基础设施
+        （<code>web/tests/smoke/*.e2e.mjs</code>），把 ui 的断言逐条翻译过来即可，
+        不需要引入新的测试框架。</p>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th style="width:30%">ui 断言</th><th style="width:46%">web 侧的等价检查</th><th style="width:24%">出处</th></tr></thead>
+          <tbody>
+            <tr><td>无横向溢出</td><td><code>documentElement.scrollWidth ≤ innerWidth + 1</code>，在 7 个视口各跑一遍</td>
+                <td class="src" style="margin:0">chat-responsive.browser.test.ts:484-492</td></tr>
+            <tr><td>触控目标 ≥43.5px</td><td>枚举移动可见按钮的 <code>getBoundingClientRect()</code>，断言宽高下限</td>
+                <td class="src" style="margin:0">:941-953</td></tr>
+            <tr><td>手机下拉在视口内</td><td>打开弹层后断言 <code>x ≥ 8</code> 且 <code>x+width ≤ 视口宽-8</code></td>
+                <td class="src" style="margin:0">:902-905</td></tr>
+            <tr><td>输入区短横屏约束</td><td>568×320 下断言输入区 ≤38% 高、消息区 ≥40% 高、展开态 ≤5 行</td>
+                <td class="src" style="margin:0">:1283-1287, :1018+</td></tr>
+            <tr><td>移动字号 16px</td><td>≤768px 断言语 <code>textarea</code> 的 <code>font-size === 16</code></td>
+                <td class="src" style="margin:0">:1254-1255</td></tr>
+            <tr><td>控件不重叠</td><td>矩形相交检测（圆环/模型/发送等）</td>
+                <td class="src" style="margin:0">:1247-1250</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout ok">
+        <b>建议的新增文件</b>：<code>web/tests/smoke/responsive.e2e.mjs</code>，视口集合沿用 ui 的
+        <code>[320×568, 375×812, 430×932, 768×1024, 1366×900]</code> 五档起步（既覆盖手机，也覆盖现有桌面基线，
+        防止「为手机改坏桌面」）。
+      </div>
+    </section>
+
+    <section id="s7">
+      <h2>07 · 风险与待确认</h2>
+      <h4>风险（按影响排序）</h4>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th style="width:26%">风险</th><th style="width:52%">说明</th><th style="width:22%">缓解</th></tr></thead>
+          <tbody>
+            <tr><td><code>ChatPane.vue</code> 单文件 5917 行</td>
+                <td>模板/逻辑/样式耦合，移动端条件渲染容易牵动桌面行为（本项目已踩过「v-if 撑破几何」的坑）</td>
+                <td>样式单独成文件；模板只加最少的分支；每次改动跑现有 5 个 smoke</td></tr>
+            <tr><td>Element Plus 的桌面语义</td>
+                <td><code>el-table</code>/<code>el-dialog</code>/<code>el-select</code> 的默认尺寸、弹层宽度与
+                    teleport 行为都为桌面设计；弹层宽度会反向受宿主宽度影响</td>
+                <td>统一在 mobile 样式里覆盖，不改组件用法</td></tr>
+            <tr><td>iOS 键盘与 <code>100vh</code></td>
+                <td>不补 <code>interactive-widget</code> 与 <code>dvh</code> 时，键盘弹出会把输入框顶出可视区</td>
+                <td>P0 前置解决，真机验证</td></tr>
+            <tr><td>与现有拆分视图逻辑冲突</td>
+                <td>窄屏「只渲染活动窗格」的策略在手机上要保留还是替换成单窗格，语义需先定</td>
+                <td>见下方待确认 ①</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <h4>开工前需要拍板的三件事</h4>
+      <ul class="facts">
+        <li><b>① 手机端的产品形态</b>：是多窗格拆分在手机上**彻底禁用**（沿用现状 + 引导文案），
+            还是要支持「窗格切换器」（屏幕上只显示一个、用顶部标签切换）？后者要动
+            <code>ChatView</code> 的布局状态，量级 +约 200–300 行。</li>
+        <li><b>② 手机端要覆盖到哪些页面</b>：只保对话页（P0–P2），还是包含 8 个数据表格页（P3）？
+            ui 是全站都适配，web 若只保对话页可省掉约 1/3 工作量。</li>
+        <li><b>③ 是否要做 PWA</b>（manifest + standalone）：不做的话「添加到主屏」体验差，但可省掉
+            图标资产与 standalone 样式两组工作。</li>
+      </ul>
+      <div class="verdict">
+        <span class="tag">建议</span>
+        先落 <b>P0 + P1 + 回归基线</b>：这三块决定了「手机能不能用」，且与具体产品形态无关
+        （①②③ 的答案都不会让它们返工）。P2/P3 待上述三点拍板后按优先级推进。
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<footer>
+  <div class="wrap">
+    证据均取自本仓实测：<code>ui/index.html</code>、<code>ui/src/styles/layout.mobile.css</code>（951 行）、
+    <code>ui/src/pages/chat/chat-responsive.browser.test.ts</code>、
+    <code>web/index.html</code>、<code>web/src/views/ChatView.vue</code>、
+    <code>web/src/views/ChatPane.vue</code>（5917 行）与 8 个使用 <code>el-table</code> 的视图。
+    行数统计用 <code>wc -l</code>，媒体查询统计用 <code>grep -rho "@media"</code> 归并。
+  </div>
+</footer>
+
+<script>
+(function () {
+  var links = Array.prototype.slice.call(document.querySelectorAll("aside.toc a"));
+  var targets = links.map(function (a) {
+    var id = (a.getAttribute("href") || "").slice(1);
+    return document.getElementById(id);
+  });
+  var ticking = false;
+  function setActive(idx) {
+    links.forEach(function (a, i) { a.classList.toggle("active", i === idx); });
+  }
+  function update() {
+    ticking = false;
+    var best = 0;
+    for (var i = 0; i < targets.length; i++) {
+      var el = targets[i];
+      if (!el) continue;
+      if (el.getBoundingClientRect().top <= window.innerHeight * 0.22) best = i;
+    }
+    if (window.innerHeight + window.scrollY >= document.body.offsetHeight - 4) best = targets.length - 1;
+    setActive(best);
+  }
+  function onScroll() {
+    if (!ticking) { ticking = true; window.requestAnimationFrame(update); }
+  }
+  window.addEventListener("scroll", onScroll, { passive: true });
+  links.forEach(function (a, i) {
+    a.addEventListener("click", function () { setActive(i); });
+  });
+  update();
+})();
+</script>
+</body>
+</html>

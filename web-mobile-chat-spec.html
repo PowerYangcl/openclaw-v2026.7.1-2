@@ -1,0 +1,714 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>手机端适配实现方案（对话页） — openclaw web</title>
+<style>
+  :root{
+    --ink:#0f172a; --ink2:#334155; --muted:#64748b; --line:#e2e8f0;
+    --bg:#f6f8fb; --card:#ffffff;
+    --blue:#2563eb; --blue-d:#1e3a8a; --sky:#0ea5e9;
+    --teal:#0f766e; --amber:#b45309; --red:#b91c1c; --green:#15803d;
+  }
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",
+      Inter,ui-sans-serif,system-ui,"Segoe UI",sans-serif;
+    font-size:15px;line-height:1.72;-webkit-font-smoothing:antialiased}
+  code,pre{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;overflow-wrap:anywhere}
+
+  header.hero{background:linear-gradient(135deg,#0b1220,#1e3a8a 55%,#0ea5e9);color:#fff;
+    padding:44px 34px 38px}
+  header.hero .wrap{max-width:1280px;margin:0 auto}
+  header.hero h1{margin:0 0 10px;font-size:29px;letter-spacing:.2px}
+  header.hero p{margin:0;color:#dbeafe;max-width:940px}
+  .chips{margin-top:18px;display:flex;flex-wrap:wrap;gap:8px}
+  .chip{border:1px solid rgba(255,255,255,.4);border-radius:999px;padding:4px 12px;
+    font-size:12.5px;color:#eff6ff;background:rgba(255,255,255,.08)}
+
+  .decisions{background:#0b1220;color:#e5edf7;padding:26px 34px 30px}
+  .decisions .wrap{max-width:1280px;margin:0 auto}
+  .decisions h2{background:none;padding:0;color:#fff;font-size:19px;margin:0 0 4px}
+  .dec-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:14px;margin-top:16px}
+  .dec{border:1px solid rgba(148,163,184,.3);border-radius:10px;background:rgba(255,255,255,.04);padding:14px 16px}
+  .dec h3{background:none;padding:0;color:#fff;font-size:15px;margin:0 0 10px}
+  .dec dl{display:grid;grid-template-columns:96px minmax(0,1fr);gap:6px 10px;margin:0;font-size:13.5px}
+  .dec dt{color:#94a3b8}
+  .dec dd{margin:0;color:#dbe6f3}
+  .pick{display:inline-block;border-radius:5px;padding:1px 7px;font-size:12px;
+    background:#065f46;color:#d1fae5;margin-right:6px}
+  .warn{display:inline-block;border-radius:5px;padding:1px 7px;font-size:12px;
+    background:#7f1d1d;color:#fee2e2;margin-right:6px}
+  .ok2{display:inline-block;border-radius:5px;padding:1px 7px;font-size:12px;
+    background:#1e3a5f;color:#dbeafe;margin-right:6px}
+
+  .layout{max-width:1280px;margin:0 auto;padding:28px 34px 90px;
+    display:grid;grid-template-columns:236px minmax(0,1fr);gap:34px;align-items:start}
+  aside.toc{position:sticky;top:24px;max-height:calc(100vh - 48px);overflow-y:auto;
+    background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px}
+  .toc-title{font-size:12px;letter-spacing:.14em;text-transform:uppercase;color:var(--muted);margin-bottom:8px}
+  aside.toc a{display:block;padding:5px 8px;border-radius:7px;color:var(--ink2);
+    text-decoration:none;font-size:13.5px;border-left:2px solid transparent}
+  aside.toc a .n{color:#94a3b8;font-size:11.5px;margin-right:7px}
+  aside.toc a.sub{padding-left:24px;font-size:12.5px;color:var(--muted)}
+  aside.toc a:hover{background:#f1f5f9}
+  aside.toc a.active{background:#eff6ff;border-left-color:var(--blue);color:var(--blue-d);font-weight:600}
+  aside.toc a.active .n{color:var(--blue)}
+  main{min-width:0}
+  section{scroll-margin-top:20px;margin-bottom:34px}
+
+  h2{background:linear-gradient(135deg,#1e3a8a,#2563eb 58%,#0ea5e9);color:#fff;
+    padding:12px 18px;border-radius:9px;box-shadow:0 3px 10px rgba(37,99,235,.2);
+    font-size:18px;margin:0 0 16px}
+  h3{background:var(--blue);color:#fff;padding:8px 14px;border-radius:7px;font-size:15px;margin:22px 0 10px}
+  h4{background:#475569;color:#fff;padding:6px 12px;border-radius:6px;font-size:13.5px;margin:16px 0 8px}
+
+  .src{color:#94a3b8;font-size:12px;margin-left:6px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:16px 18px}
+  .verdict{background:#eff6ff;border-left:4px solid var(--blue);border-radius:0 10px 10px 0;padding:12px 16px;margin:14px 0}
+  .verdict .tag{display:inline-block;background:var(--blue);color:#fff;border-radius:5px;
+    padding:1px 8px;font-size:12px;margin-right:8px}
+  .callout{border-radius:10px;padding:12px 16px;margin:14px 0;background:#f8fafc;border:1px solid var(--line)}
+  .callout.ok{background:#f0fdf4;border-color:#bbf7d0}
+  .callout.danger{background:#fef2f2;border-color:#fecaca}
+  .callout.a{background:#f0fdfa;border-color:#99f6e4}
+  .facts{margin:10px 0 0;padding-left:0;list-style:none}
+  .facts li{padding-left:18px;position:relative;margin-bottom:5px}
+  .facts li::before{content:"▸";position:absolute;left:0;color:var(--blue)}
+
+  .tablewrap{border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--card);margin:14px 0}
+  @media (max-width:900px){
+    .tablewrap{overflow-x:auto;-webkit-overflow-scrolling:touch}
+    .tablewrap table{min-width:640px}
+  }
+  table{border-collapse:collapse;width:100%;font-size:13.5px}
+  th{background:#f1f5f9;text-align:left;padding:9px 12px;font-weight:600;
+    border-bottom:1px solid var(--line);color:var(--ink2)}
+  td{padding:9px 12px;border-bottom:1px solid #f1f5f9;vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  th.col-a,td.col-a{background:#f0fdfa}
+  th.col-b,td.col-b{background:#fffbeb}
+  .win{color:var(--green);font-weight:600}
+  .lose{color:var(--red);font-weight:600}
+  .mid{color:var(--amber);font-weight:600}
+  .na{color:#94a3b8}
+
+  .flow{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin:14px 0}
+  .fbox{border:1px solid var(--line);background:var(--card);border-radius:9px;padding:8px 12px;font-size:13px}
+  .fbox b{display:block;font-size:12px;color:var(--muted);font-weight:600}
+  .farrow{color:#94a3b8}
+  .phase{display:flex;gap:12px;margin:12px 0}
+  .phase .pid{flex:0 0 62px;height:62px;border-radius:10px;background:linear-gradient(135deg,#1e3a8a,#2563eb);
+    color:#fff;display:grid;place-items:center;font-weight:700;font-size:15px}
+  .phase .pbody{flex:1;min-width:0;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:12px 16px}
+  .phase .pbody h4{margin:0 0 6px}
+  .mock{border:1px solid var(--line);border-radius:12px;background:#fff;padding:12px;margin:14px 0}
+  .mock .bar{display:flex;align-items:center;gap:6px;border-bottom:1px solid var(--line);padding-bottom:8px;margin-bottom:10px;
+    overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none}
+  .mock .bar::-webkit-scrollbar{display:none}
+  .mock .tab{flex:0 0 auto;border:1px solid var(--line);border-radius:999px;padding:3px 10px;font-size:12px;color:var(--ink2);background:#f8fafc;white-space:nowrap}
+  .mock .tab.on{border-color:var(--blue);color:var(--blue-d);background:#eff6ff;font-weight:600;box-shadow:inset 0 2px 0 var(--blue)}
+  .mock .body{border:1px dashed var(--line);border-radius:8px;padding:10px;color:var(--muted);font-size:12.5px}
+  footer{border-top:1px solid var(--line);padding:18px 34px 40px;color:var(--muted);font-size:12.5px}
+  footer .wrap{max-width:1280px;margin:0 auto}
+  @media (max-width:900px){
+    .layout{grid-template-columns:1fr;padding:20px 16px 60px}
+    aside.toc{position:static;max-height:none;display:flex;flex-wrap:wrap;gap:4px}
+    aside.toc a.sub{display:none}
+    header.hero{padding:30px 16px 26px}
+    .decisions{padding:22px 16px}
+    .dec-grid{grid-template-columns:1fr}
+    .dec{padding:12px 14px}
+    .dec dl{grid-template-columns:84px minmax(0,1fr)}
+    .phase .pid{flex:0 0 52px;height:52px;font-size:14px;border-radius:9px}
+    footer{padding:16px}
+  }
+  @media (max-width:400px){
+    header.hero h1{font-size:23px}
+    .dec dl{grid-template-columns:1fr;gap:2px 0}
+    .dec dt{margin-top:6px}
+  }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="wrap">
+    <h1>手机端适配实现方案（对话页）</h1>
+    <p>三项要点已定稿：① 单窗格 + 顶部窗格切换器（去掉输入框拆分入口）；② 范围仅对话页；
+       ③ PWA 按历史 UI 层对齐实现。本文给出每一项的<strong>目标态、现状证据、改动清单与验收口径</strong>。</p>
+    <div class="chips">
+      <span class="chip">窄屏断点沿用 max-width: 1099px</span>
+      <span class="chip">web 路由本来只有 /chat</span>
+      <span class="chip">ui 已实现完整 PWA（manifest + sw.js + 注册 + 图标）</span>
+      <span class="chip">ui 没有现成的窗格切换器 ⇒ 本次新增</span>
+    </div>
+  </div>
+</header>
+
+<section class="decisions" id="s0">
+  <div class="wrap">
+    <h2>00 · 定稿摘要</h2>
+    <p style="color:#a8b6c9;font-size:13.5px;margin:6px 0 0">
+      三项彼此独立。D1 的「拆分入口隐藏」与「同时只显示一个窗格」两项<strong>现状已满足</strong>，
+      真正新增的只有窗格切换器与窗格头回归；D3 是把 ui 的 PWA 实现搬到 web，不需要改网关。
+    </p>
+    <div class="dec-grid">
+      <div class="dec">
+        <h3>① 手机端形态：单窗格 + 顶部窗格切换器</h3>
+        <dl>
+          <dt>目标</dt><dd>窄屏同一时刻只显示一个窗格；顶部标签条切换；输入框区不再出现拆分按钮</dd>
+          <dt>现状</dt><dd><span class="ok2">已满足</span>只渲染活动窗格 + 输入框拆分入口在窄屏已关
+              <br><span class="lose">缺口</span>没有切换器（另一窗格不可达）；窄屏窗格头被整个去掉（会话下拉/关闭也没了）</dd>
+          <dt>改动</dt><dd>新增 <code>ChatPaneTabs.vue</code>；<code>ChatView.vue</code> 窄屏分支改 <code>chrome="pane"</code>；
+              <code>ChatPane.vue</code> 窗格头拆分按钮加开关</dd>
+          <dt>规模</dt><dd>2–3 文件 / 约 200–300 行</dd>
+        </dl>
+      </div>
+      <div class="dec">
+        <h3>② 覆盖范围：仅对话页</h3>
+        <dl>
+          <dt>目标</dt><dd>只适配对话页（含它的侧栏/输入区），其余页面不投入</dd>
+          <dt>现状</dt><dd><span class="ok2">无需改路由</span>web 路由<strong>本来就只有 <code>/chat</code></strong>（其余全部注释），
+              落地页恒为 <code>/chat</code></dd>
+          <dt>改动</dt><dd>无需改路由；明确不做 8 个 <code>el-table</code> 视图
+              ⇒ 原「P3 表格页」整体取消</dd>
+          <dt>规模</dt><dd>0 文件（范围收敛，省 600–1200 行）</dd>
+        </dl>
+      </div>
+      <div class="dec">
+        <h3>③ PWA：ui 已实现，web 对齐</h3>
+        <dl>
+          <dt>目标</dt><dd>与 ui 完全相同的 PWA 能力（可安装 + 版本化缓存 + 升级自动刷新）</dd>
+          <dt>现状</dt><dd>ui：manifest + sw.js + 注册 + 6 个公共资产齐全；web：<span class="lose">一项都没有</span></dd>
+          <dt>改动</dt><dd>复制 6 个资产到 <code>web/public/</code>；<code>web/src/main.ts</code> 加注册；
+              <code>web/vite.config.ts</code> 加 define + sw 构建期替换插件；<code>index.html</code> 加 manifest/图标/viewport</dd>
+          <dt>规模</dt><dd>4 文件 + 6 静态资产 / 约 150 行（资产为复制）<br>网关侧<span class="win">无需改动</span></dd>
+        </dl>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="layout">
+  <aside class="toc" id="toc">
+    <div class="toc-title">目录</div>
+    <a href="#s0" class="top"><span class="n">00</span>定稿摘要</a>
+    <a href="#s1"><span class="n">01</span>① 单窗格 + 窗格切换器</a>
+    <a href="#s1-1" class="sub">1.1 现状与差距（对照 ui）</a>
+    <a href="#s1-2" class="sub">1.2 目标态与交互细则</a>
+    <a href="#s1-3" class="sub">1.3 改动清单</a>
+    <a href="#s2"><span class="n">02</span>② 范围：仅对话页</a>
+    <a href="#s3"><span class="n">03</span>③ PWA 对齐实现</a>
+    <a href="#s3-1" class="sub">3.1 ui 已实现什么</a>
+    <a href="#s3-2" class="sub">3.2 web 对齐改动</a>
+    <a href="#s3-3" class="sub">3.3 网关与 CSP 边界</a>
+    <a href="#s4"><span class="n">04</span>汇总改动清单与规模</a>
+    <a href="#s5"><span class="n">05</span>分期与验收</a>
+    <a href="#s6"><span class="n">06</span>仍需拍板的 4 个细节</a>
+  </aside>
+
+  <main>
+
+    <section id="s1">
+      <h2>01 · ① 单窗格 + 顶部窗格切换器</h2>
+
+      <h3 id="s1-1">1.1 现状与差距（逐项对照 ui）</h3>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th style="width:20%">行为</th><th style="width:30%" class="col-a">ui（历史层，参照）</th>
+              <th style="width:32%" class="col-b">web 现状</th><th style="width:18%">结论</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>窄屏同时只显示一个窗格</td>
+              <td class="col-a"><code>chat-page.ts:396-403</code>：<code>if (this.narrow)</code> 只渲染 <code>activePane</code>，
+                  且不套列结构、不渲染分隔条</td>
+              <td class="col-b"><code>ChatView.vue:379-391</code> 只渲染 <code>activePane</code>；
+                  <code>:393-395</code> 用 <code>v-if="!narrow"</code> 关掉列与分隔条</td>
+              <td class="win">已一致</td>
+            </tr>
+            <tr>
+              <td>输入框（composer）不显示拆分按钮</td>
+              <td class="col-a"><code>chat-page.ts:486</code> 窄屏传 <code>onOpenSplitView=undefined</code>，
+                  且 CSS 兜底 <code>@media (max-width:1099px){.chat-open-split-view{display:none}}</code>
+                  <span class="src">ui/src/styles/chat/split-view.css:158-162</span></td>
+              <td class="col-b"><code>ChatPane.vue:3833</code> 的入口 <code>v-if="allowSplit"</code>；
+                  <code>ChatView.vue:168</code> <code>allowOpenSplit = !narrow</code> ⇒ 窄屏已关</td>
+              <td class="win">已满足<br>（补回归即可）</td>
+            </tr>
+            <tr>
+              <td>窗格头在窄屏是否保留</td>
+              <td class="col-a"><strong>保留</strong>：<code>renderPane(..., .chrome=${"pane"})</code>，
+                  仅把拆分回调置空（<code>canSplit=!narrow</code>，<code>chat-page.ts:373-392</code>）；
+                  注释明写 <i>keep session switching and close available</i></td>
+              <td class="col-b"><strong>整块去掉</strong>：窄屏分支传 <code>chrome="none"</code>
+                  <span class="src">ChatView.vue:385</span> ⇒ 会话下拉与「关闭窗格」一起消失</td>
+              <td class="lose">需对齐</td>
+            </tr>
+            <tr>
+              <td>窗格头的拆分按钮</td>
+              <td class="col-a">窄屏 <code>onSplitRight/onSplitDown=undefined</code> ⇒ 不渲染（避免造出看不见的窗格）</td>
+              <td class="col-b">窗格头里的两个拆分按钮是<strong>无条件渲染</strong>
+                  <span class="src">ChatPane.vue:2957-2988</span>（只有 <code>allowSplit</code> 管 composer 入口）</td>
+              <td class="mid">随 1.2 一并对齐</td>
+            </tr>
+            <tr>
+              <td>窗格切换器（顶部标签）</td>
+              <td class="col-a"><strong>不存在</strong>：<code>chat-controls.ts</code> 里零 <code>pane</code> 引用，
+                  窄屏只渲染活动窗格 ⇒ 另一窗格理论上不可达</td>
+              <td class="col-b">同样不存在</td>
+              <td class="mid">本次新增</td>
+            </tr>
+            <tr>
+              <td>窄屏断点</td>
+              <td class="col-a"><code>NARROW_SPLIT_QUERY</code>，CSS 用 <code>max-width: 1099px</code></td>
+              <td class="col-b"><code>(max-width: 1099px)</code> <span class="src">ChatView.vue:153</span></td>
+              <td class="win">已一致</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout danger">
+        <b>需要先讲清的一点</b>：<b>「样式参照历史 UI 层」只能参照到「外壳与窗格头」的样式口径，
+        参照不到切换器本身 —— ui 没有窗格切换器。</b>ui 的窄屏分支只渲染活动窗格，其余窗格在窄屏下无入口
+        （<code>chat-page.ts:396-403</code>；<code>chat-controls.ts</code> 内零 <code>pane</code> 引用）。
+        所以本次的切换器属于<strong>新增能力</strong>，视觉与交互沿用的既有口径是：
+        ① ui 移动端外壳（顶栏高度、圆角、字号）；② 窗格激活语义（ui 用
+        <code>.chat-pane__header.chat-pane--active { border-top: 2px solid var(--accent) }</code>，
+        web 对应实现是 <code>.chat-pane--active &gt; .chat-pane__header</code> 的 4px inset 强调线）；
+        ③ 点击切换后必须走既有的 <code>setActivePane</code> + <code>setCurrentSession</code> 语义
+        （路由与侧栏高亮同步）。
+      </div>
+
+      <h3 id="s1-2">1.2 目标态与交互细则</h3>
+      <p><b>目标态</b>：窄屏（<code>≤1099px</code>）且布局里窗格数 ≥ 2 时，在对话区最顶部渲染一条
+        <b>窗格标签条</b>，其下渲染活动窗格（保留 ui 口径的窗格头）。单窗格模式或宽屏时不渲染标签条（不占位）。</p>
+
+      <div class="mock">
+        <div class="bar">
+          <span class="tab on">🅛 学习规划师 · 主会话</span>
+          <span class="tab">🅢 留学顾问 · 微信 · o9cq…</span>
+          <span class="tab" style="border-style:dashed">＋</span>
+        </div>
+        <div class="body">↓ 活动窗格（ui 口径：保留窗格头 = 会话下拉 + 关闭；拆分按钮不出现）</div>
+        <div class="body" style="margin-top:8px">↓ 消息流 + 输入区（输入区不再有「打开拆分视图」按钮）</div>
+      </div>
+
+      <ul class="facts">
+        <li><b>标签内容</b>：agent 圆点/头像 + 该窗格会话的展示名，直接复用
+            <code>agents.nameForAgent()</code> 与 <code>agents.sessionDisplayNameFor()</code>
+            （会话名解析已含渠道会话，如「微信 · …」）。</li>
+        <li><b>激活态</b>：与窗格头同一套强调色（<code>--wb-accent</code>）；激活标签顶部有 2px 强调线（与 ui 的
+            <code>border-top</code> 语义一致，web 用背景/伪元素实现，避开 inset shadow 被子元素盖住的坑）。</li>
+        <li><b>切换</b>：点击标签 → <code>emit('focus-pane', paneId)</code> 走既有
+            <code>handleFocusPane</code>（写 <code>activePaneId</code> + 同步路由/<code>settings.sessionKey</code>）；
+            <b>不新建</b>链路。</li>
+        <li><b>关闭</b>：标签右侧不放关闭按钮，关闭仍走窗格头（与 ui 一致，避免误触）。</li>
+        <li><b>横向溢出</b>：标签条 <code>overflow-x:auto</code> + <code>scroll-snap</code>，
+            每个标签 <code>max-width: 60vw</code> + ellipsis；<b>整页不得出现横向滚动</b>。</li>
+        <li><b>触控目标</b>：标签高度 ≥ 36px（含 padding 后可点区域 ≥ 40px），与 ui 的
+            <code>TOUCH_TARGET_MIN_PX=43.5</code> 口径尽量靠拢。</li>
+        <li><b>无障碍</b>：<code>role="tablist"</code> / <code>role="tab"</code> + <code>aria-selected</code>
+            + <code>aria-controls</code> 指向窗格容器。</li>
+        <li><b>拖拽隔离</b>：窗格头在宽屏可拖拽换位（<code>draggable</code>），标签条必须
+            <code>draggable="false"</code>，避免在手机上误触发拖拽。</li>
+        <li><b>窗口跨断点变化</b>：从宽屏缩到窄屏时，标签条出现且活动窗格保持；从窄屏放大回去时，
+            恢复列/分隔条，标签条消失（<code>narrow</code> 已是响应式 <code>ref</code>，无需额外逻辑）。</li>
+      </ul>
+
+      <h3 id="s1-3">1.3 改动清单</h3>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th style="width:24%">文件</th><th style="width:48%">改动</th><th style="width:12%">量级</th><th style="width:16%">风险</th></tr></thead>
+          <tbody>
+            <tr><td>新增 <code>web/src/components/ChatPaneTabs.vue</code></td>
+                <td>纯展示组件：入参 <code>panes[{id, label, agentId}]</code> + <code>activePaneId</code>，
+                    出参 <code>select(paneId)</code>；横向滚动 + 激活态 + a11y 属性</td>
+                <td>约 90–120 行</td><td class="mid">低</td></tr>
+            <tr><td><code>web/src/views/ChatView.vue</code>（520 行）</td>
+                <td>① 计算 <code>paneTabs</code>（存在布局时列出所有窗格 + 展示名）；
+                    ② 窄屏分支顶部渲染 <code>&lt;ChatPaneTabs&gt;</code>，并把 <code>chrome="none"</code> 改为
+                    <code>chrome="pane"</code>；③ 窄屏给窗格传「不允许拆分」的新开关</td>
+                <td>约 60–90 行</td><td class="mid">中（是否保留窗格头见 06-①）</td></tr>
+            <tr><td><code>web/src/views/ChatPane.vue</code>（5917 行）</td>
+                <td>窗格头两个拆分按钮加条件（新增 <code>allowPaneSplit</code> prop，默认 true，
+                    窄屏传 false）；其余结构不动</td>
+                <td>约 15–25 行</td><td class="mid">低（只加开关，不重排结构）</td></tr>
+            <tr><td>新增 <code>web/src/styles/mobile.css</code>（或并入既有全局样式）</td>
+                <td>标签条样式 + 断点骨架（1320/1100/768/400）承载点</td>
+                <td>约 80–120 行</td><td class="mid">低</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout ok">
+        <b>不需要改的</b>：<code>splitLayout.ts</code> 的布局数据模型（<code>activePaneId</code> 已存在、
+        <code>setActivePane</code> 已有）、会话切换链路（<code>handlePaneSessionChange</code>）、
+        关闭窗格后的活动窗格收敛逻辑（<code>handleClosePane</code> 已处理）—— 切换器只是给它们加一个入口。
+      </div>
+    </section>
+
+    <section id="s2">
+      <h2>02 · ② 范围：仅对话页</h2>
+      <p>这一项的价值是<b>收敛</b>而不是开发 —— 而且 web 的路由现状已经天然符合：</p>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th style="width:26%">事实</th><th style="width:52%">证据</th><th style="width:22%">影响</th></tr></thead>
+          <tbody>
+            <tr><td>应用实际只有一个业务路由</td>
+                <td><code>web/src/router/index.ts:44</code> 仅启用 <code>chat</code>，
+                    <code>overview/sessions/channels/agents/skills/cron/usage/logs/…</code>
+                    <strong>全部处于注释状态</strong>（另有 <code>/login</code> 与 dev 用的 <code>/_md-test</code>）</td>
+                <td class="win">无需改路由</td></tr>
+            <tr><td>落地页恒为对话页</td>
+                <td><code>entryLandingPath()</code> 直接 <code>return "/chat"</code>
+                    <span class="src">web/src/utils/urlOverrides.ts:137-139</span></td>
+                <td class="win">符合「只保留对话页」</td></tr>
+            <tr><td>8 个表格页不可达</td>
+                <td><code>SkillsView / AgentsView / LogsView / SessionsView / CronView / ChannelsView /
+                    DebugView / UsageView</code> 用了 <code>el-table</code>，文件在但无路由</td>
+                <td class="win">原「P3 表格页」整体取消</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <h4>本次适配的边界</h4>
+      <ul class="facts">
+        <li><b>做</b>：<code>ChatView.vue</code> + <code>ChatSidebar.vue</code> + <code>ChatPane.vue</code>
+            （消息流 / 输入区 / 窗格头）+ 新增手机端样式与标签条。也就是「对话页可视范围内的一切」。</li>
+        <li><b>不做</b>：其余 23 个视图（含 8 个 <code>el-table</code> 页）一律不投入；它们既没有路由、
+            也没人从手机端访问。</li>
+        <li><b>最低兜底</b>：<code>/login</code>（302 行）只需保证「不横向溢出 + 输入框可点」，不做完整移动端设计
+            （见 06-③）。</li>
+        <li><b>留痕</b>：建议在路由 <code>meta</code> 里给未适配页面加一个标记（如 <code>mobileReady: false</code>），
+            将来要放开某个路由时，能一眼看出它没有手机端适配 —— 避免「某天打开路由后手机上直接不能用」。</li>
+      </ul>
+      <div class="verdict">
+        <span class="tag">结论</span>
+        范围收敛把总规模从「12–18 文件 / 2000–3500 行」压到
+        <b>约 10–14 文件 / 1500–2500 行</b>，且省掉的是最机械的一块（8 个表格页的列优先级调整）。
+      </div>
+    </section>
+
+    <section id="s3">
+      <h2>03 · ③ PWA 对齐实现</h2>
+
+      <h3 id="s3-1">3.1 ui 已实现什么（逐项清单）</h3>
+      <p>结论：<b>ui 的 PWA 是完整的</b>，不是「只写了个 manifest」。共 5 个部分：</p>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th style="width:22%">组成</th><th style="width:52%">ui 的实现</th><th style="width:26%">证据</th></tr></thead>
+          <tbody>
+            <tr><td>manifest</td>
+                <td><code>name/short_name = "Gcs Agent"</code>、<code>start_url="./"</code>、
+                    <code>display="standalone"</code>、<code>theme_color</code> 与 <code>background_color</code>
+                    均为 <code>#0a0a0a</code>、<code>icons: []</code></td>
+                <td><code>ui/public/manifest.webmanifest</code>；由
+                    <code>ui/index.html</code> 的 <code>&lt;link rel="manifest"&gt;</code> 引用</td></tr>
+            <tr><td>Service Worker</td>
+                <td>缓存名 <code>openclaw-control-&lt;buildId&gt;</code>，保留最近 3 份缓存（让旧标签还能加载旧 hash chunk）；
+                    导航请求<b>不拦截</b>（保住反向代理的 HTTP 认证弹窗）；<code>/api/</code> <code>/rpc</code>
+                    <code>/plugins/</code> 不缓存；<code>/assets/</code> cache-first、其余 network-first 且失败回落缓存；
+                    另含 <code>push</code> 与 <code>notificationclick</code></td>
+                <td><code>ui/public/sw.js</code>（4705 B）</td></tr>
+            <tr><td>注册</td>
+                <td><b>仅生产</b>：<code>sw.js?v=&lt;buildId&gt;</code> + <code>updateViaCache:"none"</code>；
+                    监听 <code>sw-updated</code> 消息，版本不一致即 <code>window.location.reload()</code>；
+                    开发环境反过来<b>主动注销</b>残留 SW</td>
+                <td><code>ui/src/main.ts:19-31</code></td></tr>
+            <tr><td>构建期版本注入</td>
+                <td><code>sw.js</code> 里的占位符 <code>"__OPENCLAW_CONTROL_UI_BUILD_ID__"</code> 在
+                    <code>closeBundle</code> 阶段被替换成真实 buildId（<b>占位符缺失直接 throw</b>）；
+                    前端 bundle 侧用 <code>define</code> 注入同名常量</td>
+                <td><code>ui/vite.config.ts:277-294</code>（插件）、<code>:304-306</code>（define）、
+                    <code>:78-88</code>（buildId 解析：env → version-gitSha → package version）</td></tr>
+            <tr><td>公共资产</td>
+                <td><code>apple-touch-icon.png</code> / <code>favicon-32.png</code> / <code>favicon.ico</code> /
+                    <code>favicon.svg</code> + 运行时按 base path 重写
+                    <code>link[rel=icon]</code> / <code>link[rel=apple-touch-icon]</code> 的 href</td>
+                <td><code>ui/public/</code>；<code>ui/src/main.ts:35+ syncDocumentPublicAssetLinks()</code>；
+                    <code>ui/src/app/public-assets.ts</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout a">
+        <b>一个容易误判的点</b>：<code>sw.js</code> 的缓存版本号有两个来源 —— 构建期注入的常量
+        （替换成功时）<b>与</b> 注册 URL 上的 <code>?v=&lt;buildId&gt;</code> 查询参数（占位符没被替换时的兜底）。
+        也就是说<b>即使忘了加替换插件，缓存轮转也能工作</b>（走 <code>?v=</code>）；ui 的插件价值在于
+        让产物自证版本、并在占位符丢失时 fail-fast。
+      </div>
+
+      <h3 id="s3-2">3.2 web 对齐改动</h3>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th style="width:24%">文件 / 资产</th><th style="width:50%">改动</th><th style="width:12%">量级</th><th style="width:14%">风险</th></tr></thead>
+          <tbody>
+            <tr><td><code>web/public/manifest.webmanifest</code></td>
+                <td>新增；字段与 ui 逐项对齐（含 <code>icons: []</code>，见 06-②）</td>
+                <td>1 文件</td><td class="mid">低</td></tr>
+            <tr><td><code>web/public/sw.js</code></td>
+                <td>从 <code>ui/public/sw.js</code> <b>原样复制</b>（含占位符）。不重写逻辑 ——
+                    它的每条规则都有现实理由（导航不拦截、<code>/api</code> 不缓存、保留旧缓存）</td>
+                <td>1 文件 / 4.7 KB</td><td class="mid">低</td></tr>
+            <tr><td><code>web/public/</code> 图标</td>
+                <td>只复制 <code>apple-touch-icon.png</code>（<code>favicon.ico</code> 已有）。
+                    <b>实现期变更</b>：不再复制 <code>favicon-32.png</code> / <code>favicon.svg</code> —— 理由见 3.3 的变更说明</td>
+                <td>1 个二进制资产</td><td class="mid">低</td></tr>
+            <tr><td><code>web/vite.config.ts</code></td>
+                <td>加 <code>resolveControlUiBuildId()</code> 等价实现 + <code>define: { OPENCLAW_CONTROL_UI_BUILD_ID }</code>
+                    + <code>closeBundle</code> 插件替换 <code>sw.js</code> 占位符（照搬
+                    <code>ui/vite.config.ts:277-294</code> 的插件，指向 <code>web/dist</code>）</td>
+                <td>约 40–60 行</td><td class="mid">中（构建产物路径要对）</td></tr>
+            <tr><td><code>web/src/main.ts</code></td>
+                <td>加注册逻辑：仅生产、URL 取 <code>&lt;basePath&gt;/sw.js?v=&lt;buildId&gt;</code>、
+                    <code>updateViaCache:"none"</code>、<code>sw-updated</code> → reload、开发环境注销残留；
+                    并把已有的 <code>window.__OPENCLAW_BASE_PATH__</code> 作为 base path 来源
+                    （web 已在 <code>index.html</code> 里暴露该变量）</td>
+                <td>约 25–35 行</td><td class="mid">低</td></tr>
+            <tr><td><code>web/index.html</code></td>
+                <td>① <code>&lt;link rel="manifest" href="/manifest.webmanifest"&gt;</code>
+                    ② 补 <code>apple-touch-icon</code> 链接（<b>实现期变更</b>：只加这一条，
+                    不再挂 <code>favicon.svg</code> / <code>favicon-32.png</code> 的 <code>&lt;link rel="icon"&gt;</code>）
+                    ③ viewport 补 <code>viewport-fit=cover, interactive-widget=resizes-content</code>
+                    （与 ui 一致；这是手机端可用性的前提，属 ①/③ 共用改动）</td>
+                <td>约 10 行</td><td class="mid">低</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="callout">
+        <b>实现期变更（2026-09-18）：web 不随包发布 <code>favicon.svg</code> 与 <code>favicon-32.png</code></b>
+        <ul style="margin:6px 0 0;padding-left:20px">
+          <li><code>favicon.svg</code> / <code>favicon-32.png</code> 是 <b>ui 的吉祥物图标</b>，
+              web 的品牌图标是 JD Cloud 红标 <code>favicon.ico</code>。一旦挂上它们的
+              <code>&lt;link rel="icon"&gt;</code>，Chrome 会优先选中 SVG / 32px 那一项 ⇒
+              桌面标签页图标变成吉祥物，是可见的品牌回归。所以这两条链接不加。</li>
+          <li>反过来，<code>favicon-32.png</code> 在 web 侧唯一的用途是 Service Worker 推送通知的
+              <code>badge</code>，而 <b>web 目前没有推送订阅实现</b>（网关侧 <code>push.web.*</code> 与
+              <code>ui/src/app/web-push.ts</code> 都在，只是没搬过来）⇒ 属死文件，已从
+              <code>web/public/</code> 删除，<code>sw.js</code> 里对应的 <code>badge</code> 字段一并去掉
+              （留着只会指向不存在的文件）。将来搬推送时再补一个单色 badge 资源。</li>
+          <li><b>白名单不动</b>：<code>CONTROL_UI_ROOT_PUBLIC_ASSETS</code> 是 ui / web <b>共用</b>的，
+              删掉会连带影响 ui。对 web 而言，访问这两个路径会干净地回 <b>404</b>（不是 500），
+              已实测确认 —— 同理 <code>favicon.svg</code> 从未放进 <code>web/public/</code>，一直就是 404。</li>
+          <li><code>apple-touch-icon.png</code> <b>必须保留</b>：<code>manifest.webmanifest</code> 的
+              <code>icons</code> 是空数组（对齐 ui），它是 iOS「添加到主屏幕」唯一的图标来源。</li>
+        </ul>
+      </div>
+
+      <h3 id="s3-3">3.3 网关与 CSP 边界（结论：不用改网关）</h3>
+      <ul class="facts">
+        <li><b>静态资产白名单已经就位</b>：<code>CONTROL_UI_ROOT_PUBLIC_ASSETS</code> 恰好就是这 6 个名字
+            —— <code>apple-touch-icon.png / favicon-32.png / favicon.ico / favicon.svg / manifest.webmanifest / sw.js</code>，
+            且网关会把 <code>href="/&lt;name&gt;"</code> 重写成带 base path 的形式。
+            <span class="src">src/gateway/control-ui.ts:172-183</span></li>
+        <li><b>MIME / 后缀已支持</b>：<code>.webmanifest</code> 在静态资源后缀表里
+            <span class="src">src/gateway/control-ui.ts:170</span>。</li>
+        <li><b>CSP 允许同源 SW</b>：策略里已有 <code>worker-src 'self'</code>
+            <span class="src">src/gateway/control-ui-csp.ts:70</span>，无需为 PWA 放宽任何指令。</li>
+        <li><b>文件名必须完全一致</b>：这是唯一硬约束 —— 换成 <code>manifest.json</code> 或
+            <code>service-worker.js</code> 都会落到 SPA fallback / 404 上。</li>
+        <li><b>不需要 service worker 的 scope 特权头</b>：<code>sw.js</code> 在站点根（或 base path 根），
+            默认 scope 已覆盖应用。</li>
+      </ul>
+      <div class="callout ok">
+        <b>文档层面已有先例</b>：<code>docs/web/web-replacement-plan.md:177</code> 早前把
+        「web 不带 SW、若引入 PWA 需评估 CSP 兼容」列为待评估项。本次核实结论是
+        <b>CSP 不构成阻碍</b>（<code>worker-src 'self'</code> 已在策略内），该顾虑可以关闭；
+        建议实现后同步更新这一行。
+      </div>
+    </section>
+
+    <section id="s4">
+      <h2>04 · 汇总改动清单与规模</h2>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th style="width:16%">项</th><th style="width:44%">文件</th><th style="width:16%">量级</th><th style="width:24%">依赖</th></tr></thead>
+          <tbody>
+            <tr><td>③ PWA 与外壳</td>
+                <td><code>web/public/</code>（manifest + sw.js + 3 图标）、<code>web/vite.config.ts</code>、
+                    <code>web/src/main.ts</code>、<code>web/index.html</code></td>
+                <td>4 文件 + 5 资产<br>约 120–160 行</td>
+                <td>无（可与其它并行）</td></tr>
+            <tr><td>准备：移动端样式骨架</td>
+                <td>新增 <code>web/src/styles/mobile.css</code>（1320/1100/768/400 断点 +
+                    安全区 <code>env(safe-area-inset-*)</code> + <code>100dvh</code>）</td>
+                <td>1 文件 / 约 150–220 行</td>
+                <td>与 ③ 同批</td></tr>
+            <tr><td>① 目录 → 抽屉</td>
+                <td><code>web/src/layouts/MainLayout.vue</code>、<code>web/src/components/ChatSidebar.vue</code></td>
+                <td>2 文件 / 约 200–320 行</td>
+                <td>依赖样式骨架</td></tr>
+            <tr><td>① 窗格切换器</td>
+                <td>新增 <code>web/src/components/ChatPaneTabs.vue</code>、<code>web/src/views/ChatView.vue</code>、
+                    <code>web/src/views/ChatPane.vue</code></td>
+                <td>3 文件 / 约 200–300 行</td>
+                <td>依赖抽屉（可用宽度会变）</td></tr>
+            <tr><td>① 对话区细节降级</td>
+                <td><code>ChatPane.vue</code> + 样式：触控目标 ≥43.5px、输入区短横屏 ≤38%、≤768px 字号 16px、
+                    消息元信息常显</td>
+                <td>2–3 文件 / 约 400–700 行</td>
+                <td>依赖切换器</td></tr>
+            <tr><td>回归基线</td>
+                <td>新增 <code>web/tests/smoke/mobile-chat.e2e.mjs</code>（视口矩阵 + 几何断言，口径抄 ui
+                    <code>chat-responsive.browser.test.ts</code>）</td>
+                <td>1 文件 / 约 200–300 行</td>
+                <td>建议与第一批同时建</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="verdict">
+        <span class="tag">合计</span>
+        <b>约 10–14 个文件 / 1500–2500 行</b>（CSS 为主，新增 JS 逻辑很少）。
+        相比原评估（12–18 文件 / 2000–3500 行）的下降，全部来自 ②「仅对话页」取消掉 8 个表格页。
+      </div>
+    </section>
+
+    <section id="s5">
+      <h2>05 · 分期与验收</h2>
+
+      <div class="phase">
+        <div class="pid">P0</div>
+        <div class="pbody">
+          <h4>外壳 + PWA（③ 全量 + 样式骨架）</h4>
+          <p>viewport（<code>viewport-fit=cover</code> / <code>interactive-widget</code>）、manifest、sw.js + 注册、
+          图标、断点骨架、安全区与 <code>100dvh</code>。</p>
+          <p><b>验收</b>：① <code>curl /manifest.webmanifest</code> 返回 JSON 且 MIME 正确；
+          ② <code>curl /sw.js</code> 200 且内容里是真实 buildId、不含占位符；
+          ③ 生产环境注册后 <code>navigator.serviceWorker.controller</code> 存在，dev（5273）不注册且会注销残留；
+          ④ 改版本重部署 → 已打开的旧标签自动 reload；
+          ⑤ 320×568 下对话页无横向滚动、输入框不被键盘遮挡（真机或设备模拟）。</p>
+        </div>
+      </div>
+
+      <div class="phase">
+        <div class="pid">P1</div>
+        <div class="pbody">
+          <h4>目录抽屉（对话页腾出宽度）</h4>
+          <p>≤1100px 左栏改 slide-over 抽屉 + 遮罩 + 汉堡按钮；点击条目后自动收起。</p>
+          <p><b>验收</b>：320px 下内容占满宽度；汉堡开抽屉、点遮罩/条目关闭；抽屉内滚动不穿透底层。</p>
+        </div>
+      </div>
+
+      <div class="phase">
+        <div class="pid">P2</div>
+        <div class="pbody">
+          <h4>窗格切换器 + 对话区降级（① 的核心）</h4>
+          <p>标签条；窄屏窗格头回归（<code>chrome="pane"</code>）+ 拆分按钮开关；触控/字号/短横屏/元信息常显。</p>
+          <p><b>验收</b>：① 窄屏只有一个窗格可见；② 标签条出现、可横向滚动、不溢出视口；
+          ③ 点第二个标签 → 内容切换 + 路由 <code>session</code> 同步 + 另一窗格运行态不受影响（注入同一
+          <code>chat</code> 广播帧验证）；④ 窗格头与输入区均无拆分按钮；⑤ 放大回宽屏后恢复双窗格与分隔条。</p>
+        </div>
+      </div>
+
+      <h4>验收断言清单（建议直接抄 ui 的口径）</h4>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th style="width:34%">断言</th><th style="width:44%">web 侧做法</th><th style="width:22%">ui 出处</th></tr></thead>
+          <tbody>
+            <tr><td>无横向溢出</td><td><code>documentElement.scrollWidth ≤ innerWidth + 1</code>，逐视口跑</td>
+                <td><code>chat-responsive.browser.test.ts:484-492</code></td></tr>
+            <tr><td>触控目标下限</td><td>枚举手机端可见按钮，断言宽高 ≥43.5px</td><td><code>:941-953</code></td></tr>
+            <tr><td>弹层不出视口</td><td>打开下拉后断言 <code>x ≥ 8</code> 且右边界 ≤ 视口宽 −8</td><td><code>:902-905</code></td></tr>
+            <tr><td>短横屏输入区</td><td>568×320 下断言输入区 ≤38% 视口高、消息区 ≥40%</td><td><code>:1283-1287</code></td></tr>
+            <tr><td>移动字号 16px</td><td>≤768px 断言 <code>textarea</code> 字号 = 16px</td><td><code>:1254-1255</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="callout">
+        视口集合建议：<code>320×568 / 375×812 / 430×932 / 768×1024 / 1366×900</code>
+        （前四个覆盖手机形态，最后一个守住现有桌面基线，防止「为手机改坏桌面」）。
+      </div>
+    </section>
+
+    <section id="s6">
+      <h2>06 · 仍需拍板的 4 个细节</h2>
+      <div class="tablewrap">
+        <table>
+          <thead><tr><th style="width:20%">细节</th><th style="width:44%">选项</th><th style="width:20%">默认（按此实现）</th><th style="width:16%">影响</th></tr></thead>
+          <tbody>
+            <tr>
+              <td>① 窄屏是否保留窗格头</td>
+              <td><b>A（对齐 ui）</b>：保留窗格头（会话下拉 + 关闭），标签条在其上方 ⇒ 顶部两行 chrome；
+                  <b>B（省一行）</b>：窄屏不渲染窗格头，把「关闭」放到标签条内，会话切换靠侧栏目录</td>
+              <td><b>A</b> —— 与 ui 行为一致，且窄屏仍能直接换会话</td>
+              <td>B 可省约 36–40px 垂直空间</td>
+            </tr>
+            <tr>
+              <td>② manifest 是否补安装图标</td>
+              <td><b>A（对齐 ui）</b>：<code>icons: []</code>，仅 iOS 用 <code>apple-touch-icon</code>；
+                  <b>B（补齐）</b>：新增 192/512 PNG 并写入 <code>icons</code></td>
+              <td><b>A</b> —— ui 现状就是空的，先对齐；B 需额外产出图标资源</td>
+              <td>B 影响 Android 安装体验</td>
+            </tr>
+            <tr>
+              <td>③ 登录页是否纳入</td>
+              <td><b>A</b>：只做「不横向溢出 + 输入框可点」的最低兜底；
+                  <b>B</b>：按对话页标准完整适配</td>
+              <td><b>A</b> —— 符合「仅对话页」的范围约定</td>
+              <td>B 增加 1 文件 / 约 100 行</td>
+            </tr>
+            <tr>
+              <td>④ manifest 主题色</td>
+              <td><b>A（对齐 ui）</b>：<code>#0a0a0a</code>（深色启动背景，避免闪白）；
+                  <b>B</b>：改成与 web 主题一致的浅色</td>
+              <td><b>A</b> —— 深色启动底色对浅色应用同样不突兀，且与 ui 完全一致</td>
+              <td>仅影响启动瞬间的背景</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="verdict">
+        <span class="tag">建议顺序</span>
+        先落 <b>P0（外壳 + PWA）</b>：它是 ①③ 的共同前提，且与上述 4 个细节<strong>全部无关</strong>
+        （4 个细节都只影响 P1/P2 或资产细节），可以先做完再逐个确认，不会返工。
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<footer>
+  <div class="wrap">
+    证据取自本仓实测：<code>ui/src/pages/chat/chat-page.ts</code>（窄屏分支 396-403、<code>canSplit</code> 373-392、
+    <code>onOpenSplitView</code> 486）、<code>ui/src/styles/chat/split-view.css</code>（158-162 隐藏 composer 入口）、
+    <code>ui/src/main.ts</code>（SW 注册 19-31）、<code>ui/vite.config.ts</code>（277-294 与 304-306）、
+    <code>ui/public/</code>（manifest / sw.js / 图标）、<code>src/gateway/control-ui.ts:170-183</code>、
+    <code>src/gateway/control-ui-csp.ts:70</code>、<code>web/src/views/ChatView.vue</code>（153 / 168 / 368-395）、
+    <code>web/src/views/ChatPane.vue</code>（2957-2988 / 3833）、<code>web/src/router/index.ts:44</code>、
+    <code>web/src/utils/urlOverrides.ts:137-139</code>。
+  </div>
+</footer>
+
+<script>
+(function () {
+  var links = Array.prototype.slice.call(document.querySelectorAll("aside.toc a"));
+  var targets = links.map(function (a) {
+    return document.getElementById((a.getAttribute("href") || "").slice(1));
+  });
+  var ticking = false;
+  function setActive(idx) {
+    links.forEach(function (a, i) { a.classList.toggle("active", i === idx); });
+  }
+  function update() {
+    ticking = false;
+    // 判定线取「贴近视口顶部」的小偏移：h2 与紧随其后的首个 h3 只隔 ~77px，
+    // 若用视口高比例（如 22%）作线，点父章节后子章节会立刻抢走高亮。
+    var line = Math.min(64, window.innerHeight * 0.12);
+    var best = 0;
+    for (var i = 0; i < targets.length; i++) {
+      var el = targets[i];
+      if (el && el.getBoundingClientRect().top <= line) best = i;
+    }
+    if (window.innerHeight + window.scrollY >= document.body.offsetHeight - 4) best = targets.length - 1;
+    setActive(best);
+  }
+  window.addEventListener("scroll", function () {
+    if (!ticking) { ticking = true; window.requestAnimationFrame(update); }
+  }, { passive: true });
+  links.forEach(function (a, i) { a.addEventListener("click", function () { setActive(i); }); });
+  update();
+})();
+</script>
+</body>
+</html>

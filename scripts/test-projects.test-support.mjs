@@ -3378,11 +3378,7 @@ function shouldCombineSiblingTestWithImportGraph(changedPath) {
 }
 
 function shouldRouteChangedTargetWithoutImportGraph(changedPath) {
-  return (
-    changedPath.endsWith(".live.test.ts") ||
-    changedPath.startsWith("ui/src/") ||
-    changedPath.startsWith("web/src/")
-  );
+  return changedPath.endsWith(".live.test.ts") || changedPath.startsWith("ui/src/") || changedPath.startsWith("web/src/");
 }
 
 function resolvePromptSnapshotFixtureTargets(changedPath) {
@@ -3414,11 +3410,7 @@ function resolvePreciseChangedTestTargets(changedPath, options) {
     return [siblingTest];
   }
   if (shouldRouteChangedTargetWithoutImportGraph(changedPath)) {
-    return changedPath.startsWith("ui/src/")
-      ? [changedPath]
-      : changedPath.startsWith("web/src/")
-        ? [changedPath]
-        : null;
+    return changedPath.startsWith("ui/src/") ? [changedPath] : changedPath.startsWith("web/src/") ? [changedPath] : null;
   }
   if (options.skipImportGraph === true) {
     return null;
@@ -3769,10 +3761,7 @@ function shouldUseWholeConfigTarget(kind, targetArg, cwd) {
   }
   if (kind === "uiE2e") {
     const relative = toRepoRelativeTarget(targetArg, cwd);
-    return (
-      relative === "ui/src/test-helpers/control-ui-e2e.ts" ||
-      relative === "web/src/test-helpers/web-e2e.ts"
-    );
+    return relative === "ui/src/test-helpers/control-ui-e2e.ts" || relative === "web/src/test-helpers/web-e2e.ts";
   }
   if (kind !== "ui") {
     return false;

@@ -138,16 +138,8 @@ describe("jd spend proxy handler", () => {
     const updatedJson: Record<string, unknown> = { spend: 0.21847, key: { balance: 95.78153 } };
     const fetchMock = vi
       .fn()
-      .mockResolvedValueOnce({
-        status: 200,
-        ok: true,
-        json: async () => json,
-      } as unknown as Response)
-      .mockResolvedValueOnce({
-        status: 200,
-        ok: true,
-        json: async () => updatedJson,
-      } as unknown as Response);
+      .mockResolvedValueOnce({ status: 200, ok: true, json: async () => json } as unknown as Response)
+      .mockResolvedValueOnce({ status: 200, ok: true, json: async () => updatedJson } as unknown as Response);
     vi.stubGlobal("fetch", fetchMock);
 
     const captured = await invoke("/api/v1/jd/spend/chatcmpl-abc");

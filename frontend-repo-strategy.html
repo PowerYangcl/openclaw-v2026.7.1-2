@@ -1,0 +1,1215 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>前端方案选型对比：A（同仓 monorepo）vs B（独立域名子项目）</title>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --card: #ffffff;
+    --ink: #1c2230;
+    --ink-2: #4a5468;
+    --ink-3: #7a8394;
+    --line: #e3e7ee;
+    --brand: #2563eb;
+    --brand-soft: #eef4ff;
+    --a: #0f766e;
+    --a-soft: #e6f5f3;
+    --b: #b45309;
+    --b-soft: #fdf3e7;
+    --danger: #b91c1c;
+    --danger-soft: #fdecec;
+    --ok: #15803d;
+    --ok-soft: #eaf7ee;
+    --radius: 10px;
+    --toc-w: 236px;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 15px/1.7 -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB",
+          "Microsoft YaHei", "Helvetica Neue", Arial, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ── 页头 ── */
+  header.hero {
+    background: linear-gradient(135deg, #1e3a8a 0%, #2563eb 55%, #0ea5e9 100%);
+    color: #fff; padding: 30px 34px;
+  }
+  .hero-inner { max-width: 1280px; margin: 0 auto; display: flex;
+                align-items: center; justify-content: space-between; gap: 24px; flex-wrap: wrap; color: #fff; }
+  header.hero h1 { margin: 0 0 6px; font-size: 25px; letter-spacing: .3px; }
+  header.hero p { margin: 0; opacity: .93; font-size: 13.5px; }
+  .hero-meta { display: flex; flex-wrap: wrap; gap: 8px; max-width: 520px; }
+  .chip {
+    background: rgba(255,255,255,.16); border: 1px solid rgba(255,255,255,.28);
+    border-radius: 999px; padding: 3px 12px; font-size: 12.5px; white-space: nowrap;
+  }
+  .hero code { background: rgba(255,255,255,.2); color: #fff; }
+
+  /* ── 两栏布局 ── */
+  .layout {
+    max-width: 1280px; margin: 0 auto; padding: 28px 34px 90px;
+    display: grid; grid-template-columns: var(--toc-w) minmax(0, 1fr); gap: 34px;
+    align-items: start;
+  }
+
+  /* ── 左侧目录 ── */
+  aside.toc {
+    position: sticky; top: 24px;
+    max-height: calc(100vh - 48px); overflow-y: auto;
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 16px 14px;
+  }
+  aside.toc .toc-title {
+    font-size: 11.5px; letter-spacing: .14em; font-weight: 700;
+    background: linear-gradient(135deg, #1e3a8a, #2563eb);
+    color: #fff; border-radius: 7px;
+    padding: 8px 12px; margin-bottom: 12px;
+  }
+  aside.toc a {
+    display: block; position: relative; text-decoration: none; color: var(--ink-2);
+    font-size: 13.5px; line-height: 1.45; padding: 7px 8px 7px 14px;
+    border-radius: 6px; border-left: 2px solid transparent; transition: background .12s, color .12s;
+  }
+  aside.toc a .n { color: var(--ink-3); font-variant-numeric: tabular-nums; margin-right: 5px; font-size: 12.5px; }
+  aside.toc a:hover { background: #f2f5fa; color: var(--ink); }
+  aside.toc a.active {
+    background: var(--brand-soft); color: var(--brand); font-weight: 600;
+    border-left-color: var(--brand);
+  }
+  aside.toc a.active .n { color: var(--brand); }
+  aside.toc a.sub { padding-left: 28px; font-size: 12.5px; color: var(--ink-3); }
+  aside.toc a.sub.active { color: var(--brand); }
+  aside.toc a.top {
+    font-weight: 700; color: #92400e; background: #fff7e6;
+    border-left-color: #f59e0b; margin-bottom: 6px;
+  }
+  aside.toc a.top.active { background: #fef3c7; color: #92400e; border-left-color: #f59e0b; }
+
+  /* ── 正文 ── */
+  main { min-width: 0; }
+  section { scroll-margin-top: 20px; }
+  /* ── 标题统一：白字 + 品牌色底 ── */
+  h2 {
+    font-size: 19px; margin: 40px 0 14px; line-height: 1.35; letter-spacing: .3px;
+    background: linear-gradient(135deg, #1e3a8a 0%, #2563eb 58%, #0ea5e9 100%);
+    color: #fff; padding: 12px 18px; border-radius: 9px;
+    box-shadow: 0 3px 10px rgba(37, 99, 235, .2);
+  }
+  section:first-of-type h2 { margin-top: 4px; }
+  h3 {
+    font-size: 15px; margin: 24px 0 10px; line-height: 1.45;
+    background: var(--brand); color: #fff;
+    padding: 8px 14px; border-radius: 7px;
+  }
+  h4 {
+    font-size: 13.5px; margin: 18px 0 8px; line-height: 1.45;
+    background: #475569; color: #fff;
+    padding: 6px 12px; border-radius: 6px;
+  }
+  p { margin: 10px 0; color: var(--ink-2); }
+  code, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  code { background: #eef1f6; padding: 1px 6px; border-radius: 4px; font-size: 13px; color: #334; }
+
+  .card {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 20px 22px; margin-bottom: 16px;
+  }
+
+  .verdict { border: 1px solid #bcd3ff; background: var(--brand-soft); border-left: 5px solid var(--brand); }
+  .verdict .tag {
+    display: inline-block; background: var(--brand); color: #fff;
+    font-size: 12px; padding: 2px 11px; border-radius: 999px; margin-bottom: 10px;
+  }
+  .verdict strong { color: #12306e; }
+
+  .callout { border-left: 4px solid var(--b); background: var(--b-soft); padding: 14px 18px; border-radius: 8px; margin: 14px 0; }
+  .callout.danger { border-left-color: var(--danger); background: var(--danger-soft); }
+  .callout.ok { border-left-color: var(--ok); background: var(--ok-soft); }
+  .callout.a { border-left-color: var(--a); background: var(--a-soft); }
+  .callout p { margin: 6px 0; color: #3b3f4a; }
+  .callout p:first-child { margin-top: 0; }
+  .callout p:last-child { margin-bottom: 0; }
+
+  table { width: 100%; border-collapse: collapse; background: #fff; font-size: 13.5px; }
+  .tablewrap { border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; margin: 14px 0; }
+  th, td { padding: 11px 13px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); }
+  thead th { background: #f0f3f8; font-weight: 600; color: var(--ink); font-size: 13px; }
+  tbody tr:last-child td { border-bottom: none; }
+  td.dim { color: var(--ink-2); }
+  .col-a { background: #fbfefd; }
+  .col-b { background: #fffdf9; }
+  th.col-a { background: var(--a-soft); color: var(--a); }
+  th.col-b { background: var(--b-soft); color: var(--b); }
+
+  .win  { color: var(--ok); font-weight: 600; }
+  .lose { color: var(--danger); font-weight: 600; }
+  .mid  { color: var(--b); font-weight: 600; }
+  .na   { color: var(--ink-3); }
+
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 1080px) { .grid2 { grid-template-columns: 1fr; } }
+
+  pre {
+    background: #1e2430; color: #d7dce7; padding: 16px 18px; border-radius: 8px;
+    overflow-x: auto; font-size: 12.5px; line-height: 1.7; margin: 10px 0 0;
+  }
+  pre .c { color: #7f8ba3; }
+  pre .k { color: #7dd3fc; }
+  pre .g { color: #86efac; }
+  pre .y { color: #fcd34d; }
+  pre .r { color: #fca5a5; }
+  .dirhead {
+    font-weight: 600; font-size: 13.5px; margin: 0 0 6px;
+    color: #fff; padding: 8px 14px; border-radius: 7px;
+  }
+  .dirhead.a { background: var(--a); }
+  .dirhead.b { background: var(--b); }
+  .dirsub { font-size: 12.5px; color: var(--ink-3); margin: 0 0 6px; }
+
+  ul.tight { margin: 8px 0; padding-left: 20px; color: var(--ink-2); }
+  ul.tight li { margin-bottom: 5px; }
+  ul.tight li:last-child { margin-bottom: 0; }
+
+  .facts { list-style: none; padding: 0; margin: 10px 0 0; }
+  .facts li {
+    padding: 9px 0 9px 26px; border-bottom: 1px dashed var(--line);
+    position: relative; color: var(--ink-2); font-size: 13.5px;
+  }
+  .facts li:last-child { border-bottom: none; }
+  .facts li::before { content: "▸"; position: absolute; left: 6px; color: var(--brand); font-weight: 700; }
+  .src { color: var(--ink-3); font-size: 12px; }
+
+  /* 对接链路图 */
+  .flow { background: #f9fafc; border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; margin-top: 10px; }
+  .flow .node {
+    border: 1px solid var(--line); background: #fff; border-radius: 7px;
+    padding: 8px 12px; font-size: 12.5px; color: var(--ink-2);
+  }
+  .flow .node b { color: var(--ink); }
+  .flow .node.src-node { border-color: #bfe3dd; background: #f4fcfb; }
+  .flow .node.gw { border-color: #c7d6f5; background: #f3f7ff; }
+  .flow .arrow {
+    text-align: center; color: var(--ink-3); font-size: 12px; padding: 4px 0; line-height: 1.35;
+  }
+  .flow .arrow b { color: var(--b); }
+  .flow .arrow .same { color: var(--ok); font-weight: 600; }
+  .flow ul { margin: 4px 0 0; padding-left: 16px; font-size: 12.5px; color: var(--ink-2); }
+  .flow ul li { margin-bottom: 2px; }
+  .nowrap { white-space: nowrap; }
+
+  /* ── 置顶：待决策事项 ── */
+  section.decisions {
+    background: linear-gradient(135deg, #0b1220 0%, #16225c 48%, #1d4ed8 100%);
+    color: #fff; padding: 26px 0 28px;
+  }
+  .decisions-inner { max-width: 1280px; margin: 0 auto; padding: 0 34px; }
+  .dec-band-title {
+    font-size: 17px; font-weight: 700; letter-spacing: .3px; color: #fff;
+    display: flex; align-items: center; gap: 10px; margin-bottom: 6px;
+  }
+  .dec-band-title .pill {
+    background: #fbbf24; color: #3b2600; font-size: 11.5px; font-weight: 700;
+    padding: 2px 10px; border-radius: 999px; letter-spacing: .06em;
+  }
+  .dec-band-sub { color: rgba(255,255,255,.8); font-size: 13px; margin: 0 0 18px; }
+  .dec-band-sub b { color: #fff; }
+  .dec-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 980px) { .dec-grid { grid-template-columns: 1fr; } }
+  .dec {
+    background: rgba(255,255,255,.07); border: 1px solid rgba(255,255,255,.18);
+    border-radius: 10px; padding: 16px 18px;
+  }
+  .dec.recommended { border-color: rgba(134,239,172,.45); background: rgba(21,128,61,.16); }
+  .dec-no {
+    display: inline-block; background: rgba(255,255,255,.16); border: 1px solid rgba(255,255,255,.28);
+    font-size: 11.5px; padding: 2px 10px; border-radius: 999px;
+    margin-bottom: 8px; letter-spacing: .06em;
+  }
+  .dec h3 { background: none; padding: 0; margin: 0 0 10px; color: #fff; font-size: 14.5px; line-height: 1.45; }
+  .dec dl { margin: 0; display: grid; grid-template-columns: 104px minmax(0, 1fr); gap: 7px 12px; font-size: 13px; }
+  .dec dt { color: rgba(255,255,255,.6); }
+  .dec dt.warn { color: #fca5a5; }
+  .dec dd { margin: 0; color: rgba(255,255,255,.92); line-height: 1.65; }
+  .dec dd b { color: #fff; }
+  .dec dd.warn { color: #fecaca; }
+  .dec dd.warn b { color: #fff; }
+  .dec code { background: rgba(255,255,255,.16); color: #e8f0ff; }
+  .dec .pick {
+    display: inline-block; background: #22c55e; color: #06280f; font-weight: 700;
+    font-size: 12px; padding: 2px 11px; border-radius: 999px; vertical-align: 1px;
+  }
+  .dec ul { margin: 4px 0 0; padding-left: 18px; font-size: 13px; }
+  .dec ul li { margin-bottom: 3px; }
+
+  footer {
+    margin-top: 44px; padding-top: 18px; border-top: 1px solid var(--line);
+    color: var(--ink-3); font-size: 12.5px;
+  }
+
+  /* ── 窄屏：目录变顶部横向条 ── */
+  @media (max-width: 900px) {
+    .layout { grid-template-columns: 1fr; gap: 20px; padding: 20px 18px 70px; }
+    aside.toc {
+      position: static; max-height: none; overflow: visible; padding: 12px;
+      display: flex; gap: 6px; flex-wrap: wrap;
+    }
+    aside.toc .toc-title { width: 100%; padding-bottom: 8px; margin-bottom: 4px; }
+    aside.toc a { border-left: none; border: 1px solid var(--line); border-radius: 999px; padding: 4px 12px; }
+    aside.toc a.sub { display: none; }
+    aside.toc a.active { border-color: var(--brand); }
+    header.hero { padding: 24px 18px; }
+    .hero-inner { display: block; }
+    .hero-meta { margin-top: 14px; }
+  }
+</style>
+</head>
+<body>
+
+<header class="hero">
+  <div class="hero-inner">
+    <div>
+      <h1>前端方案选型对比</h1>
+      <p style="color: #fff;">方案 A：前后端同仓 monorepo（<code>openclaw/web</code>）
+         &nbsp;vs&nbsp; 方案 B：独立域名前端子项目（<code>agent-claw-web</code>）</p>
+    </div>
+    <!--     <div class="hero-meta">
+      <span class="chip">2026-09-14</span>
+      <span class="chip">openclaw v2026.7.1-2</span>
+      <span class="chip">面向 C 端</span>
+      <span class="chip">B 域名 agent-claw-pre.jdcloud.com</span>
+      <span class="chip">最终二选一</span>
+    </div> -->
+  </div>
+</header>
+
+<!-- ══════════ 置顶：待决策事项 ══════════ -->
+<section class="decisions" id="s0">
+  <div class="decisions-inner">
+    <div class="dec-band-title">待决策事项 <span class="pill">2 项</span></div>
+    <!-- <p class="dec-band-sub">本文档的全部论证服务于下面两个决策点。两项<b>相互独立</b> ——
+      决策一决定「用哪套代码」，决策二决定「代码放在哪个仓 / 哪个域名」，可以同时拍板。</p> -->
+
+    <div class="dec-grid">
+
+      <article class="dec recommended">
+        <span class="dec-no">决策一</span>
+        <h3>是否采用本次的重构风格（内置 Lit UI → Vue 3）</h3>
+        <dl>
+          <dt>选项</dt>
+          <dd>① <b>采用</b>，继续推进 Vue 3 重构 &nbsp;/&nbsp; ② 不采用，维持内置 UI 层</dd>
+
+          <dt>建议</dt>
+          <dd><span class="pick">采用</span> &nbsp;理由见
+              <a href="#s2" style="color:#bfdbfe;font-weight:600">02 节</a>：
+              内置 UI 层 <b>512 文件 / 254,359 行</b>、一个「积分」功能点散落在 <b>32 个文件</b>里、
+              改一行就要重新构建并重新装载本地插件 —— 维护成本会随功能数量持续放大。</dd>
+
+          <dt class="warn">必须承担的代价</dt>
+          <dd class="warn">采用后<b>历史功能需要全部重新复测一遍</b>，会产生<b>额外工作量</b>。
+              注意验收口径不是「只测本次改动」，而是<b>全量功能的回归复测</b>——
+              需要单独排期与人力，这是采用该重构风格的<b>前置成本</b>。</dd>
+
+          <dt>待确认</dt>
+          <dd>
+            <ul>
+              <li>复测范围与验收标准（全量功能清单 / 用例来源 / 通过标准）</li>
+              <li>复测人力与排期；是否引入<b>新旧双跑对比</b>（同一操作在两套 UI 上比对结果）</li>
+              <!-- <li>若选择「不采用」：内置 UI 层由谁维护、后续需求如何排期</li> -->
+            </ul>
+          </dd>
+        </dl>
+      </article>
+
+      <article class="dec recommended">
+        <span class="dec-no">决策二</span>
+        <h3>采用哪种部署方案（A 前后端同仓 / B 独立仓 + 独立域名）</h3>
+        <dl>
+          <dt>选项</dt>
+          <dd>① <b>方案 A</b>：前后端同仓 monorepo（<code>openclaw/web</code>）<br>
+              ② 方案 B：独立仓 + 独立域名（<code>agent-claw-pre.jdcloud.com</code>）</dd>
+
+          <dt>建议</dt>
+          <dd><span class="pick">方案 A</span> &nbsp;理由见
+              <a href="#s4" style="color:#bfdbfe;font-weight:600">04</a> /
+              <a href="#s6" style="color:#bfdbfe;font-weight:600">06</a> /
+              <a href="#s7" style="color:#bfdbfe;font-weight:600">07</a> 节：
+              契约由 <code>packages/gateway-protocol</code> 在<b>编译期</b>守护；
+              <b>面向 C 端不存在版本 skew</b>（网关对陈旧 UI 客户端是握手硬拒
+              <code>protocol mismatch → close(1002)</code>）；
+              且<b>不新增接入层与运维成本</b>（复用网关的域名 / 证书 / LB / 监控）。</dd>
+
+          <dt class="warn">必须承担的代价</dt>
+          <dd class="warn">① 前端发版跟随网关发布节奏 —— C 端下改文案也要发网关；
+              ② 前端新功能在全量前会经历<b>灰度窗口</b>；③ 回滚粒度变粗。</dd>
+
+          <dt>待确认</dt>
+          <dd>
+            <ul>
+              <li>是否<b>有合规要求前端必须独立仓</b> —— 若有，则退化为 B + 内网 npm 契约包 + CI 契约门禁</li>
+              <li><code>agent-claw-pre.jdcloud.com</code> 后续是否必须保留入口</li>
+              <li>网关多实例的会话状态是否共享；C 端并发下静态资源的容量预算</li>
+            </ul>
+          </dd>
+        </dl>
+      </article>
+
+    </div>
+  </div>
+</section>
+
+<div class="layout">
+
+<!-- ══════════════ 左侧目录 ══════════════ -->
+<aside class="toc" id="toc">
+  <div class="toc-title">目录</div>
+  <a href="#s0" class="top">待决策事项</a>
+  <a href="#s1"><span class="n">01</span>结论</a>
+  <a href="#s2"><span class="n">02</span>重构动因</a>
+  <a href="#s3"><span class="n">03</span>客观事实</a>
+  <a href="#s4"><span class="n">04</span>逐维度对比</a>
+  <a href="#s5"><span class="n">05</span>目录结构对比</a>
+  <a href="#s6"><span class="n">06</span>与网关的对接方式</a>
+  <a href="#s6-1" class="sub">对接面清单</a>
+  <a href="#s6-2" class="sub">A 的对接链路</a>
+  <a href="#s6-3" class="sub">B 的对接链路</a>
+  <a href="#s7"><span class="n">07</span>风险对比</a>
+  <a href="#s8"><span class="n">08</span>选型结论</a>
+</aside>
+
+<main>
+
+<!-- ══════════ 01 结论 ══════════ -->
+<section id="s1">
+<h2>01 · 结论</h2>
+
+<div class="card verdict">
+  <span class="tag">推荐 方案 A</span>
+  <p style="margin-top:0"><strong>选方案 A：前端并入 openclaw 仓，作为 pnpm workspace 成员
+  <code>web/</code>，与网关同源部署。</strong></p>
+  <p>一句话理由：前端与网关之间是<strong>硬契约耦合</strong>（WS 协议 v4 帧结构、ed25519 设备握手、
+  会话 key 规范形态、RPC 方法集），只有同仓才能靠 <code>packages/gateway-protocol</code> 的
+  类型把契约钉在编译期。方案 B 把这些契约手工复制成 1301 行副本，<strong>没有任何 CI 能发现漂移</strong>——
+  今天修的 P0（所有 chat/agent 事件被丢弃 → 永久卡「思考中」）就是契约理解不一致造成的。</p>
+  <p>另一条同样重要的理由来自<strong>本次重构的直接动因</strong>（详见
+  <a href="#s2" style="color:#12306e;font-weight:600">02 节</a>）：内置 UI 层 25 万行、
+  一个「积分」功能点散落在 32 个文件里、改一行就要重新构建并重新装载插件。
+  这类效率问题<strong>只有在可读、可热更新、契约可被类型守护的 Vue 工程形态里才能真正解掉</strong>，
+  否则换了框架也只是把同样的困难搬个位置。</p>
+  <p><strong>「面向 C 端」这一前提进一步强化了方案 A。</strong>C 端最不能接受的是
+  「用户遇到功能突然不可用」，而本项目的网关对陈旧 UI 客户端是<strong>握手硬拒</strong>
+  （<code>protocol mismatch</code> → <code>close(1002)</code>）。方案 B 的前端在 CDN / 浏览器里是
+  <strong>缓存态、无法强制刷新</strong>，网关一旦演进协议就可能让部分旧用户
+  <strong>连都连不上</strong>；同时独立域名还会新增一整条 C 端接入链路（DNS / 证书 / LB / CDN）
+  及其长期运维与压测成本。方案 A 把前端并入网关镜像后，这两个成因都不存在。</p>
+</div>
+
+<div class="callout danger">
+  <p><strong>⚠️ 决策前提：A 和 B 目前是同时在跑的，必须收敛到一份。</strong></p>
+  <p>方案 A <b>已经落地</b>（<code>pnpm-workspace.yaml</code> 的 packages 里已含 <code>web</code>，
+  <code>web/INTEGRATION.md</code> 记录 2026-09-13 完成 Vue 3 迁移）；方案 B 也在跑
+  （<code>agent-claw-pre.jdcloud.com</code>）。现状成本是实的：为修一个 bug，
+  ChatView 的改动在两处各做一遍，<b>本次手工同步了 3 轮</b>（事件隔离修复 → 思考标签去重 →
+  上下文口径 + 弹层结构 + 29 条单测 + 2 个 e2e），且只能靠人保证不漏。</p>
+</div>
+</section>
+
+<!-- ══════════ 02 重构动因 ══════════ -->
+<section id="s2">
+<h2>02 · 重构动因：一次「修改积分」暴露的结构性成本</h2>
+
+<p>这次动手改的是<strong>积分（spend / balance）相关功能</strong>——即每条 AI 回复下方那行
+「已消耗 X 积分 · 剩余 Y 积分」，以及「积分计算中」「积分不足」的提示逻辑。
+在新 Vue 前端里，这是一处位置明确、可直接定位的功能；但在 openclaw 内置的 UI 层里，
+它成了一次代价很高的排查，也正是本次重构的直接起因。</p>
+
+<h3>2.1 问题从「定位改动点」这一步就卡住了</h3>
+<p>内置 UI 层是 <code>ui/</code> 目录下的 <strong>Lit 3 web-component</strong> 实现
+（<code>lit@3.3.3</code>）：页面被写成自定义元素，视图由 TypeScript 里的
+<code>render()</code> 返回模板字符串，样式另放在全局 CSS。换句话说，
+<strong>功能边界既不在目录结构里，也不在文件命名里</strong>——想改一个功能点，
+必须先靠经验猜「它可能属于哪个自定义元素、被谁监听、状态存在哪儿」。</p>
+
+<ul class="facts">
+  <li><strong>规模先劝退</strong>：<code>ui/src</code> 共 <strong>512 个文件 /
+      ​254,359 行</strong> TS·JS·CSS，其中 <code>pages/</code> 234 个、<code>lib/</code> 105 个、
+      <code>i18n/</code> 89 个；<strong>42 个文件</strong>里定义了自定义元素。
+      <span class="src">— find + wc -l + grep customElements.define</span></li>
+  <li><strong>单文件体量极大</strong>：<code>pages/workboard/view.ts</code>
+      <strong>2,908 行</strong>、<code>pages/chat/components/chat-message.ts</code>
+      <strong>2,733 行</strong>、<code>pages/chat/components/chat-composer.ts</code>
+      <strong>2,405 行</strong> …… 一个功能点往往就埋在某份三千行文件的模板字符串里。
+      <span class="src">— wc -l</span></li>
+  <li><strong>「积分」一个功能点，逻辑散落在 11 个非 i18n 文件</strong>里
+      （<code>app/overlays.ts</code>、<code>app/router-outlet.ts</code>、<code>styles/layout.css</code>、
+      <code>lib/workboard/index.ts</code>、<code>pages/chat/components/chat-message.ts</code>、
+      <code>pages/chat/chat-thread.ts</code>、<code>pages/usage/view.ts</code>、
+      <code>pages/config/quick.ts</code>、<code>pages/skill-workshop/view.ts</code> 等，含 1 个 e2e 用例），
+      另外还要同步 <strong>21 个语言的 i18n 文件</strong>——合计 <strong>32 个文件</strong>。
+      <span class="src">— grep -ril "spend|积分|credit" ui/src</span></li>
+</ul>
+
+<p>结论：<strong>人肉 grep 在这里几乎失效</strong>。一次检索动辄命中几十个文件，
+其中大部分是「看起来沾边、实际不是你要改的那处」，只能靠通读来排除。</p>
+
+<h3>2.2 于是只能让 AI 全量读取 —— 然后它就崩了</h3>
+<p>既然精确定位不了，就只能换策略：把相关目录<strong>整体交给 AI 读</strong>，
+让它自己找出改动点。这条路在 25 万行量级上直接失效：</p>
+<ul class="tight">
+  <li><b>上下文被撑满</b>：单是 <code>pages/chat/</code> 连同它依赖的 <code>lib/</code> 与
+      <code>i18n/</code>，就远超一次可用的上下文窗口，只能反复切分、反复重读。</li>
+  <li><b>AI 多次崩溃</b>：读取量过大时任务中断，此前建立的上下文全部作废，
+      只能<strong>从头再读一遍</strong>才能继续——这是一个会反复发生的循环，不是一次性损耗。</li>
+  <li><b>本机被拖垮</b>：大目录的文件扫描与索引把内存和磁盘 IO 打满，
+      期间出现过<strong>电脑死机</strong>，开发进程被反复打断。</li>
+  <li><b>改完还得重新构建</b>：<code>ui/</code> 的改动要重新 <code>build</code> 才生效，
+      随后还需重新装载<strong>本地安装的插件</strong>——<strong>「改一行 → 看到效果」的循环非常慢</strong>，
+      而这个慢是<em>每一轮</em>都要付的。</li>
+</ul>
+
+<div class="callout danger">
+  <p><b>这不是「某个功能难改」，而是技术栈与工程形态造成的结构性成本。</b>
+  <b>定位成本 × 全量重读成本 × 构建装载成本</b>，三者相乘才是效率崩溃的真正原因。
+  换一个人、换一个功能点，同样的剧本会再演一遍——这才是必须重构的理由。</p>
+</div>
+
+<h3>2.3 重构为 Vue 之后，维护难度为什么显著下降</h3>
+
+<div class="tablewrap">
+<table>
+  <thead>
+    <tr>
+      <th style="width:15%">痛点</th>
+      <th class="col-a" style="width:42%">内置 UI 层（Lit web-component，<code>ui/</code>）</th>
+      <th class="col-b">重构后（Vue 3 SFC + Pinia + Vite）</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><b>定位改动点</b></td>
+      <td class="col-a">功能边界不在目录与命名里；模板是 <code>render()</code> 里的字符串，
+          搜一个功能要在 42 个自定义元素、32 个文件之间「拼图」。</td>
+      <td class="col-b"><b>一个文件 = 一个组件</b>：<code>views/ChatView.vue</code> 的
+          <code>&lt;template&gt;</code> 就是完整 DOM 结构，功能点一眼可见；目录按页面切分，命名即边界。</td>
+    </tr>
+    <tr>
+      <td><b>AI 辅助成本</b></td>
+      <td class="col-a">无法精确检索 → 只能整目录喂给模型 → 上下文撑满、多次崩溃、崩溃后从头重读。</td>
+      <td class="col-b">改动点可收敛到<strong>单个 <code>.vue</code> 文件 + 对应 store</strong>，
+          读取量降一个数量级；<code>&lt;script setup&gt;</code> 中逻辑与模板同处一文件，一次读取即可完整理解。</td>
+    </tr>
+    <tr>
+      <td><b>反馈循环</b></td>
+      <td class="col-a">改完必须重新 <code>build</code>，再重新装载本地插件，验证一轮很慢。</td>
+      <td class="col-b">Vite 开发服务器提供<strong>秒级 HMR</strong>，保存即见、无需整包重建；
+          纯逻辑单测（<code>esbuild</code> 直跑）与 CDP 冒烟可独立执行，不必全量构建。</td>
+    </tr>
+    <tr>
+      <td><b>多语言文案</b></td>
+      <td class="col-a">改一处积分文案要动 <b>21 个语言文件</b>，且极易漏改。</td>
+      <td class="col-b">文案直接写在组件模板中，<b>改动面从 21 处收敛到 1 处</b>。
+          <span class="src">注：当前 Vue 版尚未引入 i18n，未来若需多语言再统一抽取，属一次性投入。</span></td>
+    </tr>
+    <tr>
+      <td><b>状态与数据流</b></td>
+      <td class="col-a">状态散落在各自定义元素的私有字段里，靠事件冒泡串联，链路隐式、难追。</td>
+      <td class="col-b">Pinia store 集中管理（<code>useGatewayStore</code> /
+          <code>useSettingsStore</code> / <code>useAgentsStore</code>），数据流显式可追溯。</td>
+    </tr>
+    <tr>
+      <td><b>上手门槛 / 协作</b></td>
+      <td class="col-a">Lit 生态小众，自定义元素 + 模板字符串的写法需要专门学习，
+          非前端同学基本无法参与。</td>
+      <td class="col-b"><b>Vue 是前后端开发者更熟悉的栈</b>：SFC、<code>props / emit</code>、
+          <code>v-if / v-for</code> 属行业通用知识，后端同学也能直接改前端页面，
+          协作成本与上手成本同时下降。</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<h3>2.4 更重要的是：为后续扩展与定制化铺路</h3>
+<p>本次重构不只是「换一个框架」，而是把<strong>扩展成本从「读 + 猜」降到「读一个文件」</strong>：</p>
+<ul class="tight">
+  <li><b>新增页面 / 功能是增量的</b>：在 <code>views/</code> 加一个 <code>.vue</code>、
+      在 <code>stores/</code> 加一个 store 即可，无需改动既有实现，回归面可控。</li>
+  <li><b>定制化有明确落点</b>：需要客户专属的聊天页样式、专属的积分展示规则，
+      都能在对应组件内局部完成，不必牵动公共代码。</li>
+  <li><b>契约与 UI 分层清晰</b>：网关协议由 <code>packages/gateway-protocol</code> 负责，
+      UI 层只负责消费类型——这正是后文支撑<strong>方案 A</strong> 的关键前提。</li>
+  <li><b>可测试、可回归</b>：纯逻辑（如上下文占用口径）可写成不依赖浏览器的单测，
+      页面行为可用 CDP 端到端脚本守护，重构之后回归有据可依。</li>
+</ul>
+
+<div class="callout ok">
+  <p><b>这段动因可以归纳为一句话：</b>内置 UI 层的问题不是「写得不好」，而是
+  <b>可读性差 + 代码体量大 + 构建反馈慢</b>三者叠加，使维护成本随功能数量持续放大；
+  而 Vue 的「单文件组件 + 显式数据流 + 秒级热更新」恰好逐条解掉这三件事。
+  <b>因此本次重构既是修复当下的效率问题，也是后续扩展与定制化的必要前置工作。</b></p>
+</div>
+</section>
+
+<!-- ══════════ 03 事实 ══════════ -->
+<section id="s3">
+<h2>03 · 客观事实</h2>
+
+<div class="card">
+  <h3 style="margin-top:0">已核实的现状（附来源）</h3>
+  <ul class="facts">
+    <li><strong>方案 A 骨架已存在</strong>：<code>pnpm-workspace.yaml</code> 声明
+        <code>packages: [., ui, web, packages/*, extensions/*, examples/*]</code>，<code>web</code> 与 legacy
+        <code>ui</code>（Lit）并存。<span class="src">— pnpm-workspace.yaml</span></li>
+    <li><strong>Vue 3 迁移已完成</strong>：2026-09-13 将 Vue 3 SPA 源码整体搬入 <code>web/src/</code>，
+        14 处 <code>@jdcloud/mobius</code> → <code>element-plus</code> 导入替换，CDP 冒烟（鉴权/未鉴权）通过。
+        <span class="src">— web/INTEGRATION.md</span></li>
+    <li><strong>网关静态资源根 = <code>web/dist/</code></strong>，与网关同源部署。
+        <span class="src">— web/vite.config.ts:9 · web/src/main.ts:12</span></li>
+    <li><strong>根仓已接入前端脚本</strong>：<code>pnpm web:install</code> / <code>web:dev</code> / <code>web:build</code>
+        （经 <code>scripts/web.js</code> 转发）。<span class="src">— 根 package.json</span></li>
+    <li><strong>方案 B 是独立仓</strong>：<code>git@coding.jd.com:maas/agent-claw-web.git</code>，
+        独立域名 <code>http://agent-claw-pre.jdcloud.com/</code>，仓内未见 Dockerfile / nginx / 部署清单
+        （发布配置应在京东云侧）。</li>
+    <li><strong class="nowrap">协议是手工复制的</strong>：<code>agent-claw-web</code> 依赖里<strong>没有</strong>
+        <code>@openclaw/gateway-protocol</code>，自行维护
+        <code>src/api/{protocol,types,gateway,device}.ts</code> 共 <strong>1301 行</strong>。
+        <span class="src">— agent-claw-web/package.json + wc -l</span></li>
+    <li><strong>UI 库已分叉</strong>：B 用 <code>@jdcloud/mobius</code>（京东内部），A 用
+        <code>element-plus</code>（开源）。目前两仓 ChatView 唯一差异就是这一行 import。</li>
+    <li><strong>WS 跨域问题已解决</strong>（B 的历史最大障碍已不存在），网关侧
+        <code>gateway.controlUi.allowedOrigins</code> 白名单已配通。
+        <span class="src">— 本次调试实测</span></li>
+  </ul>
+</div>
+</section>
+
+<!-- ══════════ 04 对比表 ══════════ -->
+<section id="s4">
+<h2>04 · 逐维度对比</h2>
+
+<div class="callout a">
+  <p><b>前置前提：本产品面向 C 端。</b>因此下表的权重是按 C 端的标准给的 ——
+  优先看<b>可用性、灰度期间用户能感知到的差异、前后端版本一致性、接入层的运维与容量成本</b>，
+  而不是「开发同学改起来方不方便」。其中<b>「网关改动后新镜像已上、旧实例没有新功能」</b>
+  是 C 端多实例部署下必须正面回答的问题：多实例 + 灰度/滚动发布意味着
+  <b>同一次发布期间线上会同时存在新、旧两代实例</b>，用户请求落到哪一代不由前端决定。</p>
+</div>
+
+<div class="tablewrap">
+<table>
+  <thead>
+    <tr>
+      <th style="width:15%">维度</th>
+      <th class="col-a" style="width:33%">A · 同仓 monorepo（openclaw/web）</th>
+      <th class="col-b" style="width:33%">B · 独立仓（agent-claw-web）</th>
+      <th style="width:19%">判断</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><b>协议契约守护</b></td>
+      <td class="col-a">可直接 import <code>packages/gateway-protocol</code>，类型即契约；网关改帧结构 / 加方法时，TS 全仓报错。</td>
+      <td class="col-b">手工复制 1301 行，<b>无任何 CI 能发现漂移</b>；只能人肉比对 + 真机冒烟。</td>
+      <td><span class="win">A 显著优</span></td>
+    </tr>
+    <tr>
+      <td><b>前后端协同</b></td>
+      <td class="col-a">一个 PR 同时改前后端（例：加 <code>sessions.queue</code> 时前端同 PR 接上）。</td>
+      <td class="col-b">跨仓两个 PR + 版本对齐；前端先上会打到旧网关，网关先上前端没接。</td>
+      <td><span class="win">A 显著优</span></td>
+    </tr>
+    <tr>
+      <td><b>部署 / 跨域</b></td>
+      <td class="col-a">网关托管 <code>web/dist</code>，<b>同源</b>——无 CORS、无 WS origin 白名单问题。</td>
+      <td class="col-b">独立域名，需网关 <code>gateway.controlUi.allowedOrigins</code> 白名单
+          （不匹配则 <code>checkBrowserOrigin</code> 返回 <code>origin not allowed</code>，
+          以 <code>INVALID_REQUEST</code> 拒绝）。现已配通，但<b>每新增一个入口域名都要再配一次</b>。
+          <span class="src">— src/gateway/origin-check.ts:79</span></td>
+      <td><span class="mid">A 略优</span></td>
+    </tr>
+    <tr>
+      <td><b>UI 组件库</b></td>
+      <td class="col-a"><code>element-plus</code> 开源，可随 openclaw 一起对外发布。</td>
+      <td class="col-b"><code>@jdcloud/mobius</code> 内部包，与上游分叉；开源 / 外部部署受限。</td>
+      <td><span class="win">A 优</span></td>
+    </tr>
+    <tr>
+      <td><b>发版节奏</b></td>
+      <td class="col-a">跟随 openclaw 发版；前端小改动也要走网关发版流程。
+          <br><b>C 端下这一条被放大</b>：网关发布是大动作（滚动重启、连接重建、需回归验证），
+          改一行文案也要触发它。</td>
+      <td class="col-b"><b>独立发版</b>，改文案 / 样式随时上，不用等后端 ——
+          C 端活动页 / 文案迭代的关键。</td>
+      <td><span class="win">B 优</span></td>
+    </tr>
+    <tr>
+      <td><b>回滚粒度</b></td>
+      <td class="col-a">需回滚整个网关产物（或切回 legacy <code>ui/</code>）。</td>
+      <td class="col-b">前端独立回滚，秒级，不影响网关。</td>
+      <td><span class="win">B 优</span></td>
+    </tr>
+    <tr>
+      <td><b>新旧实例<br>版本一致性</b><br><span class="src">（C 端关注）</span></td>
+      <td class="col-a">前端产物<b>随网关镜像一起发布</b>，前后端版本天然对齐。灰度/滚动期间旧实例是
+          「旧前端 + 旧后端」，因此<b>降级是自洽的</b> —— 不会出现前端调用了旧网关没有的 RPC。
+          <br>代价：灰度窗口内落到旧实例的用户<b>「刷新也看不到新功能」</b>；
+          需靠会话粘性 / 会话状态共享避免同一用户在实例之间跳变（网关会话落 sqlite，
+          多实例是否共享需确认）。</td>
+      <td class="col-b">前端独立发版 → <b>新功能立刻全量可见</b>，不受网关镜像灰度节奏影响。
+          这正是解决「新镜像已上、旧实例没新功能」的直接手段。</td>
+      <td><span class="mid">各有取舍</span></td>
+    </tr>
+    <tr>
+      <td><b>版本 skew 风险</b><br><span class="src">（前后端不同步）</span></td>
+      <td class="col-a"><b>不存在</b>：同镜像发布，前后端永不错配。</td>
+      <td class="col-b"><b>结构性存在，且对 C 端最危险</b>：前端从静态托管/CDN 生效是
+          <b>秒级全量</b>，而网关灰度是<b>分钟～小时级</b>，两者节奏差 1～2 个数量级。
+          前端先上 → 打到未升级的旧实例会缺 RPC / 缺帧字段；网关先上 → 新能力无人使用。
+          C 端实例多、灰度窗口长、用户基数大，<b>skew 的暴露面被显著放大</b>，
+          且 C 端用户不理解灰度，只会表现为「功能坏了」。</td>
+      <td><span class="win">A 显著优</span></td>
+    </tr>
+    <tr>
+      <td><b>运维成本</b><br><span class="src">（长期持续）</span></td>
+      <td class="col-a"><b>零新增</b>：复用网关已有的域名、HTTPS 证书、发布流水线、监控告警；
+          网关侧只维护静态托管 + <code>web/dist</code> 目录。</td>
+      <td class="col-b"><b>一整套新增</b>：独立域名（DNS 解析）、独立 HTTPS 证书（含续期）、
+          独立静态托管 / CDN、独立部署流水线与回滚、独立监控告警、
+          以及网关 <code>gateway.controlUi.allowedOrigins</code> 白名单的逐环境维护。
+          <br>注意这是<b>长期持续成本</b>，不是一次性投入。</td>
+      <td><span class="win">A 优</span></td>
+    </tr>
+    <tr>
+      <td><b>负载均衡</b></td>
+      <td class="col-a">前端走网关<b>既有入口</b>：直接复用网关已有的 LB / 多实例 / 健康检查，
+          <b>不新增接入层，也不新增一个 C 端故障点</b>。</td>
+      <td class="col-b">多出<b>一条独立接入链路</b>：独立域名需要自己的 LB、证书与健康检查，
+          C 端量级下还需多可用区部署。<br>而 WS 仍然打到同一个网关 ——
+          即 <b>B 是「多一条链路」，不是「换一条链路」</b>。</td>
+      <td><span class="win">A 优</span></td>
+    </tr>
+    <tr>
+      <td><b>压力测试<br>范围</b></td>
+      <td class="col-a">压测口径 = 网关（含 WS）。<b>网关侧 WS 专项压测在 A / B 下都必须做</b>
+          （见右栏列举项）。A 的额外工作≈0，静态资源由网关路由直出；
+          但需补一项：把静态文件纳入网关的<b>连接 / 带宽预算</b>，避免与 WS 争用。</td>
+      <td class="col-b">在网关压测<b>之外</b>，额外需要：
+          <ul class="tight" style="margin:4px 0 0">
+            <li>独立域名接入链路（DNS / LB / CDN / 证书）压测</li>
+            <li>前端静态资源的 C 端并发压测</li>
+            <li><b>混合版本组合测试</b>：新前端 × 旧网关、旧前端 × 新网关</li>
+          </ul>
+          <br><b>⚠️ 无论 A 还是 B，WS 专项压测都必须做</b>（WS 都打到同一个网关）：
+          长连接数、连接建立速率（ed25519 握手是 CPU 密集）、心跳与 LB
+          <code>idle timeout</code> 的匹配、<b>断线重连风暴</b>（C 端批量重连会打爆网关）、
+          会话粘性 / 亲和验证。</td>
+      <td><span class="win">A 优</span></td>
+    </tr>
+    <tr>
+      <td><b>静态资源<br>扩展能力</b><br><span class="src">（C 端高并发）</span></td>
+      <td class="col-a">静态资源由<b>网关实例</b>直接吐出，与 WS 共用同一批实例的进程与带宽，
+          横向扩展受网关实例数约束。</td>
+      <td class="col-b">独立域名可挂 <b>CDN / 对象存储</b>，静态资源脱离网关横向扩展，
+          不受网关实例数限制。<br><span class="src">（A 也可以在网关前加 CDN + 回源获得类似扩展性 ——
+          属部署层优化，不改变代码归属。）</span></td>
+      <td><span class="win">B 优</span></td>
+    </tr>
+    <tr>
+      <td><b>权限 / 团队边界</b></td>
+      <td class="col-a">同仓，前端同学可见后端代码（也可能构成干扰）。</td>
+      <td class="col-b">独立仓，权限边界清晰，适合外部 / 跨团队协作。</td>
+      <td><span class="win">B 优</span></td>
+    </tr>
+    <tr>
+      <td><b>迁移 / 切换成本</b></td>
+      <td class="col-a">迁移已基本完成并通过冒烟；剩协议依赖化 + CI 门禁。</td>
+      <td class="col-b">已在生产运行，有稳定入口域名与既有流水线 —— <b>但保留它就需要继续维护两份</b>。</td>
+      <td><span class="na">各有存量</span></td>
+    </tr>
+    <tr>
+      <td><b>双份维护</b><br><span class="src">（A+B 并存现状）</span></td>
+      <td class="col-a" colspan="2"><b>这是当前最大的实际成本</b>：同一个 bug 要在两处各改一遍。今日实测：一个「事件隔离用错比较函数」的修复，
+        连带上下文口径、弹层结构、29 条单测、2 个 e2e 脚本，<b>手工同步 3 轮</b>，且无机制保证不漏。</td>
+      <td><span class="lose">两者皆痛</span></td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<div class="tablewrap">
+<table>
+  <thead><tr><th style="width:14%">方案</th><th style="width:43%">占优维度</th><th>核心风险</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><b>A 同仓</b></td>
+      <td>契约守护、前后端协同、同源部署、UI 库开源、<b>无版本 skew</b>、<b>零新增运维</b>、<b>复用网关 LB</b></td>
+      <td>前端发版被网关节奏拖慢（C 端下被放大）；回滚粒度粗；
+          灰度窗口内旧实例用户看不到新功能；静态资源与 WS 争用网关实例资源</td>
+    </tr>
+    <tr>
+      <td><b>B 独立仓</b></td>
+      <td>独立发版、独立回滚、权限隔离、<b>新功能秒级全量可见</b>、<b>静态资源可 CDN 横向扩展</b></td>
+      <td class="lose">协议漂移无 CI 守护（今日 P0 成因）；跨仓协同；
+          <b>版本 skew 在 C 端被放大</b>（秒级前端 vs 分钟级网关灰度）；
+          <b>新增一整条接入链路</b>与长期运维成本（DNS / 证书 / CDN / LB / 压测 / 监控）；
+          双份维护</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+</section>
+
+<!-- ══════════ 05 目录结构 ══════════ -->
+<section id="s5">
+<h2>05 · 目录结构对比</h2>
+
+<div class="grid2">
+  <div class="card">
+    <p class="dirhead a">方案 A · 单一仓库</p>
+    <p class="dirsub">前端是 workspace 成员，契约从 packages 引入</p>
+<pre><span class="c"># 仓库 openclaw（pnpm workspace）</span>
+openclaw/
+├─ pnpm-workspace.yaml   <span class="c"># packages: . ui web packages/* …</span>
+├─ package.json          <span class="c"># 根：web:install / web:dev / web:build</span>
+├─ scripts/
+│  ├─ web.js             <span class="c"># 转发到 web/ 执行</span>
+│  └─ ui.js              <span class="c"># legacy Lit UI</span>
+│
+├─ <span class="k">web/</span>                  <span class="g">← 前端唯一事实来源</span>
+│  ├─ src/               <span class="c"># Vue3 + Pinia + element-plus</span>
+│  │  ├─ api/            <span class="c"># gateway / device / types</span>
+│  │  │  └─ <span class="g">protocol.ts → 由 packages 提供</span>
+│  │  ├─ views/          <span class="c"># ChatView.vue 等</span>
+│  │  ├─ stores/ utils/ components/ layouts/
+│  │  └─ main.ts
+│  ├─ tests/             <span class="c"># 单测 + tests/smoke/*.e2e.mjs</span>
+│  ├─ <span class="y">dist/</span>              <span class="g">← 网关静态资源根（未入库）</span>
+│  ├─ vite.config.ts     <span class="c"># dev 端口 5273，代理若干网关路径</span>
+│  └─ package.json       <span class="c"># 依赖 workspace:@openclaw/gateway-protocol</span>
+│
+├─ <span class="k">packages/</span>
+│  └─ <span class="g">gateway-protocol/</span>  <span class="g">← 契约单一来源，前端直接 import</span>
+├─ <span class="k">src/</span>                <span class="c"># 网关后端（Node / TS）</span>
+│  └─ gateway/
+│     ├─ server-methods/sessions.ts   <span class="c"># sessions.steer / send</span>
+│     └─ control-ui*.ts               <span class="c"># 静态托管 + CSP</span>
+├─ <span class="k">ui/</span>                  <span class="c"># legacy Lit UI（迁移期保留）</span>
+└─ docs/web/             <span class="c"># web-replacement-plan.md 等</span>
+</pre>
+  </div>
+
+  <div class="card">
+    <p class="dirhead b">方案 B · 两个仓库</p>
+    <p class="dirsub">前端独立仓，契约是手工副本</p>
+<pre><span class="c"># 仓库 1：openclaw（后端）</span>
+openclaw/
+├─ src/gateway/          <span class="c"># 网关后端</span>
+├─ packages/gateway-protocol/
+└─ web/                  <span class="y">← 会变成"另一份前端"，需决定去留</span>
+
+<span class="c"># 仓库 2：agent-claw-web（前端，独立域名）</span>
+agent-claw-web/          <span class="c"># git@coding.jd.com:maas/agent-claw-web</span>
+├─ src/
+│  ├─ api/
+│  │  ├─ <span class="y">protocol.ts</span>   <span class="y">← 手工复制，120 行</span>
+│  │  ├─ <span class="y">types.ts</span>      <span class="y">← 手工复制，316 行</span>
+│  │  ├─ <span class="y">gateway.ts</span>    <span class="y">← 手工复制，655 行</span>
+│  │  └─ <span class="y">device.ts</span>     <span class="y">← 手工复制，210 行（ed25519 握手）</span>
+│  ├─ views/ stores/ utils/ components/
+│  └─ main.ts
+├─ tests/
+├─ dist/                 <span class="c"># → 发布到 agent-claw-pre.jdcloud.com</span>
+└─ package.json          <span class="c"># 依赖 @jdcloud/mobius（内部包）</span>
+
+<span class="c"># 部署</span>
+https://agent-claw-pre.jdcloud.com/   <span class="c"># 静态托管</span>
+        │
+        └── ws://&lt;gateway-host&gt;/        <span class="c"># 跨域，需 origin 白名单</span>
+</pre>
+  </div>
+</div>
+
+<div class="callout">
+  <p><strong>关键差异就是黄色那四行。</strong>方案 A 里 <code>protocol.ts</code> / <code>types.ts</code> /
+  <code>device.ts</code> 这类契约代码可直接从 <code>packages/gateway-protocol</code> 引入；
+  方案 B 里它们是<strong>副本</strong>——网关加一个方法、改一个字段形态，副本不会报错，
+  只会在线上悄悄错。</p>
+</div>
+</section>
+
+<!-- ══════════ 06 对接 ══════════ -->
+<section id="s6">
+<h2>06 · 与网关的对接方式</h2>
+
+<p>前端要接上网关，共 7 个对接面。两种方案的差别不在「能不能通」——<b>两边的 WS 都能通</b>，
+差别在<b>每个对接面的耦合方式</b>：A 靠类型在不同包之间传递契约，B 靠手工复制 + 配置。
+其中 <b>⑦ 协议版本闸门是 C 端场景下最关键的一条</b>：它不是"体验变差"，而是
+<b>连接被直接关闭</b>，且无法靠前端代码补救。</p>
+
+<h3 id="s6-1">6.1 对接面清单</h3>
+<div class="tablewrap">
+<table>
+  <thead>
+    <tr>
+      <th style="width:16%">对接面</th>
+      <th class="col-a" style="width:36%">A · 同仓</th>
+      <th class="col-b">B · 独立仓</th>
+    </tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><b>① 静态资源托管</b></td>
+      <td class="col-a">网关托管 <code>web/dist</code>，访问 <code>http://&lt;gateway-host&gt;/</code>，<b>同源</b>。</td>
+      <td class="col-b">京东云静态托管，访问 <code>https://agent-claw-pre.jdcloud.com/</code>，与网关<b>异源</b>。</td>
+    </tr>
+    <tr>
+      <td><b>② WS 端点</b></td>
+      <td class="col-a">同源推导：由 <code>location</code> 得出 <code>ws://&lt;gateway-host&gt;/</code>，无需配置、无 origin 校验问题。</td>
+      <td class="col-b">必须显式配置网关地址；跨域握手带 <code>Origin</code>，需网关 <code>gateway.controlUi.allowedOrigins</code> 白名单（<b>每加一个入口域名配一次</b>）。</td>
+    </tr>
+    <tr>
+      <td><b>③ 鉴权 Token</b></td>
+      <td class="col-a">入口 <code>?token=</code> / <code>#token=</code> 一次捕获，落 <code>sessionStorage</code>（per-tab，绝不可进 localStorage）。</td>
+      <td class="col-b">同一套入口参数，但起点是<b>另一个域名</b>——需处理跳转带入 / 回跳时的 token 传递，多一条易错路径。</td>
+    </tr>
+    <tr>
+      <td><b>④ 设备握手</b></td>
+      <td class="col-a"><code>device.ts</code>（ed25519 握手）<b>直接从 <code>@openclaw/gateway-protocol</code> import</b>，网关改握手即编译报错。</td>
+      <td class="col-b">同逻辑的 <b>210 行手工副本</b>；网关改握手时前端无感，只能等线上失败。</td>
+    </tr>
+    <tr>
+      <td><b>⑤ 媒体 / 头像</b></td>
+      <td class="col-a"><code>&lt;img src="/avatar/&lt;agentId&gt;"&gt;</code> <b>同源直出</b>，无需绝对化、无需补 token。</td>
+      <td class="col-b">必须 <code>resolveGatewayHttpBase(wsUrl)</code> 绝对化到网关源，<b>且补 token 必须在绝对化之后</b>（顺序错 → token 静默丢 → 401 破图）。<br>且 <code>/avatar/*</code>、<code>/__openclaw__/assistant-media</code> <b>无 CORS、OPTIONS 404</b>，只能 <code>&lt;img&gt;</code> / <code>&lt;audio&gt;</code> 直出，探测失败要乐观继续。</td>
+    </tr>
+    <tr>
+      <td><b>⑥ 契约同步机制</b></td>
+      <td class="col-a"><b>编译期</b>：workspace 依赖 + TS 类型检查 + 单测，一次 <code>vue-tsc --noEmit</code> 全覆盖。</td>
+      <td class="col-b"><b>无机制</b>：靠人肉比对 + 真机 CDP 冒烟。漂移是「静默失败」，表现为 UI 卡住/空白，而非构建失败。</td>
+    </tr>
+    <tr>
+      <td><b>⑦ 协议版本闸门</b><br><span class="src">（握手硬校验）</span></td>
+      <td class="col-a">同镜像发布 → 前端与网关声明的 <code>minProtocol / maxProtocol</code>
+          永远落在同一区间，<b>不存在连接被拒的窗口</b>。</td>
+      <td class="col-b">前端独立托管（含浏览器 / CDN 缓存）→ 网关升级协议后，
+          <b>旧缓存前端会在握手阶段被直接拒绝</b>。网关侧是硬闸门：
+          <code>maxProtocol &gt;= PROTOCOL_VERSION &amp;&amp; minProtocol &lt;= PROTOCOL_VERSION</code>
+          （当前 <code>PROTOCOL_VERSION = 4</code>）；不满足即
+          <code>INVALID_REQUEST / protocol mismatch</code> 并 <code>close(1002)</code>，
+          源码注释明确写了「<b>stale operator/UI clients cannot enter the v4 surface</b>」。
+          <br><b>C 端无法要求用户强制刷新浏览器缓存</b> —— 这是 B 在本项目最硬的一条风险。
+          <span class="src">— src/gateway/server/ws-connection/message-handler.ts:813-852 ·
+          packages/gateway-protocol/src/version.ts</span></td>
+    </tr>
+  </tbody>
+</table>
+</div>
+
+<h3 id="s6-2">6.2 方案 A 的对接链路</h3>
+<div class="grid2">
+  <div class="card">
+    <div class="flow">
+      <div class="node src-node"><b>浏览器</b><br>http://&lt;gateway-host&gt;/</div>
+      <div class="arrow">│ <span class="same">同源请求，无 CORS、无 Origin 校验</span><br>▼</div>
+      <div class="node gw"><b>openclaw 网关</b>（Express 5 + ws）</div>
+      <div class="node" style="margin-top:8px">
+        <b>网关内同时提供：</b>
+        <ul>
+          <li>静态托管 <code>web/dist/</code> → 前端产物内嵌在网关</li>
+          <li><code>ws://&lt;同 host&gt;/</code> → 前端由 location 推导，无需配置白名单</li>
+          <li><code>/avatar/*</code> · <code>/__openclaw__/assistant-media</code> → 同源直出</li>
+        </ul>
+      </div>
+      <div class="arrow" style="padding-top:8px">▼</div>
+      <div class="node gw"><b>packages/gateway-protocol</b><br>protocol / types / device —— 前端直接 import，单一来源</div>
+    </div>
+  </div>
+  <div class="card">
+    <h4 style="margin-top:0">A 的对接要点</h4>
+    <ul class="tight">
+      <li><b>一次构建，同源发布</b>：<code>pnpm web:build</code> → 网关直接托管，无独立部署环节。</li>
+      <li><b>握手逻辑零副本</b>：ed25519 握手、帧信封解析、会话 key 规范化都用协议包的实现。</li>
+      <li><b>协议版本天然一致</b>：前端与网关同一个镜像，声明的
+          <code>minProtocol / maxProtocol</code> 区间永远匹配，<b>不存在握手被拒的窗口</b>。</li>
+      <li><b>媒体直出无坑</b>：相对路径 <code>/avatar/&lt;id&gt;</code> 天然指向网关，不存在绝对化顺序问题。</li>
+      <li><b>需要处理的唯一代价</b>：前端改动的发版跟随网关 —— 这是 A 要接受的成本。</li>
+    </ul>
+    <div class="callout a" style="margin-bottom:0">
+      <p><b>本期 P0 的根因在 A 下不可复现</b>：那个 bug 是前端用错会话 key 比较函数
+      （<code>areUiSessionKeysEquivalent</code> 只认裸 <code>main</code>，比不出
+      <code>agent:main:id-&lt;hash8&gt;</code>）。会话 key 规范化函数本身就属于协议契约，
+      同仓时应从 <code>gateway-protocol</code> 取用，而不是各写一份。</p>
+    </div>
+  </div>
+</div>
+
+<h3 id="s6-3">6.3 方案 B 的对接链路</h3>
+<div class="grid2">
+  <div class="card">
+    <div class="flow">
+      <div class="node src-node"><b>浏览器</b><br>https://agent-claw-pre.jdcloud.com/</div>
+      <div class="arrow">│ <b>异源</b>：需跨域配置<br>▼</div>
+      <div class="node"><b>静态托管（京东云）</b><br>agent-claw-web/dist</div>
+      <div class="arrow">│ ws://&lt;gateway-host&gt;/ ＋ <b>Origin 头</b><br>▼</div>
+      <div class="node gw"><b>openclaw 网关</b></div>
+      <div class="node" style="margin-top:8px">
+        <b>网关侧必须配合：</b>
+        <ul>
+          <li><code>gateway.controlUi.allowedOrigins</code> 白名单 —— 每新增入口域名配一次</li>
+          <li><code>/avatar/*</code> 无 CORS / OPTIONS 404 → 前端只能绝对化域名 + 补 token 后 <code>&lt;img&gt;</code> 直出</li>
+          <li>补 token 必须在 <code>resolveGatewayHttpBase()</code> 绝对化<b>之后</b>，顺序错则 401 破图</li>
+        </ul>
+      </div>
+      <div class="arrow" style="padding-top:8px">▼</div>
+      <div class="node" style="border-color:#e8d5b5;background:#fffdf7">
+        <b>协议契约</b>：<span class="nowrap">src/api/{protocol,types,gateway,device}.ts</span><br>
+        <span style="color:#b45309">手工副本 1301 行 —— 与网关无自动比对机制</span>
+      </div>
+    </div>
+  </div>
+  <div class="card">
+    <h4 style="margin-top:0">B 的对接要点</h4>
+    <ul class="tight">
+      <li><b>两处部署</b>：前端静态托管 + 网关，跨域关系需要长期维护（本已解决，但新增入口要重配）。</li>
+      <li><b>握手逻辑是副本</b>：ed25519 握手 / 帧解析 / 会话 key 规范化各有 1 份手写实现，
+          网关演进时不报错、只在线上静默失败。</li>
+      <li><b>协议版本可能错配（C 端最硬的一条）</b>：网关对陈旧 UI 客户端是
+          <b>握手硬拒</b>（<code>protocol mismatch</code> → <code>close(1002)</code>），
+          而前端产物在 CDN / 浏览器里是<b>缓存态</b> ⇒ 必须把
+          <code>minProtocol</code> 纳入前端兼容策略，并约定前后端的发版顺序与回滚顺序。</li>
+      <li><b>媒体路径有坑</b>：必须绝对化 + 补 token，且顺序敏感；无 CORS 探测，只能乐观直出。</li>
+      <li><b>独立发版的收益是实的</b>：改文案 / 样式可秒级上线，回滚也不牵连网关 —— 这是 B 要保住的价值。</li>
+    </ul>
+    <div class="callout" style="margin-bottom:0">
+      <p><b>如果最终仍必须保留独立仓（合规 / 团队边界）</b>，把风险压到最低的最低要求是两条：
+      ① 用内网 npm 发布的 <code>@openclaw/gateway-protocol</code> 替换
+      <code>{protocol,types}.ts</code>，以版本号做契约同步；
+      ② CI 增加契约一致性检查（拉网关
+      <code>hello-ok.features.methods</code> 与前端调用列表比对，缺失即失败）。
+      <b>不做这两条，B 的漂移风险仍是不可控的。</b></p>
+    </div>
+  </div>
+</div>
+</section>
+
+<!-- ══════════ 07 风险 ══════════ -->
+<section id="s7">
+<h2>07 · 风险对比</h2>
+
+<div class="tablewrap">
+<table>
+  <thead>
+    <tr><th style="width:22%">风险</th><th style="width:9%">方案 A</th><th style="width:9%">方案 B</th><th>说明与证据</th></tr>
+  </thead>
+  <tbody>
+    <tr>
+      <td><b>协议漂移导致线上事故</b></td>
+      <td><span class="win">低</span></td><td><span class="lose">高</span></td>
+      <td>本次 P0 即实例：前端用 <code>areUiSessionKeysEquivalent</code>（只认裸 <code>main</code>）比对
+          <code>id-&lt;hash&gt;</code> 与 <code>agent:main:id-&lt;hash&gt;</code>
+          → <b>所有 chat/agent 事件被丢弃</b> → 永久卡「思考中」。同仓可被类型 / 契约测试挡住。</td>
+    </tr>
+    <tr>
+      <td><b>跨域 / origin 配置遗漏</b></td>
+      <td><span class="win">无</span></td><td><span class="mid">中</span></td>
+      <td>A 同源；B 已配通，但每新增入口域名要再配一次。实测网关对非白名单 origin 返回
+          <code>INVALID_REQUEST: origin not allowed</code>
+          （<span class="src">src/gateway/origin-check.ts:79</span>）。且 <code>/avatar</code>、
+          <code>/__openclaw__/assistant-media</code> <b>无 CORS、OPTIONS 404</b>，只能 <code>&lt;img&gt;</code> 直出。</td>
+    </tr>
+    <tr>
+      <td><b>媒体 / 头像加载失败</b></td>
+      <td><span class="win">低</span></td><td><span class="mid">中</span></td>
+      <td>A 相对路径同源直出；B 需 <code>resolveGatewayHttpBase()</code> 绝对化 + <b>之后</b>补 token，
+          顺序错则 token 静默丢失 → 401 破图。已钉在单测 <code>tests/mediaAndAvatarUrls.test.ts</code>。</td>
+    </tr>
+    <tr>
+      <td><b>双份维护（当前状态）</b></td>
+      <td colspan="2"><span class="lose">高（A+B 并存）</span></td>
+      <td>今日实测同步 3 轮。只要两份同时存在，该成本就持续存在，且<b>没有机制保证不漏</b>。</td>
+    </tr>
+    <tr>
+      <td><b>发版节奏被拖慢</b></td>
+      <td><span class="mid">中</span></td><td><span class="win">低</span></td>
+      <td>A 的前端小改动需走网关发版；B 独立发版。</td>
+    </tr>
+    <tr>
+      <td><b>回滚粒度</b></td>
+      <td><span class="mid">中</span></td><td><span class="win">低</span></td>
+      <td>B 前端可秒级独立回滚；A 需回滚网关产物（或切 legacy <code>ui/</code>）。</td>
+    </tr>
+    <tr>
+      <td><b>开源 / 外部部署</b></td>
+      <td><span class="win">低</span></td><td><span class="mid">中</span></td>
+      <td>A 用 element-plus；B 依赖 <code>@jdcloud/mobius</code> 内部包，外部不可安装。</td>
+    </tr>
+    <tr>
+      <td><b>版本 skew 致 C 端<br>功能不可用</b></td>
+      <td><span class="win">无</span></td><td><span class="lose">高</span></td>
+      <td>B 下前端秒级全量、网关灰度分钟级 ⇒ 同一个发布窗口内<b>必然存在混合版本</b>。
+          最坏形态是<b>握手被硬拒</b>（<code>protocol mismatch</code> + <code>close(1002)</code>）：
+          旧缓存前端<b>连都连不上</b>，页面直接不可用，且 C 端无法要求用户清缓存。
+          A 同镜像发布不存在此风险（旧实例是自洽的旧前后端）。</td>
+    </tr>
+    <tr>
+      <td><b>灰度期间新功能<br>对用户不可见</b></td>
+      <td><span class="mid">中</span></td><td><span class="win">低</span></td>
+      <td>A 的灰度窗口内落到旧实例的用户「刷新也没有新功能」，需靠会话粘性收敛影响面；
+          B 的前端改动秒级全量可见，不受灰度影响。</td>
+    </tr>
+    <tr>
+      <td><b>独立域名接入层<br>故障</b></td>
+      <td><span class="win">无</span></td><td><span class="mid">中</span></td>
+      <td>B 多一条链路，就多一类 C 端故障：证书过期 / 续期失败、DNS 解析异常、
+          LB 健康检查与 WS 升级配置漏配、CDN 缓存住旧产物。
+          A 这些全部复用网关既有链路，无新增故障面。</td>
+    </tr>
+    <tr>
+      <td><b>静态资源与 WS<br>争用实例资源</b><br><span class="src">（C 端高并发）</span></td>
+      <td><span class="mid">中</span></td><td><span class="win">低</span></td>
+      <td>A 下静态文件与 WS 共用同一批网关实例的进程与带宽，C 端峰值时可能相互挤占；
+          B 的静态资源走独立 CDN / 对象存储，与 WS 资源隔离。</td>
+    </tr>
+  </tbody>
+</table>
+</div>
+</section>
+
+<!-- ══════════ 08 结论 ══════════ -->
+<section id="s8">
+<h2>08 · 选型结论</h2>
+
+<div class="card verdict">
+  <span class="tag">最终选择：方案 A</span>
+  <p style="margin-top:0"><strong>前端收敛为 openclaw 仓的 <code>web/</code> 成员，契约从
+  <code>packages/gateway-protocol</code> 引入，产物由网关同源托管；逐步退役
+  <code>agent-claw-web</code> 仓。</strong></p>
+  <p>判定逻辑：两方案在「能不能跑通」上无差异（B 的 WS 跨域已解决），差异全在
+  <b>契约能否被机器守护</b>。本项目前端与网关是硬契约耦合（协议 v4 帧结构 / ed25519 握手 /
+  会话 key 规范形态 / RPC 方法集），<b>今天这个 P0 就是契约漂移的代价</b>——
+  用类型把它钉住，比任何流程约束都可靠。</p>
+  <p>与本次<b>重构动因互为印证</b>：内置 UI 层之所以「改一个积分功能都如此困难」，
+  根因正是可读性差 + 体量大 + 构建反馈慢；而方案 A 的工程形态（单文件组件、
+  秒级 HMR、<code>gateway-protocol</code> 统一契约）同时也在为
+  <b>后续扩展与定制化</b>降低门槛——两条诉求指向同一个选择。</p>
+</div>
+
+<div class="tablewrap">
+<table>
+  <thead><tr><th style="width:20%">项</th><th>内容</th></tr></thead>
+  <tbody>
+    <tr><td><b>决定</b></td><td>选 <b>方案 A</b>：源码归属 <code>openclaw/web/</code>，契约来自 <code>packages/gateway-protocol</code></td></tr>
+    <tr><td><b>主要依据</b></td><td>① 契约可被编译期守护；② 单 PR 前后端协同；③ 同源部署无跨域坑；④ UI 库可开源；
+        ⑤ <b>面向 C 端：同镜像发布不存在版本 skew</b>；⑥ <b>零新增接入层与运维成本</b>（复用网关 LB / 证书 / 监控）</td></tr>
+    <tr><td><b>面向 C 端的<br>额外判定</b></td>
+        <td>C 端的两个硬要求是<b>「用户不能遇到功能突然不可用」</b>与<b>「接入层不能多一个故障点」</b>。
+            本项目的网关对陈旧 UI 客户端是<b>握手硬拒</b>（<code>protocol mismatch</code> → <code>close(1002)</code>，
+            <code>PROTOCOL_VERSION = 4</code>），而 B 的前端在 CDN/浏览器里是缓存态的、<b>无法强制刷新</b> ⇒
+            B 在协议演进时会直接产生「旧用户连不上」的 C 端事故。A 把前端打进网关镜像后，
+            该风险的成因被彻底移除。</td></tr>
+    <tr><td><b>重构动因<br>（本次任务）</b></td>
+        <td>修改「积分」功能时暴露的结构性成本：内置 UI 层 <b>512 文件 / 254,359 行</b>、
+            单文件最大 <b>2,908 行</b>，一个功能点散落在 <b>32 个文件</b>（11 逻辑 + 21 语言）里 →
+            定位困难、<b>高度依赖 AI 全量读取</b>（多次崩溃、电脑死机）、改完需重新构建并重装本地插件 →
+            迭代极慢。<b>重构为 Vue 后</b>：改动点收敛到单个 <code>.vue</code> + store、
+            Vite 秒级 HMR、文案改动面 21 → 1，<b>维护难度显著下降</b>；
+            并同时为<b>后续扩展与定制化</b>（增量新增页面 / 局部定制）铺好路。
+            <span class="src">— 详见 02 节</span></td></tr>
+    <tr><td><b>主动接受的代价</b></td><td>① 前端发版跟随网关发布节奏 —— C 端下这意味着改文案也要发网关，
+        需接受（或把纯静态文案变更合并进同一个发布批次）；<br>
+        ② 前端新功能在全量前会经历<b>灰度窗口</b>，需确认 C 端可接受该窗口内的新旧可见性差异
+        （可用会话粘性收敛）；<br>
+        ③ 静态资源与 WS <b>共用网关实例资源</b>，C 端峰值下需把静态资源纳入网关容量预算
+        （必要时前置 CDN + 回源）；<br>
+        ④ 回滚粒度变粗。</td></tr>
+    <tr><td><b>不采用 B 的理由</b></td><td>① 1301 行协议副本无 CI 守护（今日 P0 成因）；
+        ② 跨仓协同；③ UI 库为内部包不利于对外；<br>
+        ④ <b>C 端下最致命</b>：前端秒级全量 vs 网关分钟级灰度 ⇒ 混合版本窗口内可能出现
+        <b>握手被硬拒、页面整体不可用</b>，且无法强制刷新用户缓存；<br>
+        ⑤ 独立域名带来<b>一整条新增接入链路</b>与长期运维成本（DNS / 证书 / CDN / LB / 压测 / 监控）；
+        ⑥ <b>保留独立仓 = 继续维护两份</b>，与本次「降低维护难度」的目标直接冲突。</td></tr>
+    <tr><td><b>决策前需确认</b></td><td>① 是否有合规要求前端必须独立仓（若有 → 退化为 B + 内网 npm 契约包 +
+        CI 契约门禁）；② 京东云流水线能否直接消费 <code>web/dist</code> 产物；
+        ③ <code>agent-claw-pre.jdcloud.com</code> 后续是否必须保留入口；
+        ④ legacy <code>ui/</code>（Lit）退役时间点与 i18n 影响面；<br>
+        ⑤ <b>网关多实例的会话状态是否共享</b>（决定灰度期间同一用户是否会跨实例跳变）；
+        ⑥ <b>C 端并发下静态资源占用的容量</b>（是否需要前置 CDN + 回源）；
+        ⑦ <b>WS 专项压测</b>：长连接数、握手速率、心跳与 LB <code>idle timeout</code> 匹配、
+        断线重连风暴 —— <b>A / B 都必须做</b>。</td></tr>
+  </tbody>
+</table>
+</div>
+</section>
+
+<footer>
+  生成时间 2026-09-14 · 基于仓库实际文件核实（<code>pnpm-workspace.yaml</code>、
+  <code>web/INTEGRATION.md</code>、<code>web/vite.config.ts</code>、
+  <code>agent-claw-web/package.json</code>、<code>src/gateway/server-methods/sessions.ts</code>、
+  <code>src/gateway/auth.ts</code> + <code>src/gateway/http-auth-utils.ts</code>
+  （<code>gateway.controlUi.allowedOrigins</code> / <code>trusted_proxy_origin_not_allowed</code>）、
+  <code>src/gateway/server/ws-connection/message-handler.ts:813-852</code>
+  （协议版本闸门 / <code>protocol mismatch</code> / <code>close(1002)</code>）、
+  <code>packages/gateway-protocol/src/version.ts</code>（<code>PROTOCOL_VERSION = 4</code>））；
+  02 节数据来自本机实测统计（<code>ui/package.json</code> = <code>lit@3.3.3</code>、
+  <code>ui/src</code> 文件数与行数 <code>wc -l</code>、<code>grep customElements.define</code>、
+  <code>grep -ril "spend\|积分\|credit"</code>）。<br />
+  所有「实测」结论均来自本机 CDP 端到端验证（dev server <code>5273</code> + 网关 <code>18789</code>）。
+</footer>
+
+</main>
+</div>
+
+<script>
+(function () {
+  var links = Array.prototype.slice.call(document.querySelectorAll('aside.toc a'));
+  var targets = links.map(function (a) {
+    var id = a.getAttribute('href').slice(1);
+    return document.getElementById(id);
+  }).filter(Boolean);
+
+  function setActive(id) {
+    links.forEach(function (a) {
+      a.classList.toggle('active', a.getAttribute('href') === '#' + id);
+    });
+    // 移动端把当前项滚进视野
+    if (window.innerWidth <= 900) {
+      var cur = links.find(function (a) { return a.getAttribute('href') === '#' + id; });
+      if (cur && cur.scrollIntoView) cur.scrollIntoView({ block: 'nearest', inline: 'center' });
+    }
+  }
+
+  function onScroll() {
+    var probe = window.innerHeight * 0.22;
+    var current = targets[0];
+    for (var i = 0; i < targets.length; i++) {
+      if (targets[i].getBoundingClientRect().top <= probe) current = targets[i];
+    }
+    // 触底时锁定最后一项
+    if (window.innerHeight + window.scrollY >= document.body.offsetHeight - 4) {
+      current = targets[targets.length - 1];
+    }
+    if (current) setActive(current.id);
+  }
+
+  var ticking = false;
+  window.addEventListener('scroll', function () {
+    if (ticking) return;
+    ticking = true;
+    window.requestAnimationFrame(function () { onScroll(); ticking = false; });
+  }, { passive: true });
+  window.addEventListener('resize', onScroll);
+  onScroll();
+
+  // 点击目录时立即高亮（避免平滑滚动过程中的抖动）
+  links.forEach(function (a) {
+    a.addEventListener('click', function () { setActive(a.getAttribute('href').slice(1)); });
+  });
+})();
+</script>
+</body>
+</html>

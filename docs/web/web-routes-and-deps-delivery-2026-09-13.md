@@ -5,11 +5,11 @@
 
 ## 一、任务清单
 
-| #   | 任务                                                    | 状态                           |
-| --- | ------------------------------------------------------- | ------------------------------ |
-| 1   | 补齐 `web/` 缺失的 ui/ 路由                             | 完成                           |
-| 2   | 在 `agent-claw-web/` 中镜像缺失路由                     | 完成                           |
-| 3   | 修复 monorepo `ui/` 的 `@create-markdown/core` 版本冲突 | 完成（待 pnpm 跑完做最后回归） |
+| # | 任务 | 状态 |
+|---|---|---|
+| 1 | 补齐 `web/` 缺失的 ui/ 路由 | 完成 |
+| 2 | 在 `agent-claw-web/` 中镜像缺失路由 | 完成 |
+| 3 | 修复 monorepo `ui/` 的 `@create-markdown/core` 版本冲突 | 完成（待 pnpm 跑完做最后回归） |
 
 ---
 
@@ -21,31 +21,30 @@
 
 **对比结果**：
 
-| 旧 ui/ 路由                | 新 web/ 路由                   | 旧 ui/ 路径                | 新 web/ 路径                             |
-| -------------------------- | ------------------------------ | -------------------------- | ---------------------------------------- |
-| `/config`                  | `config`                       | `/config`                  | `/config`                                |
-| `/settings/general`        | `settings-general`             | `/settings/general`        | `/settings/general`                      |
-| `/settings/communications` | `settings-communications`      | `/settings/communications` | `/settings/communications`               |
-| `/settings/appearance`     | `settings-appearance`          | `/settings/appearance`     | `/settings/appearance`                   |
-| `/settings/automation`     | `settings-automation`          | `/settings/automation`     | `/settings/automation`                   |
-| `/settings/mcp`            | `settings-mcp`                 | `/settings/mcp`            | `/settings/mcp`                          |
-| `/settings/infrastructure` | `settings-infrastructure`      | `/settings/infrastructure` | `/settings/infrastructure`               |
-| `/settings/ai-agents`      | `settings-ai-agents`           | `/settings/ai-agents`      | `/settings/ai-agents`                    |
-| `/activity`                | `activity`                     | `/activity`                | `/activity`                              |
-| `/debug`                   | `debug`                        | `/debug`                   | `/debug`                                 |
-| `/dreams`                  | `dreams`                       | `/dreams`                  | `/dreams`                                |
-| `/instances`               | `instances`                    | `/instances`               | `/instances`                             |
-| `/nodes`                   | `nodes`                        | `/nodes`                   | `/nodes`                                 |
-| `/plugin`                  | `plugin`                       | `/plugin`                  | `/plugin`                                |
-| `/skills/workshop`         | `skill-workshop`（hidden）     | `/skills/workshop`         | `/skills/workshop`                       |
-| `/tasks`                   | `tasks`                        | `/tasks`                   | `/tasks`                                 |
-| `/workboard`               | `workboard`                    | `/workboard`               | `/workboard`                             |
-| `/worktrees`               | `worktrees`                    | `/worktrees`               | `/worktrees`                             |
-| `?view=terminal`           | `?view=terminal` → `/terminal` | `/?view=terminal`          | `/?view=terminal` → redirect `/terminal` |
-| `/terminal`（全屏）        | `terminal`（layout:blank）     | 通过 `?view=terminal` 进入 | 直连 `/terminal`                         |
+| 旧 ui/ 路由 | 新 web/ 路由 | 旧 ui/ 路径 | 新 web/ 路径 |
+|---|---|---|---|
+| `/config` | `config` | `/config` | `/config` |
+| `/settings/general` | `settings-general` | `/settings/general` | `/settings/general` |
+| `/settings/communications` | `settings-communications` | `/settings/communications` | `/settings/communications` |
+| `/settings/appearance` | `settings-appearance` | `/settings/appearance` | `/settings/appearance` |
+| `/settings/automation` | `settings-automation` | `/settings/automation` | `/settings/automation` |
+| `/settings/mcp` | `settings-mcp` | `/settings/mcp` | `/settings/mcp` |
+| `/settings/infrastructure` | `settings-infrastructure` | `/settings/infrastructure` | `/settings/infrastructure` |
+| `/settings/ai-agents` | `settings-ai-agents` | `/settings/ai-agents` | `/settings/ai-agents` |
+| `/activity` | `activity` | `/activity` | `/activity` |
+| `/debug` | `debug` | `/debug` | `/debug` |
+| `/dreams` | `dreams` | `/dreams` | `/dreams` |
+| `/instances` | `instances` | `/instances` | `/instances` |
+| `/nodes` | `nodes` | `/nodes` | `/nodes` |
+| `/plugin` | `plugin` | `/plugin` | `/plugin` |
+| `/skills/workshop` | `skill-workshop`（hidden） | `/skills/workshop` | `/skills/workshop` |
+| `/tasks` | `tasks` | `/tasks` | `/tasks` |
+| `/workboard` | `workboard` | `/workboard` | `/workboard` |
+| `/worktrees` | `worktrees` | `/worktrees` | `/worktrees` |
+| `?view=terminal` | `?view=terminal` → `/terminal` | `/?view=terminal` | `/?view=terminal` → redirect `/terminal` |
+| `/terminal`（全屏） | `terminal`（layout:blank） | 通过 `?view=terminal` 进入 | 直连 `/terminal` |
 
 **实现思路**：
-
 - 每个一级路由对应一个 Vue 视图文件，命名遵循现有 `<Name>View.vue` 模式；
 - 配置子路由（`/settings/*`）复用同一个 `ConfigView.vue`，通过 `props: { pageId }` 区分面板；
 - 终端保持 ui/ 的 query-string 兼容入口（`/?view=terminal`），但 redirect 到独立路由 `/terminal`，以享受 MainLayout 之外的 blank 布局；
@@ -54,26 +53,22 @@
 ### 2.2 依赖冲突（任务 3）
 
 **症状**：`pnpm install`（root）在 `ui/` 卡住，报：
-
 ```
 @create-markdown/preview@2.0.3 requires @create-markdown/core>=2.0.3 from the dependencies
 but no version is installed. Found core@2.0.0 incompatible.
 ```
 
 **根因**：
-
 - `ui/package.json` 声明 `"@create-markdown/preview": "2.0.3"`；
 - 该版本在 package.json 里写死 `peerDependencies: { "@create-markdown/core": ">=2.0.3" }`；
 - 京东内网 npm mirror `http://registry.m.jd.com/` 只同步到 `@create-markdown/core@2.0.0`，没有 ≥2.0.3 的版本。
 
 **修复**：把 `ui/package.json` 中 `@create-markdown/preview` 降到 `2.0.0`。理由：
-
 - `@create-markdown/preview@2.0.0` 的 peer 是 `@create-markdown/core: ">=2.0.0"`（满足 2.0.0），且其它 peer（shiki、mermaid）均为 `*`；
 - 验证：npm 上 `2.0.0` 的 peer 表为 `{ "@create-markdown/core": ">=2.0.0", "shiki": "*", "mermaid": "*" }`；
 - `2.0.3` 唯一新增内容是 bug fix #47（默认主题文件路径），但本项目 `ui/src/` 内没有用到该 API，不影响功能。
 
 **变更范围**：
-
 - `ui/package.json`：第 12 行 `"2.0.3"` → `"2.0.0"`；
 - `pnpm-lock.yaml`：由 `pnpm install --no-frozen-lockfile` 重生成（preview 块从 `2.0.3(core@2.0.3)` 改成 `2.0.0(core@2.0.0)`）。
 - 不需要修改 `pnpm-workspace.yaml`（只声明工作区成员，不锁版本范围）。
@@ -85,7 +80,6 @@ but no version is installed. Found core@2.0.0 incompatible.
 ### 任务 1：`openclaw-v2026.7.1-2/web/`（11 个新视图 + 3 个改造文件）
 
 新增：
-
 - `web/src/views/ActivityView.vue` — 订阅 `agent` / `session.tool` 事件流
 - `web/src/views/DebugView.vue` — status / health / models / heartbeat + 自由 RPC
 - `web/src/views/DreamsView.vue` — `doctor.memory.status` / `dreamDiary` / `wiki.importInsights`
@@ -99,7 +93,6 @@ but no version is installed. Found core@2.0.0 incompatible.
 - `web/src/views/TerminalView.vue` — `terminal.open/list/input/close` + `terminal.data/exit` 事件流（无 xterm，预 + 输入框）
 
 改造：
-
 - `web/src/router/index.ts` — 注册 17 条新路由（10 一级 + 6 配置 + 1 终端）+ `?view=terminal` redirect 处理
 - `web/src/views/ConfigView.vue` — 新增 `pageId` prop，左侧导航 + 7 个面板（config / communications / appearance / automation / mcp / infrastructure / ai-agents）
 - `web/src/stores/gateway.ts` — 把已存在的 `waitForConnection()` 加入返回值（此前是 store 内 dead code，外部调用会拿到 TS2339）
@@ -107,7 +100,6 @@ but no version is installed. Found core@2.0.0 incompatible.
 ### 任务 2：`agent-claw-web/`（11 个新视图 + 3 个改造文件）
 
 新增（从 `web/` 复制后把 `element-plus` import 替换为 `@jdcloud/mobius`，与项目原有约定一致）：
-
 - `agent-claw-web/src/views/ActivityView.vue`
 - `agent-claw-web/src/views/DebugView.vue`
 - `agent-claw-web/src/views/DreamsView.vue`
@@ -121,7 +113,6 @@ but no version is installed. Found core@2.0.0 incompatible.
 - `agent-claw-web/src/views/TerminalView.vue`
 
 改造：
-
 - `agent-claw-web/src/router/index.ts` — 同 web/ 的 17 条新路由
 - `agent-claw-web/src/stores/gateway.ts` — 暴露 `waitForConnection`
 - `agent-claw-web/src/views/ConfigView.vue` — 改写为支持 `pageId`（保留 mobius import）

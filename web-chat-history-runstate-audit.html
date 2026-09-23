@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>历史消息与运行态：ui/ ↔ web/ 差异审计 + 修复报告</title>
+<style>
+  :root{
+    --bg:#f7f7f5; --panel:#fff; --line:#e3e2dd; --ink:#1f1f1e; --ink2:#5f5e5a; --ink3:#8a8880;
+    --red:#a32d2d; --redbg:#fcebeb; --green:#0f6e56; --greenbg:#e1f5ee; --amber:#854f0b; --amberbg:#faeeda;
+    --blue:#185fa5; --bluebg:#e6f1fb; --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font:14px/1.65 -apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif}
+  a{color:var(--blue);text-decoration:none}
+  a:hover{text-decoration:underline}
+  code{font-family:var(--mono);font-size:12.5px;background:#f1efe8;padding:1px 5px;border-radius:4px;color:#444441}
+  .wrap{display:flex;gap:28px;max-width:1180px;margin:0 auto;padding:28px 24px 80px}
+  nav{position:sticky;top:24px;align-self:flex-start;width:216px;flex:0 0 216px;
+    background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
+  nav h2{font-size:12px;font-weight:500;color:var(--ink3);letter-spacing:.06em;margin:0 0 10px}
+  nav a{display:block;padding:5px 0;font-size:13px;color:var(--ink2)}
+  nav a:hover{color:var(--blue)}
+  main{flex:1;min-width:0}
+  h1{font-size:22px;font-weight:500;margin:0 0 6px}
+  .sub{color:var(--ink2);font-size:13px;margin:0 0 26px}
+  section{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px 22px;margin:0 0 18px}
+  h2{font-size:16px;font-weight:500;margin:0 0 14px}
+  h3{font-size:14px;font-weight:500;margin:18px 0 8px}
+  h3:first-of-type{margin-top:0}
+  p{margin:8px 0}
+  ul,ol{margin:8px 0;padding-left:20px}
+  li{margin:5px 0}
+  table{width:100%;border-collapse:collapse;margin:10px 0;font-size:13px}
+  th,td{border:1px solid var(--line);padding:8px 10px;text-align:left;vertical-align:top}
+  th{background:#faf9f7;font-weight:500;color:var(--ink2);white-space:nowrap}
+  td code{white-space:nowrap}
+  .badge{display:inline-block;font-size:11.5px;padding:1px 7px;border-radius:999px;border:1px solid;line-height:1.7}
+  .b-red{color:var(--red);background:var(--redbg);border-color:#f09595}
+  .b-green{color:var(--green);background:var(--greenbg);border-color:#9fe1cb}
+  .b-amber{color:var(--amber);background:var(--amberbg);border-color:#fac775}
+  .b-blue{color:var(--blue);background:var(--bluebg);border-color:#b5d4f4}
+  .callout{border-left:3px solid;border-radius:6px;padding:10px 14px;margin:12px 0;font-size:13px}
+  .c-red{border-color:#e24b4a;background:var(--redbg)}
+  .c-green{border-color:#1d9e75;background:var(--greenbg)}
+  .c-blue{border-color:#378add;background:var(--bluebg)}
+  .c-amber{border-color:#ef9f27;background:var(--amberbg)}
+  .file{font-family:var(--mono);font-size:12.5px;color:#444441}
+  .kpi{display:flex;gap:12px;flex-wrap:wrap;margin:4px 0 0}
+  .kpi div{flex:1 1 150px;border:1px solid var(--line);border-radius:10px;padding:10px 12px;background:#fcfcfb}
+  .kpi b{display:block;font-size:19px;font-weight:500}
+  .kpi span{font-size:12px;color:var(--ink3)}
+  footer{color:var(--ink3);font-size:12.5px;padding:0 4px}
+  @media (max-width:900px){.wrap{flex-direction:column}nav{position:static;width:auto;flex:auto}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<nav>
+  <h2>目录</h2>
+  <a href="#tldr">结论摘要</a>
+  <a href="#map">两条链路怎么走</a>
+  <a href="#diff">ui / web 差异对照</a>
+  <a href="#gap">web 的四个缺口</a>
+  <a href="#switch">「切会话不中断」结论</a>
+  <a href="#fix">本次修复</a>
+  <a href="#verify">验证矩阵</a>
+  <a href="#staging">预发取证（待你确认）</a>
+  <a href="#risk">遗留与风险</a>
+</nav>
+<main>
+
+<h1>历史消息与运行态：<code>ui/</code> ↔ <code>web/</code> 差异审计 + 修复报告</h1>
+<p class="sub">2026-09-18 · 触发问题：预发「历史消息不显示」；附加要求：选中会话执行中切左侧会话，不得中断切换前那个会话的执行。<br>
+审计对象：<span class="file">web/src/views/ChatPane.vue</span>、<span class="file">web/src/utils/{chatMessageCache,chatRunState}.ts</span> ↔ 参考实现 <span class="file">ui/src/pages/chat/*</span>。<br>
+本轮改了代码（4 个文件）并重建 <span class="file">web/dist</span>；构建、单测、冒烟均已复核。</p>
+
+<section id="tldr">
+<h2>结论摘要</h2>
+<div class="callout c-red"><b>「切换即中断」是客户端造成的，不是服务端。</b>服务端全程没有收到任何 <code>chat.abort</code>（<code>ChatPane.vue:2521</code> 只有「停止」按钮会发；网关侧 <code>abortActiveRunsForRestart</code> 只在重启时用，<code>src/gateway/server-close.ts:421</code>）。真实机制是：切走后前一个会话的<b>终止帧被前端过滤掉</b>，结果没落到任何地方，运行态又没人收，于是「回复不见 + 输入框卡在生成中」。</div>
+<div class="kpi">
+  <div><b>4 处</b><span>客户端缺陷（3 处影响历史显示，1 处影响运行态）</span></div>
+  <div><b>5 处</b><span>本轮改动（含 1 处老网关入参降级）</span></div>
+  <div><b>21 套</b><span>单测全绿（新增 2 组用例共 9 条断言）</span></div>
+  <div><b>7/7 · 12/12 · 22/22</b><span>分页 / 微信会话 / 窗格隔离冒烟</span></div>
+</div>
+<p>要点：</p>
+<ul>
+  <li>参考实现（<code>ui/</code>）在「非当前会话的 <code>final</code>」上<b>有两道兜底</b>：<code>runId</code> 命中就继续处理；处理不了也要把回复写进<b>该会话的消息缓存</b>。web 一道都没有。</li>
+  <li>web 的 <code>loadHistory</code> <b>没有请求版本闸</b>，异步响应回来时不校验「是否仍是我这个会话」；慢环境下连点两个会话，即可把 A 的历史写进 B 的视图、并被深 watch 以 B 为键写进缓存。</li>
+  <li>缓存命中路径<b>早退不联网</b>：上面那条毒缓存 + 「空列表也落缓存」会让会话在 60s TTL 内每次都空白，唯一出口是刷新按钮。这条与本轮的「历史不显示」直接对应。</li>
+</ul>
+</section>
+
+<section id="map">
+<h2>两条链路怎么走</h2>
+<h3>ui/（参考实现）</h3>
+<ol>
+  <li><code>chat.history</code>（若网关广告了 <code>chat.startup</code> 则优先用它，遇到 unknown method 再回退）→ <code>normalizeMessage</code> → 渲染。</li>
+  <li><b>请求版本守卫</b> + 同键去重：<code>chat-history.ts:82-106</code>（<code>beginChatHistoryRequest</code> / <code>shouldApplyChatHistoryResult</code>）、<code>:777-818</code>（in-flight 复用）。迟到的响应绝不写进当前视图。</li>
+  <li><b>按会话的消息缓存</b>：<code>session-message-cache.ts</code>；切换会话时 <code>chat-state.ts:319-367 resetChatStateForRouteSession</code> 先存旧的、再 <code>restoreChatMessagesForSession</code> 秒回，同时 <code>clearLocalRun</code> 清本地运行态。</li>
+  <li><b>跨会话事件兜底</b>：<code>chat-gateway.ts:156-177</code> —— 会话不匹配但 <code>runId</code> 属于自己发起的 run ⇒ 继续处理；否则对非当前会话的 <code>final</code> <code>appendCachedChatMessage(...)</code>，把回复写进那个会话的缓存后 <code>return null</code>。</li>
+</ol>
+<h3>web/（现实现）</h3>
+<ol>
+  <li><code>chat.history</code>（<code>limit:200, offset:0, maxChars:200000</code>）→ <code>normalizeMessage</code> → 过滤「无正文且无媒体」→ 渲染。</li>
+  <li>客户端缓存 <code>utils/chatMessageCache.ts</code>（60s TTL）+ 深 watch 同步；<code>historyHasMore/nextOffset</code> 支持向上翻页。</li>
+  <li>运行态按会话分桶放在组件外（<code>utils/chatRunState.ts</code>），修的是「点拆分视图打断任务」那个老问题。</li>
+</ol>
+</section>
+
+<section id="diff">
+<h2>ui / web 差异对照</h2>
+<table>
+<thead><tr><th>能力</th><th>ui/（参考）</th><th>web/（修复前）</th></tr></thead>
+<tbody>
+  <tr><td>取历史的方法</td><td><code>chat.startup</code> 优先，回退 <code>chat.history</code></td><td>只用 <code>chat.history</code>（可用，无回退需求）</td></tr>
+  <tr><td>请求参数</td><td><code>sessionKey / agentId / limit:100</code></td><td><code>limit:200 / offset:0 / maxChars:200000</code>（翻页 + 防截断，依赖较新 schema）</td></tr>
+  <tr><td>迟到响应守卫</td><td>版本号 + 会话比对 + 同键去重</td><td><b>无</b> → 串会话污染视图与缓存</td></tr>
+  <tr><td>消息缓存</td><td>按会话存，切换时存旧读新</td><td>按会话存（同源），但命中即早退不回源</td></tr>
+  <tr><td>空结果</td><td>不会写入空缓存</td><td><b>空列表也会落缓存</b>（深 watch 无条件写）</td></tr>
+  <tr><td>跨会话终止帧</td><td>写进该会话缓存（结果不丢）</td><td><b>直接丢弃</b></td></tr>
+  <tr><td>运行态收尾</td><td>切会话时清本地 run 态，不依赖后续帧</td><td>只靠 <code>finalizeStreaming()</code> → 帧丢了就永久 <code>sending=true</code></td></tr>
+  <tr><td>过滤口径</td><td>隐藏 NO_REPLY / 心跳 ack / 合成 tool result / 空用户文本</td><td>只隐藏「无正文且无媒体」（更宽，靠 normalize 兜住）</td></tr>
+</tbody>
+</table>
+</section>
+
+<section id="gap">
+<h2>web 的四个缺口（修复前，含证据）</h2>
+<ol>
+  <li><span class="badge b-red">运行态</span> 事件过滤只认 <code>sessionKey</code>：<span class="file">ChatPane.vue:2795-2803</span>（chat）与 <code>:2773</code>（agent thinking）。切到 B 后 A 的 delta <b>与终止帧 <code>final</code> 一起被丢</b> → A 内存态没有回复、缓存也停在切换那一刻。</li>
+  <li><span class="badge b-red">历史</span> <code>loadHistory</code> 无会话/版本守卫：<span class="file">ChatPane.vue:2188+</span> 在 <code>await</code> 之后直接 <code>messages.value = ...</code>。响应回来时若已切到 B，A 的历史进了 B 的视图；紧接着深 watch（<code>:441</code>）用<b>当前</b> sessionKey 当键写缓存 ⇒ B 的缓存被写成 A 的内容（A 为空时就是空）。</li>
+  <li><span class="badge b-red">历史</span> 空列表也落缓存：深 watch 无条件 <code>setChatMessageCache(key, [...list])</code>；切到冷会话时 <code>messages.value = []</code> 会先落一条空缓存（ts 刷新）。</li>
+  <li><span class="badge b-amber">历史</span> 缓存命中即早退、永不回源（<code>:2146-2157</code>）⇒ ② ③ 造出的毒/空缓存在 <code>TTL_MS = 60_000</code> 内每次切进去都空白，一个请求都不发。这就是「历史消息不显示」最直接的放大器。</li>
+</ol>
+</section>
+
+<section id="switch">
+<h2>「切会话不中断前一个会话的执行」结论</h2>
+<div class="callout c-red"><b>修复前：不满足。</b>服务端 run 没被中断（没有任何 abort 请求），但客户端把结果丢了 ⇒ 用户视角就是被中断。</div>
+<p>可观测的连锁反应（修复前后都值得记住这条链）：</p>
+<ol>
+  <li>A 的 <code>final</code> 被丢 → A 的回复不在内存、也不在缓存。</li>
+  <li>A 的运行态桶里 <code>sending</code> 永远是 <code>true</code>：全仓只有 <code>finalizeStreaming()</code> 会清它，而它只在「本会话收到终止帧」时被调；<code>resetChatRunState</code> 此前无人调用。</li>
+  <li>切回 A：60s 内命中旧缓存 → 回复缺失；输入框停在「正在生成」，回车走 <code>enqueuePendingTask()</code> 而不是发送，而 <code>scheduleNextPendingTask()</code> 只在事件里触发 ⇒ <b>该会话直到刷新页面都用不了</b>。</li>
+</ol>
+<p>服务端侧的证据：<span class="file">ChatPane.vue:2521</span> <code>abort()</code> 仅由模板 <code>@click="abort"</code>（<code>:4027</code>）触发；web 全文没有 <code>sessions.reset</code>；网关只在重启时 abort 活动 run。</p>
+</section>
+
+<section id="fix">
+<h2>本次修复</h2>
+<h3>1. 跨会话终止帧不再丢（对齐 ui <code>chat-gateway.ts:156-177</code>）</h3>
+<p><span class="file">web/src/utils/chatMessageCache.ts</span> 新增「后台会话终止回复暂存」：<code>noteBackgroundAssistantMessage</code> / <code>readBackgroundAssistantMessages</code> / <code>clearBackgroundAssistantMessages</code>（按稳定 id 去重、上限 20 条、<code>clearChatMessageCache</code> 连带清空）。<br>
+<span class="file">web/src/views/ChatPane.vue</span> 新增 <code>handleBackgroundSessionChatEvent</code>：<b>视图不动</b>，但把非当前会话的 <code>final</code> 按会话 key 暂存，并顺手归零那个会话的运行态。<br>
+刻意不处理 <code>aborted</code>：引导（<code>sessions.steer</code>）会先中断当前 run，那一瞬间同会话的另一个窗格正靠 <code>sending</code> 撑着「思考中」气泡；在别的窗格里归零会让被引导轮的 delta 被 <code>if (!sending.value) return</code> 丢掉。被引导的那一轮结束时同样走 <code>final</code>。</p>
+<h3>2. 运行态按会话归零</h3>
+<p><span class="file">web/src/utils/chatRunState.ts</span> 新增 <code>resetChatRunStateForSession(sessionKey, defaultAgentId)</code>：只收干净<b>已存在</b>的桶（不新建），键与创建时同源。</p>
+<h3>3. <code>loadHistory</code> 加请求版本闸 + 尾部保留</h3>
+<p>每次请求自增 <code>historyRequestSeq</code>，<code>await</code> 之后校验「序号仍是最后一次 + 规范化会话 key 未变」，不满足整包丢弃；<code>loadOlderHistory</code> 同样加了会话比对。<br>
+新增 <code>preserveLocalTailMessages</code>（简化版对齐 <code>ui/chat-history.ts:287</code>）：请求期间本地 push 的乐观气泡 / 刚落库的回复，服务端结果里没有就追加回去 —— 这正是「缓存命中后继续回源」引入的竞态，必须一起堵。</p>
+<h3>4. 缓存策略：不缓存空、命中后静默回源</h3>
+<p>深 watch 遇到 <code>list.length === 0</code> 直接 return；缓存命中仍然先秒回，但<b>不再 return</b>，继续走一次服务端回源（stale-while-revalidate）自愈毒缓存；失败/迟到一律不落缓存。</p>
+<h3>5. 老网关入参降级（针对预发的一条已知成因）</h3>
+<p><code>ChatHistoryParamsSchema</code> 是 <code>additionalProperties:false</code>（<span class="file">packages/gateway-protocol/src/schema/logs-chat.ts:30-39</span>）⇒ 前端产物比网关新时，<code>offset/maxChars</code> 会让整条请求被判 <code>INVALID_REQUEST: invalid chat.history params</code>，<b>一条历史都不显示</b>。<br>
+新增 <code>requestChatHistory</code>：命中该错误就退化成 <code>{ sessionKey, limit }</code> 再试一次（代价是拿不到 hasMore/nextOffset 与长正文放大，但历史能显示）。</p>
+</section>
+
+<section id="verify">
+<h2>验证矩阵</h2>
+<table>
+<thead><tr><th>项</th><th>命令 / 环境</th><th>结果</th></tr></thead>
+<tbody>
+  <tr><td>类型检查 + 构建</td><td><code>cd web &amp;&amp; CODEBUDDY_SAFE_DELETE_ENABLED=0 npm run build</code></td><td><span class="badge b-green">通过</span> vue-tsc 无错，vite 8.3s 出包，<code>web/dist</code> 已更新（18789 立即生效）</td></tr>
+  <tr><td>单测（全量）</td><td><code>npm run test:unit</code></td><td><span class="badge b-green">21 套全绿</span> 含新增：<code>chatRunState</code> [7] 5 条、<code>messageCacheSync</code> [5][6] 8 条</td></tr>
+  <tr><td>历史分页冒烟</td><td><code>APP_URL=http://127.0.0.1:18789 history-pagination.e2e.mjs</code></td><td><span class="badge b-green">7 passed / 0 failed</span> 请求签名仍是 <code>{limit:200,offset:0,maxChars:200000}</code>，渲染 10 条；翻页 SKIP（该会话未超一页）</td></tr>
+  <tr><td>窗格与 agent 隔离</td><td>同上 <code>pane-agent-isolation.e2e.mjs</code></td><td><span class="badge b-green">22 passed / 0 failed</span> 会话切换、per-pane 身份均未回归</td></tr>
+  <tr><td>微信会话（dev-only）</td><td><code>APP_URL=http://127.0.0.1:5273</code></td><td><span class="badge b-green">12 passed / 0 failed</span> 切到渠道会话后历史正常加载</td></tr>
+  <tr><td>同一用例跑生产 18789</td><td>同上但 18789</td><td><span class="badge b-amber">7/12</span> 失败的 5 条全是读 Vue 句柄为 null（生产构建剥掉 <code>__vueParentComponent</code>），属该用例既有的 dev-only 限制，非本次回归</td></tr>
+</tbody>
+</table>
+<div class="callout c-amber"><b>尚未做（需要一次真实生成）：</b>「A 正在生成 → 切到 B → 切回 A」的端到端验收。原因是：<code>chatRunState</code> 是模块内闭包，冒烟脚本无法从页面注入 <code>sending=true</code>；而 <code>chat.inject</code> 虽然能在不花 token 的情况下广播一条 <code>state:"final"</code>，但它同时会把消息<b>写进该会话 transcript</b>，无法区分「前端缓存救回来的」和「回源捞回来的」，证据不干净。真机验收步骤见下节。</div>
+</section>
+
+<section id="staging">
+<h2>预发取证（待你确认）</h2>
+<p>本轮修复覆盖的是客户端成因。预发若仍不显示，请按这个顺序取三份证据，基本能一眼定位：</p>
+<ol>
+  <li><b><code>chat.history</code> 的响应</b>（devtools → Network → WS → 帧）：<br>
+    • 返回 <code>INVALID_REQUEST: invalid chat.history params...</code> ⇒ 就是「前端比网关新」，本次的降级逻辑已经能救；根治要把网关升到同版本。<br>
+    • 返回 <code>UNAUTHORIZED / missing scope operator.read</code> ⇒ 预发 token 权限比本机窄（<code>ui/</code> 对这条有专门文案，web 没有）。<br>
+    • 返回 <code>messages: []</code> ⇒ 查 <code>sessionKey</code> 是不是空 / 与用户看到的会话不是同一条。</li>
+  <li><b>网关版本</b>：<code>chat.history</code> 是否支持 <code>offset</code> / <code>maxChars</code>（本仓 <code>packages/gateway-protocol/src/schema/logs-chat.ts:30</code> 是支持的那一版）。</li>
+  <li><b>页面 console</b>：是否有 <code>加载会话历史失败：…</code> 的 toast —— 修复前请求失败是「静默空列表 + toast」，很容易被当成空会话。</li>
+</ol>
+<h3>真机验收（切走不中断）</h3>
+<ol>
+  <li>在会话 A 发一条会跑几秒的消息（例：让它写个稍长的回答），保持气泡「思考中」。</li>
+  <li>点左侧栏切到会话 B，等 A 那条跑完。</li>
+  <li>切回 A：<b>回复必须在</b>（本次修复前会缺，或只在切回后再点刷新才出现）。</li>
+  <li>在 A 直接回车再发一条：必须<b>直接发出</b>（修复前因为 <code>sending</code> 卡住，只会进「待执行」队列）。</li>
+</ol>
+</section>
+
+<section id="risk">
+<h2>遗留与风险</h2>
+<ul>
+  <li><span class="badge b-blue">有意为之</span> 切走后 A 的 <b>delta 仍然丢弃</b>（与 ui 一致）：回来时看不到「切走期间逐字生成」的过程，只保证最终回复在。要连过程都留住，需要把流式累积也按会话分桶（<code>chatRunState</code> 已有桶，但当前只在窗格挂载时写入）。</li>
+  <li><span class="badge b-blue">性能</span> 缓存命中后多一次 <code>chat.history</code> 请求（SWR 的代价），换来的是毒/空缓存自愈。</li>
+  <li><span class="badge b-blue">降级</span> 老网关降级路径拿不到 <code>hasMore/nextOffset</code>，「加载更早历史」在该网关上不可用（本来就是）。</li>
+  <li><span class="badge b-amber">未覆盖</span> <code>aborted</code> 不做跨会话归零（原因见修复 1）；多客户端场景下若别的客户端 abort 了 A，本端切走时 A 的 <code>sending</code> 仍需切回后靠一次正常流式帧纠正。</li>
+  <li><span class="badge b-amber">测试</span> <code>pane-wechat-session.e2e.mjs</code> 依赖 Vue 句柄，只能跑 dev 5273；生产基线请以 DOM/文本断言为准。</li>
+</ul>
+</section>
+
+<footer>生成于本轮会话 · 证据以 <span class="file">web/src/**</span> 与 <span class="file">ui/src/pages/chat/**</span> 的行号为准 · 详细过程记录见 <span class="file">.workbuddy/memory/2026-09-18.md</span></footer>
+
+</main>
+</div>
+</body>
+</html>
