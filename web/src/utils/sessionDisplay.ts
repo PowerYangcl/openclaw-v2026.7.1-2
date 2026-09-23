@@ -34,6 +34,17 @@ const CHANNEL_LABELS: Record<string, string> = {
 const KNOWN_CHANNEL_KEYS = Object.keys(CHANNEL_LABELS);
 
 /**
+ * 这个字符串是不是**已知渠道段**（`wechat` / `telegram` / `openclaw-weixin`…）。
+ *
+ * 给调用方判「某个会话 key 的 rest 段是渠道而不是主会话标记」用 —— 例如窗格头
+ * 在把主会话改写成 agent 名之前，必须先排除 `agent:<id>:wechat` 这种**渠道会话键**，
+ * 否则渠道行会被误改成 agent 名。渠道清单只在本文件维护，别在调用方再抄一份。
+ */
+export function isKnownChannelSegment(value: string): boolean {
+  return KNOWN_CHANNEL_KEYS.includes(value.trim().toLowerCase());
+}
+
+/**
  * 裸渠道联系人 key：`o9cq802Wwly5Q2a-jZ90V3y0lxrE@im.wechat`。
  *
  * 这是微信这类渠道的**历史形态**会话 key —— 没有 `agent:<id>:` 前缀，

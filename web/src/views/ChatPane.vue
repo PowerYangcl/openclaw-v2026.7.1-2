@@ -34,6 +34,8 @@ import { useAgentsStore } from "@/stores/agents";
 import { formatTime, formatDateTimeMinute } from "@/utils/format";
 import { sessionKeysMatch, qualifySessionKey } from "@/utils/sessionListSelection";
 import { isCanonicalMainSessionKey } from "@/utils/canonicalSession";
+import { normalizeAgentId, parseAgentSessionKey } from "@/utils/sessionKey";
+import { isKnownChannelSegment } from "@/utils/sessionDisplay";
 import {
   clearBackgroundAssistantMessages,
   clearChatMessageCache,
@@ -2144,16 +2146,60 @@ const sessionRows = ref<SessionsListResult["sessions"]>([]);
  *     拿不到 label / displayName，`sessionDisplayNameFor` 回落成裸 id。
  *
  * 其余会话（渠道联系人 / cron / 带 label 的子会话…）保持原解析结果不动。
+ *
+ * ⚠️ 判「规范主会话」时必须带上网关的 `agents.mainKey`：不带就按缺省 `main` 比，
+ * 网关侧配了别的 mainKey（`agent:<id>:index`）时形态判定会**静默失败** ——
+ * 于是又落回 `sessionDisplayNameFor` 的「主会话」，即本次要消除的现象原样复现。
+ * （预发实测：`origin/feature_web_930` 的 `isCanonicalMainSessionKey(key)` 就是这一版，
+ * 四个 agent 的窗格头 + 下拉四行全是「主会话」。）
+ *
+ * ⚠️ 但**只靠 `mainKey` 还不够**：它在冷启动窗口内还是缺省值（`agents.list` 没回来、
+ * 本地侧栏快照缺失），网关 mainKey 不是 `main` 时这一窗口内形态判定同样静默失败。
+ * 所以补第二道 `isAgentMainSessionKeyShape()`（与 mainKey 无关）兜住这个窗口。
  */
 function paneSessionOptionLabel(
   key: string,
   row?: { label?: string; displayName?: string } | null,
   agentId = "",
 ): string {
-  if (isCanonicalMainSessionKey(key)) return agents.nameForAgent(agentId);
+  if (isCanonicalMainSessionKey(key, agents.mainKey)) return agents.nameForAgent(agentId);
+  if (isAgentMainSessionKeyShape(key, agentId)) return agents.nameForAgent(agentId);
   const name = agents.sessionDisplayNameFor(key, row);
   if (name && name !== key && !ENTRY_SESSION_ID_RE.test(name)) return name;
   return agents.nameForAgent(agentId);
+}
+
+/**
+ * 与 `agents.mainKey` **无关**的宽松判定：这个 key 像不像「该 agent 的主会话」。
+ *
+ * 存在的唯一理由就是上一段那个冷启动窗口：`agents.mainKey` 在 `agents.list` 回来之前
+ * 只是缺省 `main`，而 `isCanonicalMainSessionKey` 会拿它去拼期望 key —— 网关 mainKey 若
+ * 不是 `main`，期望值与真实 key 永远对不上，判定恒 `false`，静默回落「主会话」。
+ *
+ * 判定**刻意偏保守**（三步拦，宁可放过去当普通会话，也不误改别人的会话名）：
+ *  1. key 的 agentId 段必须与调用方给的 agentId 一致 —— 下拉是跨 agent 分组的，
+ *     不能把别的 agent 的会话算成自己的主会话；
+ *  2. `rest` 段含第二个 `:` ⇒ 一定是 `cron:…` / `:subagent:` / 渠道 `wechat:direct:…`，
+ *     以及 `id-<hash>` 入口指纹、已知渠道段（`agent:<id>:wechat`）—— 全部排除；
+ *     这些形态都有各自的文案，绝不能被改写成 agent 名；
+ *  3. `agents.list` 已回来（`agents.loaded`）时**只认空 rest / `main` / `agents.mainKey`**：
+ *     此时 mainKey 可信，第一道判定本来就该命中；再放宽会把 `agent:<id>:work`
+ *     这类**具名会话**误改成 agent 名。只有 mainKey 还不可信时才放开到「单段即认」。
+ */
+function isAgentMainSessionKeyShape(key: string, agentId: string): boolean {
+  const parsed = parseAgentSessionKey(key);
+  if (!parsed) return false;
+  const want = normalizeAgentId(agentId);
+  if (!want || normalizeAgentId(parsed.agentId) !== want) return false;
+
+  const rest = parsed.rest.trim().toLowerCase();
+  if (!rest) return true; // `agent:<id>:`（旧形态）
+  if (rest === "main") return true; // 缺省口径
+  if (rest === normalizeAgentId(agents.mainKey)) return true; // 网关 mainKey 就绪时
+  if (rest.includes(":")) return false; // cron / subagent / 渠道 direct·group
+  if (ENTRY_SESSION_ID_RE.test(rest)) return false; // 入口 token 指纹
+  if (isKnownChannelSegment(rest)) return false; // `agent:<id>:wechat` 这类渠道键
+  return !agents.loaded; // mainKey 还不可信时，单段 rest 只能按主会话处理
 }
 
 /** 入口 token 会话的裸 id 形态：`id-<hash>`（旧下拉里「id-09fb9e55」那一行）。 */
@@ -4006,39 +4052,31 @@ function handleEvent(evt: { event: string; payload?: unknown }): void {
       streamingSpend.value = null;
       spendPending.value = false;
       sending.value = false;
-      // ⚠️ 生成失败**不弹窗**（2026-09-21 口径）：本轮失败不必弹 `ElMessage`。
+      // ⚠️ 生成失败 = **完全静默**（2026-09-23 用户口径，第九轮）：不弹窗、**不落消息**。
       // 依据：能走到这里的文案绝大多数对用户不可行动（会话接管 / 供应商抖动 /
       // 上游未分类的 `Agent run failed` …），弹出来只会让用户以为「自己操作错了」
       // 或「产品坏了」—— 弹窗比不提示更容易误导。
       //
-      // ⚠️⚠️ 但「不弹窗」**不等于「什么都不显示」**（这条是踩过坑补的）：
-      // 流式气泡整体挂在 `v-if="sending"` 上，上面那行 `sending.value = false` 会把
-      // 思考中三 dot + 流式正文**整块打掉**。于是删掉弹窗之后，失败现场变成
-      // 「消息下面一片空白」—— 用户既不知道失败了，也分不清是网关挂了还是自己没点到，
-      // 排查时只能靠控制台（普通用户根本不会开）。这比弹窗更糟。
+      // ⚠️ 这里曾经落过一条「普通助手消息」当失败落点（2026-09-21 二轮），**本轮已删**。
+      // 删除理由（用户明确要求「气泡消息不显示生成失败的消息」）：
+      //   ① 气泡 = 助手说的话。把网关错误原文（走 `chatErrorCopy.ts` 兜底时是英文
+      //      `Agent run failed` 之类）当成一轮回复塞进会话流，用户会当成模型在说话；
+      //   ② 它只活在内存里（网关侧没有这一轮消息，刷新后 `chat.history` 不会带回来）
+      //      ⇒ 既污染了对话，又提供不了可复查的记录，两头不占；
+      //   ③ 界面上「有没有失败」仍可从「流式气泡消失 + 输入框回到可发送」判读。
+      // ⚠️ 唯一保留的落点是**控制台留痕**（`console.warn`，按 `[chat-pane]` 过滤），
+      // 所以这条 warn 是排查的唯一入口，**不能删**。
       //
-      // 落点（2026-09-21 二轮口径）：**一条普通助手消息** —— 与真实回复同款式
-      // （同 row / 头像 / content 结构 + MarkdownView），刻意不再用 `.chat-failure-notice`
-      // 那张专用卡片（「会话中不展示 chat-failure-notice」是明确要求）。
-      // ⚠️ 它只活在内存里：网关侧根本没有这一轮消息，刷新后 `chat.history` 不会带回来，
-      // 所以控制台留痕（③）不能省。三件事一件都不能少：
-      //   ① 状态复位 —— 少了 `sending=false` / 清流式，气泡会永远停在「思考中」；
-      //   ② 助手消息落点 —— 失败必须有处可寻；
-      //   ③ 控制台留痕 —— 分类后的中文标题 + 网关原文，排查按 `[chat-pane]` 过滤。
-      //
-      // 需要恢复弹窗时：把下面这段换成
-      //   `ElMessage({ message: formatFriendlyError(friendly), type: "error",
-      //     duration: friendly.retryable ? 4500 : 6500, grouping: true })`
-      // 并把 `formatFriendlyError` 加回本文件顶部 import（`noUnusedLocals` 会拦住漏改）。
+      // ⚠️ 状态复位一行都不能少：少了 `sending=false` / 清流式，气泡会永远停在「思考中」。
+      // 要恢复提示时二选一（`formatFriendlyError` 需同时加回顶部 import，`noUnusedLocals` 会拦住漏改）：
+      //   a) 弹窗：`ElMessage({ message: formatFriendlyError(friendly), type: "error",
+      //      duration: friendly.retryable ? 4500 : 6500, grouping: true })`
+      //   b) 消息落点：`messages.value.push({ id: \`assistant-error-${Date.now()}\`,
+      //      role: "assistant", text: friendly.detail ? \`${friendly.title}\n\n${friendly.detail}\`
+      //      : friendly.title, ts: Date.now() })`（⚠️ 口径上已否决，见上）
       const friendly = localizeChatError(payload.errorMessage ?? "");
-      messages.value.push({
-        id: `assistant-error-${Date.now()}`,
-        role: "assistant",
-        text: friendly.detail ? `${friendly.title}\n\n${friendly.detail}` : friendly.title,
-        ts: Date.now(),
-      });
       void scrollToBottom();
-      console.warn("[chat-pane] 生成失败（不弹窗，落成一条助手消息）", {
+      console.warn("[chat-pane] 生成失败（完全静默：不弹窗、不落消息，仅留痕）", {
         sessionKey: payload.sessionKey,
         runId: payload.runId,
         title: friendly.title,

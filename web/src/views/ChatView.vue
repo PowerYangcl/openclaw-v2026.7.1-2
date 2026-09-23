@@ -71,8 +71,10 @@ import { useAgentsStore } from "@/stores/agents";
 import type { ChatMessage } from "@/types/chat";
 import {
   canonicalMainSessionKey,
-  needsSessionQueryNormalize,
+  resolveSessionParam,
+  type SessionResolveOptions,
 } from "@/utils/canonicalSession";
+import { normalizeAgentId, parseAgentSessionKey } from "@/utils/sessionKey";
 import {
   PANE_DRAG_MIME,
   PANE_DROP_EDGE_PX,
@@ -162,27 +164,137 @@ function onWindowKeydown(event: KeyboardEvent): void {
  *
  * 刻意用 `||` 而不是 `??`：`?session=` 与 store 值都可能是空串（空串不是 nullish，
  * 用 `??` 会让空串穿透），而网关的 `chat.history` / `chat.send` 都要求至少 1 个字符。
+ *
+ * ## 入口 agent 由链接决定（2026-09-23 改造）
+ * `?session=` 支持**裸 agentId**（`study-abroad-consultant`）——上游控制台签发的链接就是
+ * 这个形态，会被解析成 `agent:study-abroad-consultant:<mainKey>`。
+ *
+ * 链接**没带** `session` 时落到 **chat 页的首个会话** = 侧栏（`agents.agents`）第一条
+ * 对应的 agent —— 与用户进页面后看到的「第一行」是同一个东西。
+ * 表还没回来（快照也没有）时才退到网关 `agents.defaultId`；再没有就是空串
+ * （见 `sessionOptions()` 与下面那个「表回来后重新收敛」的 watch）。
+ *
+ * ⚠️ 链接**带了** `session` 却读不出 agent（旧书签 `id-<hash8>`、渠道键 `wechat`、
+ * 裸 `main`）时**等同于没带**：这类值映射不到任何会话，若照原样当候选，它会顶掉
+ * 「首个会话」兜底，还会让地址栏一直挂着一条网关侧根本没有的 key。
+ * 判定复用 `resolveSessionParam`（与真正写 session 时同一套规则），不另立口径。
  */
 const currentSessionKey = computed<string>(() => {
   const fromRoute = typeof route.query.session === "string" ? route.query.session.trim() : "";
-  return canonicalMainSessionKey(fromRoute || settings.sessionKey, agents.mainKey);
+  const usableFromRoute = resolveSessionParam(fromRoute, sessionOptions()) ? fromRoute : "";
+  return canonicalMainSessionKey(usableFromRoute || settings.sessionKey, sessionOptions());
 });
 
 /**
- * 把地址栏的 `session` 拉回规范形态（缺失 / 空 / `id-<hash8>` / 子会话…）。
+ * 「入口会话」的候选来源 —— 全部取自运行时，**没有任何写死的 agent**。
+ *
+ * `firstAgentId` 取侧栏列表第一条：`agents.agents` 直接来自 `agents.list`（网关顺序，
+ * 前端不重排），侧栏 `v-for="agent in agents.agents"` 也是同一个数组 ⇒
+ * 「首个会话」在数据层与视觉层严格一致。
+ */
+function sessionOptions(): SessionResolveOptions {
+  return {
+    mainKey: agents.mainKey,
+    firstAgentId: agents.agents[0]?.id ?? null,
+    defaultAgentId: agents.defaultId,
+  };
+}
+
+/**
+ * 网关 `agents.list` 里有没有这个 agent。
+ *
+ * ⚠️ 只在**已就绪**（`agents.loaded`）时才敢判「不存在」：冷启动窗口内表还是空的，
+ * 那时把链接里的 agent 判成不存在会直接把用户踢走。
+ * 表就绪后仍查不到 ⇒ 该 agent 的会话在侧栏与发送守卫里都是不可达的
+ * （守卫只认 `cfg.agents.list`），继续停在它上面只会得到一个发不出消息的空窗格。
+ */
+function agentExistsInGateway(agentId: string): boolean {
+  if (!agents.loaded) return true;
+  const want = normalizeAgentId(agentId);
+  return agents.agents.some((row) => normalizeAgentId(row.id) === want);
+}
+
+/**
+ * 兜底修正：当前 agent 不在网关的 agent 表里 ⇒ 换用**首个会话**（不是某个写死的 agent）。
+ *
+ * 返回空串表示「不用改」。覆盖两种情形：
+ * - 链接指向的 agent 已下线 / 被改名；
+ * - 冷启动时用了本地快照里**已经过期**的「第一条」，表回来后要校正。
+ *
+ * 刻意只改**入口落地**这一次（由 `normalizeSessionQuery` 调用），不在 computed 里做 ——
+ * computed 里改值会让地址栏在每次 `agents.list` 刷新时都可能被重写一次，那不是用户动作。
+ */
+function resolveUnreachableAgentSession(key: string): string {
+  const parsed = parseAgentSessionKey(key);
+  if (!parsed || agentExistsInGateway(parsed.agentId)) return "";
+  const fallback = canonicalMainSessionKey(null, sessionOptions());
+  return fallback && fallback !== key ? fallback : "";
+}
+
+/**
+ * 把地址栏的 `session` 拉回规范形态（缺失 / 空 / 裸 `main` / `id-<hash8>` / 子会话…），
+ * 并顺带把 store 与地址栏对齐。
  *
  * 只在**需要改写**时动 URL，且用 `replace`：这是「把异常值拉回规范」的兜底，
  * 不是用户主动切换（那种走 `setCurrentSession` 的 `push`，保留后退）。
  * 于是外部链接里的 `?session=agent:cet4:id-4daf4b7d` 一进来就会被改写为
  * `?session=agent:cet4:main`，而地址栏不会堆出一条「改写前」的历史。
+ *
+ * ⚠️ 同时写 store：入口只改地址栏的话，`settings.sessionKey` 会停在旧值，
+ * 侧栏高亮 / 窗格布局与「正在看的会话」就分叉了。
+ *
+ * ⚠️ `key` 为空 = 「还没定下来」（`agents.list` 与快照都没有 agent）⇒ **什么都不做**：
+ * 既不能把空串写进 store / 地址栏，也不能让 `ChatPane` 拿到空 prop
+ * （它会自己退到 `main`，那是一条并不存在的会话）。
+ * 这种情况由下面的 watch 在表回来后重试。
+ *
+ * 唯一的例外是地址栏挂着一条**读不出 agent** 的 `session`（旧书签 `id-<hash8>`、
+ * 渠道键 `wechat`、裸 `main`）：它既不是用户的选择、也映射不到任何会话，
+ * 留着只会让地址栏永远挂着一条解释不了的 key —— 摘掉它（`currentSessionKey` 已经
+ * 把这类值等同于「没带」，所以摘掉不会改变当前会话）。
  */
 function normalizeSessionQuery(): void {
-  if (!needsSessionQueryNormalize(route.query.session, agents.mainKey)) return;
+  const key = resolveUnreachableAgentSession(currentSessionKey.value) || currentSessionKey.value;
+  if (!key) {
+    // `!key` 且地址栏有值 ⇒ 一定是「读不出 agent」的脏值（能读出来 key 就不会为空）。
+    const raw = typeof route.query.session === "string" ? route.query.session.trim() : "";
+    if (!raw) return;
+    const query = { ...route.query };
+    delete query.session;
+    void router.replace({ path: route.path, query });
+    return;
+  }
+
+  // 地址栏与 store 必须一起改：只改地址栏的话，侧栏高亮 / 窗格布局与
+  // 「正在看的会话」会分叉（下次进来还会显示上一个顾问）。
+  if (settings.sessionKey !== key) settings.setSessionKey(key);
+
+  // 地址栏已经等于最终 key ⇒ 形态已规范，不必进历史。
+  // 这条等价于旧的 `!needsSessionQueryNormalize(...)` 判断，但不会在
+  // 「形态规范、agent 却不可达」时误判成「无事可做」。
+  if (route.query.session === key) return;
   void router.replace({
     path: route.path,
-    query: { ...route.query, session: currentSessionKey.value },
+    query: { ...route.query, session: key },
   });
 }
+
+/**
+ * 「还没定下来」或「定错了」时再收敛一次 —— 入口会话依赖**运行时**的 agent 列表
+ * （chat 页首个会话 = `agents.list` 第一条），而它晚于首屏到达：
+ *
+ * - 冷启动且本地没有侧栏快照 ⇒ `currentSessionKey` 先是空串，表回来后才能落到首个会话；
+ * - 快照里的「第一条」在网关侧已经不存在 ⇒ `normalizeSessionQuery` 换到当前的首个会话；
+ * - 网关 `mainKey` 与快照里不一致 ⇒ 规范 key 的尾段要跟着纠正。
+ *
+ * ⚠️ 收敛本身是**幂等、且只在有差异时写**的（比 `route.query.session` 与
+ * `settings.sessionKey`），所以用户主动切换（侧栏 / 窗格下拉 / 打开拆分视图）
+ * 不会被这里覆盖 —— 那时地址栏已经带着目标 `session`。
+ */
+watch(
+  () => [agents.loaded, agents.agents[0]?.id ?? "", agents.mainKey, agents.defaultId] as const,
+  () => normalizeSessionQuery(),
+);
 
 // ---------------------------------------------------------------------------
 // 拆分视图布局
@@ -231,7 +343,7 @@ function persistLayout(next: ChatSplitLayout | undefined): void {
 function normalizeLayoutSessions(source: ChatSplitLayout): ChatSplitLayout {
   let next = source;
   for (const pane of panesOf(source)) {
-    const key = canonicalMainSessionKey(pane.sessionKey, agents.mainKey);
+    const key = canonicalMainSessionKey(pane.sessionKey, sessionOptions());
     if (pane.sessionKey !== key) next = setPaneSession(next, pane.id, key);
   }
   return next;
@@ -332,7 +444,7 @@ watch(
  * 名下堆出多条会话的来源。会话 key 的唯一写入口也在这里 / `settings.setSessionKey`。
  */
 function setCurrentSession(nextSessionKey: string, replace = false): void {
-  const key = canonicalMainSessionKey(nextSessionKey, agents.mainKey);
+  const key = canonicalMainSessionKey(nextSessionKey, sessionOptions());
   if (settings.sessionKey !== key) {
     settings.setSessionKey(key);
   }
@@ -361,7 +473,7 @@ function handleFocusPane(paneId: string): void {
  */
 function handlePaneSessionChange(paneId: string, nextSessionKey: string): void {
   const current = layout.value;
-  const key = canonicalMainSessionKey(nextSessionKey, agents.mainKey);
+  const key = canonicalMainSessionKey(nextSessionKey, sessionOptions());
   if (!current) {
     setCurrentSession(key);
     return;

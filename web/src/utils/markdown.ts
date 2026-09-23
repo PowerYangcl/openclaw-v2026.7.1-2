@@ -405,6 +405,9 @@ function renderCodeBlockHtml(text: string, lang: string): string {
 // 单一共享实例 — markdown-it 配置与上游 markdown.ts 对齐
 //  - html: true 开启 HTML 识别（再由下面的 renderer rules 把 html_block / html_inline 转义）
 //  - breaks: true 把单个换行渲染成 <br>（与 marked.js 行为一致）
+//    ⚠️ 段落内的「孤立换行」在进 markdown-it 之前已被 `mergeSoftLineBreaks()` 合并掉，
+//    所以 breaks 现在只对**结构边界**（列表 / 代码围栏 / 表行 / 标题 / MEDIA 行…）真正生效 ——
+//    中文正文里模型偶发的一句一换行不会再上屏成 <br>（2026-09-23 用户口径，详见该函数注释）。
 //  - linkify: true 自动识别 URL
 const md = new MarkdownIt({
   html: true,
@@ -448,6 +451,120 @@ md.renderer.rules.image = (tokens, idx) => {
 // GFM task list 复选框：display-only（disabled），不开 label 包裹（label 内嵌链接会破 a11y）
 md.use(markdownItTaskLists, { enabled: false, label: false });
 
+/** 围栏开始/结束行（``` / ~~~）—— 代码块内的换行是内容，绝不合并。 */
+const SOFT_BREAK_FENCE_RE = /^(?:`{3,}|~{3,})/;
+
+/**
+ * 结构行：标题 / 引用 / 列表项 / 表行 / 分隔线。
+ * ⚠️ 列表与分隔线的标记必须**后接空白或行尾**，否则 `**加粗**`、`*斜体*`、`----` 这类
+ * 行首会被误判成列表标记。
+ */
+const SOFT_BREAK_STRUCT_RE =
+  /^(?:#{1,6}(?:\s|$)|>(?:\s|$)|[-*+](?:\s|$)|\d+[.)](?:\s|$)|\||(?:-{3,}|\*{3,}|_{3,})\s*$)/;
+
+/** 行首 4 空格 / Tab = 缩进代码块或列表续行，保持原样（⚠️ 判的是**原始行**，不是去掉左空白后的）。 */
+const SOFT_BREAK_INDENT_RE = /^(?:\t| {4,})/;
+
+/**
+ * 行内含 `MEDIA:` 投递标记。
+ * ⚠️ 连续两条 `MEDIA:` 行若被合到同一行，会产出「同一行多条 MEDIA:」的病态输入
+ * （`mediaMarker.ts` 为它专门加固过：可能出现假 URL 或整行原文泄漏）⇒ 别把好输入喂成病态输入。
+ */
+const SOFT_BREAK_MEDIA_RE = /\bMEDIA:/i;
+
+/** 全角/汉字（含中文标点、全角符号），用于决定合并时**补不补空格**。 */
+const FULL_WIDTH_RE = /[\u3000-\u303f\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\ufe30-\ufe4f\uff00-\uffef]/;
+
+/**
+ * @param raw 原始行（带左空白）
+ * @param trimmed 去掉左空白后的行（块级标记按 CommonMark 允许最多 3 个前导空格）
+ */
+function isStructuralSoftBreakLine(raw: string, trimmed: string): boolean {
+  return (
+    SOFT_BREAK_FENCE_RE.test(trimmed) ||
+    SOFT_BREAK_STRUCT_RE.test(trimmed) ||
+    SOFT_BREAK_INDENT_RE.test(raw)
+  );
+}
+
+/**
+ * 把「段落内的**孤立换行**」合并掉 —— 合并后 markdown-it 不再把它渲染成 `<br>`。
+ *
+ * ## 为什么需要（2026-09-23，用户截图）
+ * 气泡里出现 `没问题 ⏎ ，小主～…`：换行位置**来自 agent 正文自己的 `\n`**
+ * （实测全库 1008 条助手正文命中 2 例：`你好\n！…`、`没问题\n，…`），
+ * web 侧本来只是把它显示成换行（`breaks: true`，与上游 `ui/src/components/markdown.ts` 同款）。
+ * 用户口径 = **最大化合并**：中文正文里所有「不以空行分隔」的单换行都不再产生 `<br>`。
+ *
+ * ## 合并成什么
+ * 换行两侧都是全角字符 ⇒ **不补空格**（`没问题\n，` → `没问题，`）；
+ * 其余（英文单词被换行切开）⇒ **补一个空格**（`hello\nworld` → `hello world`），
+ * 与 CommonMark 的软换行语义一致。
+ *
+ * ## 五类**不合并**（结构 / 语义保护，都不是「正文里的换行」）
+ * 1. 空行边界（`\n{2,}`）—— 段落分隔，合了就丢段落；
+ * 2. 围栏代码块内部（``` / ~~~）—— 代码里的换行是内容；
+ * 3. 本行或下一行是结构行（标题 / 引用 / 列表 / 表行 / 分隔线 / 行首 4 空格或 Tab）
+ *    —— 合了会吃掉一个 bullet、标题或表行；
+ * 4. 显式硬换行（行尾两个空格或反斜杠）—— 那是明确要的换行；
+ * 5. 涉及 `MEDIA:` 的行（见 `SOFT_BREAK_MEDIA_RE`）。
+ *
+ * ⚠️ **调用点只有两处**（`toSanitizedMarkdownHtml` / `toStreamingMarkdownHtml`），
+ * 且必须在 `convertPseudoTableToGfm()` **之后** —— 伪表格靠「连续单换行」的行结构识别，
+ * 先合并就再也不是表格了。
+ * ⚠️ 只作用在**展示层**：不写回消息、不喂给 `splitMediaMarkers()`（媒体按原文解析）。
+ */
+export function mergeSoftLineBreaks(text: string): string {
+  if (!text.includes("\n")) return text;
+
+  const lines = text.split("\n");
+  let inFence = false;
+  let out = "";
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const raw = lines[index];
+    const isFenceLine = SOFT_BREAK_FENCE_RE.test(raw.trim());
+    if (isFenceLine) inFence = !inFence;
+
+    if (index === lines.length - 1) {
+      out += raw;
+      break;
+    }
+
+    const current = raw.replace(/[ \t]+$/, "");
+    const nextRaw = lines[index + 1];
+    const next = nextRaw.replace(/^[ \t]+/, "");
+    const keepBreak =
+      isFenceLine ||
+      inFence ||
+      current === "" ||
+      next === "" ||
+      isStructuralSoftBreakLine(current, current) ||
+      isStructuralSoftBreakLine(nextRaw, next) ||
+      /[ \t]{2,}$/.test(raw) ||
+      /\\$/.test(current) ||
+      SOFT_BREAK_MEDIA_RE.test(current) ||
+      SOFT_BREAK_MEDIA_RE.test(next);
+
+    if (keepBreak) {
+      out += `${raw}\n`;
+      continue;
+    }
+
+    const prevChar = current.slice(-1);
+    const nextChar = next.slice(0, 1);
+    const joiner =
+      prevChar && nextChar && FULL_WIDTH_RE.test(prevChar) && FULL_WIDTH_RE.test(nextChar)
+        ? ""
+        : " ";
+    out += `${current}${joiner}`;
+    // 下一行已并入本行，丢掉它的左空白（否则合并后凭空多出缩进）
+    lines[index + 1] = next;
+  }
+
+  return out;
+}
+
 export type MarkdownRenderOptions = {
   codeBlockChrome?: "copy" | "none";
   fileLinks?: boolean;
@@ -478,7 +595,8 @@ export function toSanitizedMarkdownHtml(
   if (!input) return "";
 
   const normalized = convertPseudoTableToGfm(input);
-  const truncated = truncateInput(normalized);
+  // ⚠️ 顺序不能换：合并必须在伪表格转换**之后**（`mergeSoftLineBreaks` 的注释里写了原因）
+  const truncated = truncateInput(mergeSoftLineBreaks(normalized));
 
   let rendered: string;
   try {
@@ -496,6 +614,9 @@ export function toSanitizedMarkdownHtml(
  * 流式渲染：先找稳定边界（最后一个空行 / 闭合围栏之后），
  * 稳定部分走完整 sanitize，尾部按纯文本转义追加。
  * 对齐上游 `toStreamingMarkdownHtml`。
+ *
+ * ⚠️ 入口先过一遍 `mergeSoftLineBreaks()`：稳定段与纯文本尾部**共用同一份合并结果**，
+ * 否则同一行会在稳定段（已合并）与尾部（未合并）之间来回跳。
  */
 export function toStreamingMarkdownHtml(
   markdown: string,
@@ -504,7 +625,7 @@ export function toStreamingMarkdownHtml(
   const raw = (markdown || "").replace(/\r\n?/g, "\n");
   if (!raw.trim()) return "";
 
-  const input = raw.trim();
+  const input = mergeSoftLineBreaks(raw.trim());
   const boundary = findStableStreamingMarkdownBoundary(input);
   if (boundary <= 0) {
     // 还没遇到稳定边界（连第一段都没结束），整段按纯文本展示，避免半截渲染闪烁

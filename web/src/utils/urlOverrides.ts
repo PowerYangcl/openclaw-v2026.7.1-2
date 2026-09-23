@@ -14,7 +14,7 @@
  *
  * 因此：**必须在创建 router 之前、且只执行一次**。入口见 `src/router/index.ts`。
  */
-import { entryChatPath } from "@/utils/canonicalSession";
+import { resolveSessionParam } from "@/utils/canonicalSession";
 /**
  * 需要从地址栏抹掉的**敏感**参数。
  *
@@ -140,15 +140,31 @@ export function getEntryIntent(): EntryIntent {
 }
 
 /**
- * 入口意图对应的落地路径，供路由 `/` 的 redirect 与登录后跳转复用。
+ * 入口落地路径，供路由 `/` 的 redirect 与登录后跳转复用。
  *
  * 产品调整（2026-09-17）：落地页统一为 `/chat`，不再区分入口意图 —— 侧栏只保留「对话」，
  * 概览页不再作为默认首页。`getEntryIntent()` 仍保留，用于描述这次访问的来源。
  *
- * 会话口径（2026-09-23）：落地路径**带默认会话参数**
- * （`chat?session=agent:resume-assistant:main`）—— 首屏地址栏就已经是最终形态，
- * 不需要等 `ChatView` 挂载后再改写一次（那会出现「URL 闪一下」的观感）。
+ * ## 会话参数（2026-09-23 改造）
+ *
+ * ⚠️ 这里曾**写死** `chat?session=agent:resume-assistant:main`，后果是上游控制台发来的
+ * `?session=study-abroad-consultant` 被整条丢弃 —— `redirect` 返回的是**完整目标地址**，
+ * 回到 `/chat?...` 就等于把原 query 换掉，用户点 A 顾问的链接会落到 B 顾问的会话。
+ *
+ * 现在按「链接带没带 `session`」分两种：
+ * 1. **带了** ⇒ 就地解析成规范主会话（裸 agentId 也认）并写进目标地址。
+ *    放在 redirect 里做的理由不变：首屏地址栏直接是最终形态，不会等 `ChatView`
+ *    挂载后再改写一次（那会出现「URL 闪一下」）。
+ * 2. **没带** ⇒ 目标地址**不带** `session`，把决定权交给 `stores/settings.ts` 的兜底链
+ *    （本 tab 上次会话 → 网关 `agents.defaultId` → 常量），这里不再替它写死一个 agent。
  */
+export function entryChatPath(): string {
+  const overrides = getUrlOverrides();
+  const key = resolveSessionParam(overrides.session);
+  return key ? `/chat?session=${encodeURIComponent(key)}` : "/chat";
+}
+
+/** 入口落地路径（`/` 的 redirect 与登录后跳转共用）。 */
 export function entryLandingPath(): string {
   return entryChatPath();
 }

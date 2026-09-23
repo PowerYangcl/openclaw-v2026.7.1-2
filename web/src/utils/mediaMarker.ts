@@ -45,8 +45,19 @@
  */
 import { labelForMediaPath, transcriptMediaKind, type TranscriptMediaKind } from "@/utils/transcriptMedia";
 
-/** 旧版 `src/media/parse.ts` 的同名正则：捕获 `MEDIA:` 后面的整段（可含反引号包裹）。 */
-export const MEDIA_TOKEN_RE = /\bMEDIA:\s*`?([^\n]+)`?/gi;
+/**
+ * 旧版 `src/media/parse.ts` 的同名正则：捕获 `MEDIA:` 后面的载荷（可含反引号包裹）。
+ *
+ * ⚠️ 载荷**不能**沿用上游的贪婪 `([^\n]+)`：同一行出现两处 `MEDIA:` 时，第一个 match 会把
+ * 第二个连同后缀一起吞进载荷，`matchAll` 只出一个 match —— 于是「一行写多个文件」这种
+ * 最常见的交付写法有两条都不成立的退化路径：
+ *   - 行首形态：合成一条**指向不存在路径**的引用（卡片渲染出来、点下载必 404）；
+ *   - 行内形态：被「候选里不许再出现 `MEDIA:`」那道防线整行退回正文
+ *     （`MEDIA:` 原文泄漏、零卡片、零下载按钮）。
+ * 改成逐字符前瞻：一碰到下一个 `MEDIA:` 就收尾，同一行能出多个 match。
+ * 反引号包裹（`MEDIA:`/x.pdf``）的行为不变 —— 多余的反引号由 `cleanCandidate` 兜掉。
+ */
+export const MEDIA_TOKEN_RE = /\bMEDIA:\s*`?((?:(?!MEDIA:)[^\n])*)`?/gi;
 
 export type MediaMarkerAttachment = {
   /** 原始引用（本地绝对路径 / `~` / `file://` / http(s) / `media://inbound/<id>`）。 */
@@ -433,10 +444,12 @@ function isOffsetInsideFence(spans: readonly FenceSpan[], offset: number): boole
  * ```
  * 这时服务端不投递、客户端也解不出来 ⇒ 用户既没有卡片，正文里还留着一行 `MEDIA:` 脏文本。
  *
- * ## 保守策略：只认「整段就是一条引用」，绝不猜路径边界
+ * ## 保守策略：只认「整段就是引用」，绝不猜路径边界
  * 行内形态没法像行首那样用「整行」界定路径终点。取舍是**宁可不出卡片**，
  * 也不能生成指向错误路径的卡片，所以要求：
- * 1. 该行**只有一个** `MEDIA:`（多引用不动，不猜切割点）；
+ * 1. 该行 `MEDIA:` 之前的文本是**可见前缀**（纯空白 = 行首形态，走主路径）；
+ *    同一行允许多条引用（`MEDIA:` 的载荷由 token 正则按「下一个 `MEDIA:`」切分），
+ *    但**只要有一条不合法就整行退回原文** —— 不做「吃一半留一半」的裁剪；
  * 2. `MEDIA:` 之后（去掉尾部中文句读 / markdown 强调闭合符）**整段**就是一条合法引用；
  * 3. 该引用**必须带已知扩展名或是 http(s) 地址** —— 否则 `MEDIA:/some/path 这样写`
  *    这类正文说明会被误判（`isLikelyLocalPath` 只看是否以 `/` 开头，太宽）；
@@ -491,21 +504,14 @@ function codeSpanWrappedMediaLine(line: string): string | null {
   return splitMediaMarkers(inner).media.length > 0 ? inner : null;
 }
 
-function splitInlineMediaReference(line: string): { prefix: string; reference: string } | null {
-  const matches = Array.from(line.matchAll(MEDIA_TOKEN_RE));
-  if (matches.length !== 1) return null;
-  const match = matches[0]!;
-  const start = match.index ?? 0;
-  if (start <= 0) return null; // 行首形态走主路径
-  const prefix = line.slice(0, start);
-  if (!prefix.trim()) return null; // 前缀只有空白 = 行首形态
-  // 行内 code span 排除：模型讲解这套约定时，正文里会写 `` `MEDIA:/x.mp3` `` —— 反引号是
-  // **行内代码**（围栏 ``` 在主循环更前面就拦掉了，这里只剩单个反引号对），里面的路径是
-  // 举例、不是投递，解成卡片会凭空多一个指向不存在文件的幽灵卡片。判据：`MEDIA:` 之前
-  // 出现**奇数个**反引号 ⇒ 当前位置在 code span 内部。
-  if (((prefix.match(/`/g)?.length ?? 0) % 2) === 1) return null;
-
-  const payload = match[1] ?? "";
+/**
+ * 行内 `MEDIA:` 载荷 → 合法引用；不成立返回 `null`。
+ *
+ * 判据逐条沿用旧版（`MEDIA:` 之后去掉尾部中文句读 / markdown 强调闭合符后**整段**
+ * 就是一条合法引用，且必须带已知扩展名或 http(s) 地址）—— 行内形态没法像行首那样
+ * 用整行界定终点，所以宁可不出卡片，也不生成指向错误路径的卡片。
+ */
+function inlineMediaReferenceOf(payload: string): string | null {
   const unwrapped = unwrapQuoted(payload);
   const trimmed = (unwrapped ?? payload).trim();
   if (!trimmed) return null;
@@ -516,14 +522,39 @@ function splitInlineMediaReference(line: string): { prefix: string; reference: s
   const candidate = normalizeMediaSource(cleanCandidate(tail));
   if (!isValidMedia(candidate, { allowSpaces: true })) return null;
   if (!isRenderableMediaReference(candidate)) return null;
-  // 上游 `MEDIA_TOKEN_RE` 的 payload 正则 `[^\n]+` 是**贪婪**的：同一行出现两处 `MEDIA:` 时，第一个
-  // match 会把第二个 `MEDIA:` 连同后缀一起吞进 payload（`/root/a.pdf 和 MEDIA:/root/b.pdf`），
-  // 此时 matches.length 仍然等于 1 —— 上面那道检查拦不住。补一道：候选里不允许再出现 `MEDIA:`。
-  if (/media:/i.test(candidate)) return null;
   // 必须能看出「这是个文件」：末段带扩展名，或是远端 http(s) 地址
   if (!hasFileExtensionTail(candidate) && !HTTP_URL_PREFIX_RE.test(candidate)) return null;
+  return candidate;
+}
 
-  return { prefix: cleanLineText(prefix), reference: candidate };
+function splitInlineMediaReference(
+  line: string,
+): { prefix: string; references: string[] } | null {
+  const matches = Array.from(line.matchAll(MEDIA_TOKEN_RE));
+  if (matches.length === 0) return null;
+  const first = matches[0]!;
+  const start = first.index ?? 0;
+  if (start <= 0) return null; // 行首形态走主路径
+  const prefix = line.slice(0, start);
+  if (!prefix.trim()) return null; // 前缀只有空白 = 行首形态
+  // 行内 code span 排除：模型讲解这套约定时，正文里会写 `` `MEDIA:/x.mp3` `` —— 反引号是
+  // **行内代码**（围栏 ``` 在主循环更前面就拦掉了，这里只剩单个反引号对），里面的路径是
+  // 举例、不是投递，解成卡片会凭空多一个指向不存在文件的幽灵卡片。判据：`MEDIA:` 之前
+  // 出现**奇数个**反引号 ⇒ 当前位置在 code span 内部。
+  if (((prefix.match(/`/g)?.length ?? 0) % 2) === 1) return null;
+
+  // 同一行可以有多条（`- **PDF 版**：MEDIA:/a.pdf MEDIA:/b.xlsx`）：逐条校验，
+  // **只要有一条不成立就整行退回原文** —— 保住「不猜路径边界」这条底线，
+  // 不做出「吃一半留一半」的裁剪。
+  const references: string[] = [];
+  for (const match of matches) {
+    const reference = inlineMediaReferenceOf(match[1] ?? "");
+    if (!reference) return null;
+    if (!references.includes(reference)) references.push(reference);
+  }
+  if (references.length === 0) return null;
+
+  return { prefix: cleanLineText(prefix), references };
 }
 
 /**
@@ -568,9 +599,10 @@ export function splitMediaMarkers(text: unknown): MediaMarkerSplit {
         continue;
       }
       if (inline.prefix) keptLines.push(inline.prefix);
-      if (!seen.has(inline.reference)) {
-        seen.add(inline.reference);
-        media.push(inline.reference);
+      for (const reference of inline.references) {
+        if (seen.has(reference)) continue;
+        seen.add(reference);
+        media.push(reference);
       }
       continue;
     }

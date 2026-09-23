@@ -67,6 +67,48 @@ export function resolveAgentIdFromSessionKey(sessionKey?: string | null): string
   return normalizeAgentId(parseAgentSessionKey(sessionKey)?.agentId ?? DEFAULT_AGENT_ID);
 }
 
+/**
+ * 这个值是不是一个**合法形态的 agentId**（`lenny` / `study-abroad-consultant` / `cet4`）。
+ *
+ * 用于「裸值到底是 agentId 还是别的会话标识」这一步判定 —— 入口链接的
+ * `?session=<agentId>` 形态就靠它识别（见 `utils/canonicalSession.ts`）。
+ * 只做**形态**校验，不校验该 agent 是否真的存在于网关（那需要 `agents.list`）。
+ */
+export function isAgentIdShaped(value?: string | null): boolean {
+  const trimmed = normalizeOptionalString(value);
+  return Boolean(trimmed && VALID_ID_RE.test(trimmed));
+}
+
+/**
+ * 「保留段」：这些裸值**不是** agentId，即使形态合法也不能当作 agent 归属。
+ *
+ * - `main`：主会话标记。裸 `main` 语义是「默认 agent 的主会话」，把它当成
+ *   agentId 会造出一条 `agent:main:main` —— 与「每个 agent 一条主会话」的口径冲突。
+ * - `cron` / `subagent` / `global`：会话**类别**前缀，不是 agent。
+ */
+const RESERVED_AGENT_ID_SEGMENTS = new Set<string>([DEFAULT_MAIN_KEY, "cron", "subagent", "global"]);
+
+/** 该裸值是否是保留段（见 `RESERVED_AGENT_ID_SEGMENTS`）。 */
+export function isReservedAgentIdSegment(value?: string | null): boolean {
+  const trimmed = normalizeOptionalString(value)?.toLowerCase();
+  return Boolean(trimmed && RESERVED_AGENT_ID_SEGMENTS.has(trimmed));
+}
+
+/**
+ * 旧口径「入口 token 指纹」派生的会话 key：`id-<hash>`。
+ *
+ * 见 `stores/settings.ts` 的 `deriveSessionKeyFromToken`（FNV-1a 32 位 → 8 位十六进制）。
+ * 该形态**不是** agentId —— 老书签里的 `?session=id-4daf4b7d` 必须被识别出来并改写，
+ * 否则会被误读成 agent `id-4daf4b7d`，凭空造出一个不存在的 agent 会话。
+ */
+const DERIVED_ENTRY_KEY_RE = /^id-[0-9a-z]{6,}$/;
+
+/** 该值是否是旧口径的 `id-<hash>` 入口会话 key。 */
+export function isDerivedEntrySessionKey(value?: string | null): boolean {
+  const trimmed = normalizeOptionalString(value)?.toLowerCase();
+  return Boolean(trimmed && DERIVED_ENTRY_KEY_RE.test(trimmed));
+}
+
 /** 子 agent 会话（`subagent:` 前缀）不应出现在二级目录里。 */
 export function isSubagentSessionKey(sessionKey?: string | null): boolean {
   const raw = normalizeOptionalString(sessionKey) ?? "";

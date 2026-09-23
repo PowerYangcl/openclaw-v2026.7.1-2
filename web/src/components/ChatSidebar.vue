@@ -208,7 +208,11 @@ function agentLabel(agent: (typeof agents.agents)[number]): string {
  * 但切不到 `id-<hash8>` 那类历史会话 —— 那正是「同一个 agent 名下堆出好几条会话」的来源。
  */
 function selectSession(sessionKey: string): void {
-  const key = canonicalMainSessionKey(sessionKey, agents.mainKey);
+  const key = canonicalMainSessionKey(sessionKey, {
+    mainKey: agents.mainKey,
+    firstAgentId: agents.agents[0]?.id ?? null,
+    defaultAgentId: agents.defaultId,
+  });
   settings.setSessionKey(key);
   if (route.query.session === key) return;
   void router.push({ name: "chat", query: { ...route.query, session: key } });

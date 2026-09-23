@@ -15,8 +15,10 @@
  * ## 会话：每个 agent 只一条「规范主会话」（2026-09-23）
  *
  * `sessionKey` 只能是规范主会话形态 `agent:<agentId>:<mainKey>`
- * （见 `utils/canonicalSession.ts`）：入口默认 `agent:resume-assistant:main`，
- * 侧栏切换 agent 时落到该 agent 的主会话。
+ * （见 `utils/canonicalSession.ts`）：入口会话由链接的 `?session=` 决定
+ * （支持裸 agentId `study-abroad-consultant`，或完整 `agent:<id>:<mainKey>`），
+ * 链接没带时落到 **chat 页首个会话 → 网关 `agents.defaultId`** ——
+ * **没有任何写死的 agent**（旧版的 `agent:resume-assistant:main` 已删）。
  *
  * 旧策略会按入口 token 指纹派生 `agent:<id>:id-<hash8>` —— 同一个 agent 名下于是
  * 同时累积出 `:main` 与 `:id-xxxxxxxx` 多条会话（本机 cet4 实测两条并存），
@@ -27,10 +29,11 @@ import { computed, ref, watch } from "vue";
 import { deriveDefaultGatewayUrl } from "@/api/gateway";
 import { getUrlOverrides } from "@/utils/urlOverrides";
 import { resolveGatewayHttpBase } from "@/utils/avatar";
+import { readSidebarSnapshot } from "@/utils/sidebarSnapshot";
 import {
-  DEFAULT_AGENT_SESSION_KEY,
   canonicalMainSessionKey,
   isCanonicalMainSessionKey,
+  resolveSessionParam,
 } from "@/utils/canonicalSession";
 
 /** 登录态：per-tab（sessionStorage），刷新保留、跨 tab 隔离。 */
@@ -185,15 +188,31 @@ export const useSettingsStore = defineStore("settings", () => {
   const token = ref<string>(nonEmpty(overrides.token) ?? persistedSession.token ?? "");
 
   /**
-   * 会话 key。初值取「存储值归一化」后的结果，没有存储值时用入口默认会话
-   * （`agent:resume-assistant:main`）。
+   * 入口会话 key。优先级：**链接的 `?session=` → chat 页首个会话 → 网关 `agents.defaultId`**。
    *
-   * ⚠️ 归一化**不是格式化**：历史 `agent:cet4:id-4daf4b7d` 这类存储值会被改写成
-   * `agent:cet4:main`。这是「不保留其他会话」的落地点 —— 旧值沿用一次，
-   * 那条旧会话就在界面上复活一次。
+   * ⚠️ 这里**不再写死任何 agent**（旧版是 `agent:resume-assistant:main`，中间版本是
+   * `FALLBACK_AGENT_ID = "resume-assistant"`）。被写死的 agent 一旦改名 / 下线，
+   * 整站入口直接失效；而且它会盖掉控制台链接里的 `session`。
+   *
+   * ⚠️ 第一优先是 URL：上游控制台给每个顾问签发各自的入口链接
+   * （`?token=…&session=study-abroad-consultant`），该参数必须生效。
+   * `overrides.session` 在 router 创建前就已捕获（见 `utils/urlOverrides.ts`）。
+   *
+   * 链接没带、且本地快照也没有 agent 时留**空串 = 「还没定下来」**：
+   * `ChatView` 会在 `agents.list` 回来后重新收敛（往第一个会话上落），
+   * 空串也不会被 persist 成脏值（`persistSession` 会删掉空值键）。
+   *
+   * 快照与 `stores/agents.ts` 用**同一份**（`readSidebarSnapshot(gatewayUrl)`），
+   * 所以首屏这两个 store 对「首个会话是哪个 agent」的看法天然一致。
    */
+  const sidebarSnapshot = readSidebarSnapshot(gatewayUrl.value);
   const sessionKey = ref<string>(
-    canonicalMainSessionKey(nonEmpty(persistedSession.sessionKey) ?? DEFAULT_AGENT_SESSION_KEY),
+    resolveSessionParam(overrides.session) ??
+      canonicalMainSessionKey(null, {
+        mainKey: sidebarSnapshot?.mainKey ?? null,
+        firstAgentId: sidebarSnapshot?.agents?.[0]?.id ?? null,
+        defaultAgentId: sidebarSnapshot?.defaultId ?? null,
+      }),
   );
 
   const themeMode = ref<UiSettings["themeMode"]>(persistedPrefs.themeMode);
@@ -219,7 +238,10 @@ export const useSettingsStore = defineStore("settings", () => {
    */
   watch(token, () => {
     if (isCanonicalMainSessionKey(sessionKey.value)) return;
-    sessionKey.value = canonicalMainSessionKey(sessionKey.value);
+    // ⚠️ 解析不出 agent 时 `canonicalMainSessionKey` 返回空串（见其注释）。
+    // 那属于「还没定下来」，此时**保持原值**比清空更安全：别把好 key 抹成空串。
+    const normalized = canonicalMainSessionKey(sessionKey.value);
+    if (normalized && normalized !== sessionKey.value) sessionKey.value = normalized;
   });
 
   // 登录态写入 sessionStorage（per-tab）
@@ -287,7 +309,10 @@ export const useSettingsStore = defineStore("settings", () => {
    * 把这条收敛到唯一写入口，比在每个调用点各写一遍判断可靠得多。
    */
   function setSessionKey(next: string): void {
-    const key = canonicalMainSessionKey(next || DEFAULT_AGENT_SESSION_KEY);
+    const key = canonicalMainSessionKey(next);
+    // ⚠️ 解析不出 agent 的入参（空串 / 裸 `main` / 渠道键）返回空串 ——
+    // 那不代表「要清空会话」，直接忽略，避免把当前会话抹掉。
+    if (!key) return;
     if (sessionKey.value !== key) sessionKey.value = key;
     persistSession({ sessionKey: key });
   }

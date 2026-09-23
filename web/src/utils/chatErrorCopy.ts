@@ -247,6 +247,11 @@ function stripFailureWrapper(raw: string): string {
  *
  * 匹配顺序：①已知的中文原文（上游已本地化的）→ ②规则表打原文 → ③剥壳后再打一遍
  * → ④兜底（带包装前缀才算「回复前失败」，否则中性文案）。
+ *
+ * ⚠️ 调用方口径（2026-09-23 用户要求「气泡消息不显示生成失败的消息」）：
+ * `ChatPane.vue` 的 `case "error"` 现在是**完全静默** —— 本函数的产出**只进
+ * `console.warn`**，既不弹窗、也不落助手消息气泡。恢复展示要改 `ChatPane.vue` 那一段
+ * （注释里写了「弹窗 / 落消息」两种复原法），**别在本文件里加展示逻辑**。
  */
 export function localizeChatError(raw: string): FriendlyError {
   if (!raw) return { title: "生成失败", detail: "", retryable: true };
