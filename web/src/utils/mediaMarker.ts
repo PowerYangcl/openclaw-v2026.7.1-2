@@ -541,7 +541,31 @@ function splitInlineMediaReference(
   // **行内代码**（围栏 ``` 在主循环更前面就拦掉了，这里只剩单个反引号对），里面的路径是
   // 举例、不是投递，解成卡片会凭空多一个指向不存在文件的幽灵卡片。判据：`MEDIA:` 之前
   // 出现**奇数个**反引号 ⇒ 当前位置在 code span 内部。
-  if (((prefix.match(/`/g)?.length ?? 0) % 2) === 1) return null;
+  //
+  // ⚠️ 例外（2026-09-24，预发实测丢附件按钮的正是这一类）：模型**投递**时也常把整条指令写进
+  // 行内代码，行首还挂着一个可见标签：
+  // ```
+  // 🎵 听力音频： `MEDIA:/root/media/outbound/cet4/2026.09.24 听力练习.mp3`
+  // ```
+  // 这时 `MEDIA:` 前恰好 1 个反引号（奇数）⇒ 被上面那条判成「举例」整行退回原文 ⇒
+  // **附件卡片消失、正文里还裸着一行 `MEDIA:`**（markdown 把反引号渲成 code 片，等宽字体里
+  // 那个 `MEDIA:` 看着就是漏出来的原文）。而服务端 `src/media/parse.ts:544` 只认行首独占行
+  // ⇒ 刷新也救不回来（`chat.history` 同样没有媒体位）。
+  // 判据收紧到「这对反引号**恰好只包住这一条引用**」：① 前缀末尾必须是开栏反引号；
+  // ② 该 match 自身以闭栏反引号收尾；③ match 之后到行尾不再有反引号；
+  // ④ match 之后只剩空白 / 句读（**必须有** —— 否则「正文里写 `MEDIA:/x.mp3` 这样一行即可」
+  // 那种讲解句会被误吃成投递）。命中时前缀里的悬挂开栏要摘掉，否则正文会残留一个 `。
+  let effectivePrefix = prefix;
+  if (((prefix.match(/`/g)?.length ?? 0) % 2) === 1) {
+    const tail = line.slice(start + first[0].length);
+    const spansWholeToken =
+      prefix.endsWith("`") &&
+      first[0].endsWith("`") &&
+      !tail.includes("`") &&
+      !/[^\s。．，、；：;:!！?？~〜]/.test(tail);
+    if (!spansWholeToken) return null;
+    effectivePrefix = prefix.slice(0, -1);
+  }
 
   // 同一行可以有多条（`- **PDF 版**：MEDIA:/a.pdf MEDIA:/b.xlsx`）：逐条校验，
   // **只要有一条不成立就整行退回原文** —— 保住「不猜路径边界」这条底线，
@@ -554,7 +578,7 @@ function splitInlineMediaReference(
   }
   if (references.length === 0) return null;
 
-  return { prefix: cleanLineText(prefix), references };
+  return { prefix: cleanLineText(effectivePrefix), references };
 }
 
 /**

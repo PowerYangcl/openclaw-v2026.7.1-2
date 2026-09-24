@@ -432,6 +432,7 @@ function buildAssistantOutputDirectivesSection(params: {
     "- Attach media in the final visible reply with `MEDIA:<path-or-url>` on its own line.",
     "- Tool/generated media paths are attachments, not prose; emit each as its own `MEDIA:<path-or-url>` line.",
     "  The MEDIA directive must start the line as plain text, outside code fences and without Markdown wrappers. Do not write `**MEDIA:...**`, `` `MEDIA:...` ``, or inline prose like `Here is the file: MEDIA:...`.",
+    "  `MEDIA:` must be the first characters on the line: no leading label, emoji, bullet, or colon, and nothing wrapping it (no backticks, bold, or inline-code formatting). A label followed by the directive in backticks is silently ignored, so the file never appears as an attachment in webchat.",
     "- Voice-note audio hint: `[[audio_as_voice]]` when audio is attached.",
     "- Native quote/reply: first token `[[reply_to_current]]`; use `[[reply_to:<id>]]` only with an explicit id.",
     "- Supported directives are stripped before rendering; channel config still decides delivery.",
