@@ -58,7 +58,12 @@ import {
   parseSlashCommand,
   type SlashCommandInvocation,
 } from "@/utils/slashCommand";
-import { localizeChatError } from "@/utils/chatErrorCopy";
+import {
+  BUDGET_EXCEEDED_FALLBACK_TEXT,
+  GATEWAY_ASSISTANT_ERROR_FALLBACK_TEXT,
+  localizeChatError,
+  resolveFailureNotice,
+} from "@/utils/chatErrorCopy";
 import {
   CHAT_HISTORY_FALLBACK_PAGE_SIZE,
   CHAT_HISTORY_MAX_CHARS,
@@ -587,10 +592,29 @@ const showHistorySkeleton = computed<boolean>(
  * 只是这几条不出现在界面上 —— 判定见 `utils/compactionNotice.ts`。
  * 同样**只挡渲染**：消息仍在 `messages` 里，导出 / 复制 / 统计口径不变。
  */
+/**
+ * **渲染层文案覆盖**：网关侧助手消息 id → web 层更该显示的中文（2026-09-28 第十四轮）。
+ *
+ * 唯一用途：失败轮回源后，网关对「没有可见正文的助手错误消息」**只**会投影成
+ * `BUDGET_EXCEEDED_FALLBACK_TEXT`（欠费那句）或 `GATEWAY_ASSISTANT_ERROR_FALLBACK_TEXT`（英文）
+ * 二者之一。命中后者时那句英文没有任何信息量 —— 真正的原因本地规则表已经映射成中文了，
+ * 所以在这里把它换成本地那条中文。
+ *
+ * ⚠️ 只改**渲染文本**（`messages` 不动，导出 / 缓存 / 统计口径不变）。
+ * ⚠️ 键是消息 id：同一会话再回源时该 id 不变 ⇒ 覆盖持续有效（整页刷新会丢，属可接受退化）。
+ * ⚠️ 必须用 `ref(new Map())`（Vue 3 会给 Map 装集合级响应式）—— 用裸 `Map` 改完不会触发重渲染。
+ */
+const failureTextOverrides = ref(new Map<string, string>());
+
 const visibleMessages = computed<ChatMessage[]>(() =>
-  messages.value.filter(
-    (msg) => isRenderableMessageRole(msg.role) && !isCompactionNoticeMessage(msg),
-  ),
+  messages.value
+    .filter((msg) => isRenderableMessageRole(msg.role) && !isCompactionNoticeMessage(msg))
+    // 失败提示的**渲染层文案覆盖**（见 `failureTextOverrides`）：只改显示文本，
+    // `messages` 本身不动 —— 导出 / 缓存 / 统计口径不变。
+    .map((msg) => {
+      const override = failureTextOverrides.value.get(msg.id);
+      return override === undefined ? msg : { ...msg, text: override };
+    }),
 );
 
 /**
@@ -2762,6 +2786,52 @@ function preserveLocalTailMessages(
   return tail.length > 0 ? [...serverMessages, ...tail] : serverMessages;
 }
 
+/**
+ * 把上一版视图里的**本地失败提示**带到新一版视图上（2026-09-28 第十一轮）。
+ *
+ * `loadHistory` 是「整体替换 `messages`」的语义，本地气泡（网关 transcript 里没有）
+ * 本来就会被抹掉。历史遗留的 `/help` 回显之类**没标 `localNotice`**，按原有口径不搬运
+ * （它们刷新即丢，是设计如此）；只有标了 `localNotice` 的失败提示才需要留下 ——
+ * 它是「本轮没有助手产出」这条判据**唯一的依据**，抹掉就等于把现象藏回原样。
+ *
+ * ## 两条规则
+ * ① **归属**：只搬运属于本次回源会话（`key`）的提示 —— `loadHistory` 切会话时也会跑，
+ *    不带归属地搬运会把「积分不足」搬到无关的会话里。
+ * ② **让位**：`next` 里「最后一条用户消息**之后**」出现了网关侧的助手消息
+ *    （`localNotice === undefined`）⇒ 网关已经自己说话了，本地那条**猜测**必须丢掉，
+ *    否则同一轮会显示「本地猜的英文标题 + 网关的中文权威文案」两条。
+ *
+ * ⚠️ 判据用的是**位置**（最后一条 user 之后）而不是「存在任意助手消息」：
+ * `next` 必然包含历史轮次的助手消息，用后者会把提示**每趟都**误杀。
+ */
+function carryLocalNotices(
+  previous: ChatMessage[],
+  next: ChatMessage[],
+  key: string,
+): ChatMessage[] {
+  const notices = previous.filter(
+    (m) => m.localNotice !== undefined && m.localNoticeKey === key,
+  );
+  if (notices.length === 0) return next;
+  let lastUserIndex = -1;
+  for (let i = next.length - 1; i >= 0; i -= 1) {
+    if (next[i]?.role === "user") {
+      lastUserIndex = i;
+      break;
+    }
+  }
+  const authoritative = next.some(
+    (m, index) => index > lastUserIndex && m.role === "assistant" && m.localNotice === undefined,
+  );
+  const kept = notices.filter((notice) => {
+    if (notice.localNotice === "failure" && authoritative) return false;
+    // 网关投影出来的文案与本句**逐字**相同 ⇒ 本地那条是重复的，只留服务端那条。
+    const text = (notice.text ?? "").trim();
+    return !next.some((m) => m.role === "assistant" && (m.text ?? "").trim() === text);
+  });
+  return kept.length > 0 ? [...next, ...kept] : next;
+}
+
 /** `chat.history` 的响应形状（`loadHistory` / `loadOlderHistory` 共用字段）。 */
 type ChatHistoryResponse = {
   messages?: unknown[];
@@ -2844,6 +2914,9 @@ async function loadHistory(options?: { skipCache?: boolean }): Promise<void> {
 }
 
 async function loadHistoryInner(seq: number, options?: { skipCache?: boolean }): Promise<void> {
+  // 本趟回源前的视图快照：`localNotice`（本地失败提示）要在赋值后搬回去，否则
+  // 「失败后主动回源」会把刚落的提示抹掉 —— 见 `carryLocalNotices`。
+  const noticesBeforeLoad = messages.value;
   // 先同步已删集合（本地、便宜），后面缓存命中也要用。
   loadDeletedMessageIds();
   const deleted = deletedMessageIds.value;
@@ -2863,9 +2936,13 @@ async function loadHistoryInner(seq: number, options?: { skipCache?: boolean }):
   if (options?.skipCache) clearChatMessageCache(cacheKey);
   const cached = getChatMessageCache(cacheKey);
   if (cached) {
-    messages.value = mergeBackgroundAssistantMessages(
-      cacheKey,
-      cached.filter((item) => !deleted.has(item.id)),
+    messages.value = carryLocalNotices(
+      noticesBeforeLoad,
+      mergeBackgroundAssistantMessages(
+        cacheKey,
+        cached.filter((item) => !deleted.has(item.id)),
+      ),
+      requestKey,
     );
     // 恢复分页游标：缓存命中也能继续「加载更早」（直接用上次 offset，免联网探测）
     applyHistoryCursor(normalizeHistoryCursor(getChatHistoryCursor(cacheKey)));
@@ -2917,9 +2994,13 @@ async function loadHistoryInner(seq: number, options?: { skipCache?: boolean }):
       cacheKey,
       new Set(serverMessages.map((item) => item.id)),
     );
-    messages.value = mergeBackgroundAssistantMessages(
-      cacheKey,
-      preserveLocalTailMessages(serverMessages, snapshot),
+    messages.value = carryLocalNotices(
+      noticesBeforeLoad,
+      mergeBackgroundAssistantMessages(
+        cacheKey,
+        preserveLocalTailMessages(serverMessages, snapshot),
+      ),
+      requestKey,
     );
     // 记录后端给出的分页游标：还有更早则允许「加载更早」继续翻页
     applyHistoryCursor(readHistoryCursor(res));
@@ -3145,6 +3226,14 @@ async function send(
   // 旧版同样允许「只有附件、没有文字」的发送。
   if (!text && !apiAttachments) return false;
 
+  // ⚠️ **绝不能**在这里 cancelAuthoritativeReload()（2026-09-28 第十二轮，实测踩坑）：
+  // 失败轮的 transcript 落库晚于终止帧，用户在等待期间会再发下一条 —— 一 cancel，
+  // 上一轮的「救兵」就永远断了。现象极具辨识度：**回复总是滞后一条**
+  // （发 4 没反应 → 发 5 之后才出现 4 的回复；发 6 → 出现 5 的回复）。
+  // 回源轮询是**会话级**的，判据看「有没有新的网关侧助手消息」，与是哪一轮无关，
+  // 所以让它继续跑是安全的；新一轮失败会重排阶梯（见 scheduleAuthoritativeReload）。
+  //
+  // 真正的收工点只有两处：拿到网关侧新助手消息、或阶梯用尽。
   const localMessageId = `local-${Date.now()}`;
   messages.value.push({
     id: localMessageId,
@@ -3158,6 +3247,10 @@ async function send(
   streamingText.value = "";
   streamingThinking.value = "";
   streamingSpend.value = null;
+  // 新一轮开始：本轮的「网关是否有产出 / 是否已落过失败提示」两个判重标记清零 ——
+  // 它们是**轮次级**的，不清零会让下一轮的失败提示被上一轮的状态吞掉（见 `case "error"`）。
+  roundHasGatewayOutput = false;
+  roundHasLocalFailureNotice = false;
   // 新一轮开始：清掉上一轮可能残留的「积分计算中」（正常路径下 final 已经清过，
   // 但「final 缺失 + 引导排队」这类异常收尾可能没走到）
   spendPending.value = false;
@@ -3194,6 +3287,9 @@ async function send(
       attachments.value = [];
       discardChatAttachmentDataUrls(outgoing);
     }
+    // 盯一眼回音：网关若长时间一帧都不回（连 thinking/delta 都没有），界面会永远停在
+    // 「思考中」，用户表现为「发了没反应」——见 `armFirstFrameWatchdog`。
+    armFirstFrameWatchdog();
     return true;
   } catch (err) {
     sending.value = false;
@@ -3283,12 +3379,17 @@ async function steerPendingTask(item: PendingTask): Promise<void> {
  * ⚠️ 这类消息**只存在于本地**（网关 transcript 里没有），刷新后就没了 ——
  * 与旧版 `ui/` 的 `injectCommandResult` 同一口径。
  */
-function pushLocalCommandNote(markdown: string): void {
+function pushLocalCommandNote(markdown: string, notice?: { kind: "failure" }): void {
   messages.value.push({
     id: `local-note-${Date.now()}-${Math.random().toString(16).slice(2)}`,
     role: "assistant",
     text: markdown,
     ts: Date.now(),
+    // 标了 `localNotice` 的会跨「静默回源」存活，且在网关给出权威文案后自动让位
+    //（见 `carryLocalNotices`）。`/help`、`/model` 这类不需要，保持刷新即丢。
+    ...(notice
+      ? { localNotice: notice.kind, localNoticeKey: resolvedSessionKey() }
+      : {}),
   });
   void scrollToBottom();
 }
@@ -3451,20 +3552,15 @@ async function submitComposer(): Promise<void> {
     return;
   }
 
-  // 积分不足：**只在真的要发出去（消耗积分）时才拦**，拦的时候给明确提示。
-  // 此前是「按钮禁用 + 输入框禁用 + 静默 return」三连，用户表现为「界面整个死了、
-  // 点了没反应也不知道为什么」。现在控件全程可用，Enter / 点发送都会走到这里拿提示。
+  // 积分不足：**web 层不再本地拦截、也不再弹 toast**（2026-09-28 口径调整）。
+  // 提示统一交给助手在对话里给出 —— 网关会把「余额/欠费类失败、且没有可见正文」的
+  // 助手消息投影成「积分不足，请前往充值页面充值」
+  // （`src/gateway/chat-display-projection.ts` 的 `BUDGET_EXCEEDED_FALLBACK_TEXT`）。
+  // 前端只管照常发出去：用户拿到的是一条**留在会话里、可以回看**的提示，
+  // 而不是一闪而过、切个会话就再也找不到的浮层。
   //
-  // ⚠️ `sending` 分支（把本条并入待执行队列）**不拦**：入队本身不消耗积分，
+  // ⚠️ `sending` 分支（把本条并入待执行队列）本来就不拦：入队本身不消耗积分，
   // 真正执行时由 `resumePendingTasksAfterReload` 按当时余额判定。
-  if (!sending.value && insufficientCredits.value) {
-    ElMessage({
-      message: "当前积分为 0，发送需要先充值",
-      type: "warning",
-      grouping: true,
-    });
-    return;
-  }
   if (sending.value) {
     enqueuePendingTask();
   } else {
@@ -3727,6 +3823,8 @@ function commitStreamingMessage(): void {
       spendResult: streamingSpend.value ?? undefined,
     });
   }
+  // 本轮已经有网关侧的助手产出（流式正文落了库）⇒ 后续 error 帧不再落重复的失败提示。
+  roundHasGatewayOutput = true;
   // 新增的 assistant 消息可能携带 model/provider，重新聚合模型列表
   void loadModelList();
 }
@@ -3843,6 +3941,7 @@ function handleEvent(evt: { event: string; payload?: unknown }): void {
     const payload = evt.payload;
     // 会话隔离：别的会话的收尾信号不能点亮本窗格的加载态。
     if (!isEventForCurrentSession(payload.sessionKey)) return;
+    clearFirstFrameWatchdog();
     // 只在发送中标记。`sending=false` 时说明本轮早已收尾（例如 WS 乱序把 final
     // 排在 lifecycle 之前），此时气泡已经没了，标记只会变成幽灵加载态。
     if (!sending.value) return;
@@ -3856,6 +3955,7 @@ function handleEvent(evt: { event: string; payload?: unknown }): void {
     const payload = evt.payload;
     // 会话隔离：切到别的会话后，旧会话的思考增量不应再落进当前视图。
     if (!isEventForCurrentSession(payload.sessionKey)) return;
+    clearFirstFrameWatchdog();
     // 仅在发送中累积。idle / 已完成 / 已 abort 的迟到帧直接丢弃。
     // 注意：引导打断旧 run 时会刻意保持 sending=true，所以被引导那一轮的思考能接上同一个气泡。
     if (!sending.value) return;
@@ -3888,6 +3988,8 @@ function handleEvent(evt: { event: string; payload?: unknown }): void {
     handleBackgroundSessionChatEvent(payload);
     return;
   }
+  // 收到本会话的 chat 帧 = 网关有回音，撤掉看门狗。
+  clearFirstFrameWatchdog();
 
   switch (payload.state) {
     case "delta": {
@@ -3982,6 +4084,9 @@ function handleEvent(evt: { event: string; payload?: unknown }): void {
             spendResult: normalized.spendResult ?? streamingSpend.value ?? undefined,
           };
           messages.value.push(pushed);
+          // 本轮已经有网关侧的助手产出 ⇒ 失败回源的轮询收工（见 `scheduleAuthoritativeReload`）。
+          roundHasGatewayOutput = true;
+          cancelAuthoritativeReload();
           // final 推送可能带 model/provider，刷新选择器
           void loadModelList();
           // live final 帧天生不带媒体字段 —— 这一轮的附件/播放器只能回源补齐（见
@@ -4003,8 +4108,23 @@ function handleEvent(evt: { event: string; payload?: unknown }): void {
         break;
       } else {
         // 真·空 final = 网关用终止帧收掉被打断的 run
+        //
+        // ⚠️ 这条路径此前是**完全静默**的（只清掉「思考中」，不落任何东西）。
+        // 余额不足这类失败，网关的**实时**终止帧可能不带 message，给用户看的文案只写在
+        // transcript 里（`chat.history` 走投影给「积分不足，请前往充值页面充值」）⇒
+        // 用户表现为「第一次发送毫无反应、手动刷新后才看到提示」。
+        // 这里替用户按一次刷新（`scheduleEmptyTurnHistoryReload`），并留 warn 便于对照。
         if (steeredMessages.value.length === 0) {
-          finalizeStreaming();
+          console.warn("[chat-pane] 空 final（本轮无任何可见产出）→ 主动回源历史", {
+            sessionKey: payload.sessionKey,
+            runId: payload.runId,
+            balanceZero: insufficientCredits.value,
+          });
+          // ⚠️ **不在这里 finalizeStreaming()**（第十二轮）：网关发「无 message 的终止帧」
+          // 时，给用户看的文案还**没落进 transcript**（实测滞后数秒）。立刻收掉「思考中」
+          // 会让界面**完全空白** —— 这正是用户说的「第一次发送后助手没有回复」。
+          // 保持气泡转圈，等回源把文案取回来（或阶梯用尽）再收尾。
+          scheduleAuthoritativeReload("empty-final", { holdStreaming: true });
           return;
         }
         // 还有引导在排队：不能收掉气泡（用户视角就是「思考被中断」），
@@ -4052,42 +4172,358 @@ function handleEvent(evt: { event: string; payload?: unknown }): void {
       streamingSpend.value = null;
       spendPending.value = false;
       sending.value = false;
-      // ⚠️ 生成失败 = **完全静默**（2026-09-23 用户口径，第九轮）：不弹窗、**不落消息**。
-      // 依据：能走到这里的文案绝大多数对用户不可行动（会话接管 / 供应商抖动 /
-      // 上游未分类的 `Agent run failed` …），弹出来只会让用户以为「自己操作错了」
-      // 或「产品坏了」—— 弹窗比不提示更容易误导。
+      // 生成失败要**在对话里可见**（2026-09-28 口径调整，第十轮）：落一条本地助手气泡。
       //
-      // ⚠️ 这里曾经落过一条「普通助手消息」当失败落点（2026-09-21 二轮），**本轮已删**。
-      // 删除理由（用户明确要求「气泡消息不显示生成失败的消息」）：
-      //   ① 气泡 = 助手说的话。把网关错误原文（走 `chatErrorCopy.ts` 兜底时是英文
-      //      `Agent run failed` 之类）当成一轮回复塞进会话流，用户会当成模型在说话；
-      //   ② 它只活在内存里（网关侧没有这一轮消息，刷新后 `chat.history` 不会带回来）
-      //      ⇒ 既污染了对话，又提供不了可复查的记录，两头不占；
-      //   ③ 界面上「有没有失败」仍可从「流式气泡消失 + 输入框回到可发送」判读。
-      // ⚠️ 唯一保留的落点是**控制台留痕**（`console.warn`，按 `[chat-pane]` 过滤），
-      // 所以这条 warn 是排查的唯一入口，**不能删**。
+      // 依据（用户口径）：积分为 0 时前端**不再本地拦**（见 `submitComposer`），提示要由助手
+      // 给出；网关侧也把欠费/积分不足的文案本地化成了「积分不足，请前往充值页面充值」
+      // （`src/gateway/chat-display-projection.ts` 的 `BUDGET_EXCEEDED_FALLBACK_TEXT`）。
+      // 而此前这里是**完全静默**（不弹窗、不落消息），那句话根本没有落点，
+      // 用户表现为「点了发送什么都没发生」。
       //
-      // ⚠️ 状态复位一行都不能少：少了 `sending=false` / 清流式，气泡会永远停在「思考中」。
-      // 要恢复提示时二选一（`formatFriendlyError` 需同时加回顶部 import，`noUnusedLocals` 会拦住漏改）：
-      //   a) 弹窗：`ElMessage({ message: formatFriendlyError(friendly), type: "error",
-      //      duration: friendly.retryable ? 4500 : 6500, grouping: true })`
-      //   b) 消息落点：`messages.value.push({ id: \`assistant-error-${Date.now()}\`,
-      //      role: "assistant", text: friendly.detail ? \`${friendly.title}\n\n${friendly.detail}\`
-      //      : friendly.title, ts: Date.now() })`（⚠️ 口径上已否决，见上）
-      const friendly = localizeChatError(payload.errorMessage ?? "");
+      // 与 2026-09-23「气泡不显示生成失败」的区别：那条针对的是**上游未分类的英文原文**
+      // （`Agent run failed` 之类）。现在落气泡的文案统一由 `resolveFailureNotice` 决定
+      // —— 它内部含两条规则：① 网关已本地化的整句中文原样显示；
+      // ② **余额为 0** 时可重试类错误校验成网关那句「积分不足，请前往充值页面充值」
+      // （函数文档里写了「实时一种文案、刷新后才变」的成因）。
+      //
+      // 状态复位一行都不能少：少了 `sending=false` / 清流式，气泡会永远停在「思考中」。
+      // （⚠️ 下面「推迟落文案」那条路径会**按需**把 `sending` 再立起来 —— 那是刻意的，
+      //  为的是把猜测文案挪到权威文案之后一次落位、不闪。）
+      const { friendly, notice } = resolveFailureNotice(payload.errorMessage ?? "", {
+        balanceZero: insufficientCredits.value,
+      });
       void scrollToBottom();
-      console.warn("[chat-pane] 生成失败（完全静默：不弹窗、不落消息，仅留痕）", {
+      // 留痕（按 `[chat-pane]` 过滤）：排查时看**网关原文**的唯一入口，不能删。
+      console.warn("[chat-pane] 生成失败", {
         sessionKey: payload.sessionKey,
         runId: payload.runId,
+        // 网关原文：`title/detail` 是映射后的中文，原文会丢 —— 排查必须靠这一行。
+        raw: payload.errorMessage ?? "",
         title: friendly.title,
         detail: friendly.detail || "(网关未返回错误详情)",
       });
+      // 判重：本轮**已经**有网关侧产出、或已经落过一条失败提示 ⇒ 不重复落。
+      //
+      // ⚠️ 绝不能退回「比 `messages.value.slice(-2)` 的文案」（2026-09-28 实测）：
+      // 连发同类失败时，窗口里是「上一轮的失败提示 + 本轮刚推的用户气泡」，本轮的提示会被
+      // 当成上一轮的重复而**吞掉** —— 现象正是用户截图的「连发 4 条只出 2 条提示」。
+      const duplicated = roundHasGatewayOutput || roundHasLocalFailureNotice;
+      // 这条提示是**权威文案**还是**本地猜测**？
+      //   权威 = 本地已经**就是**网关投影那一句（原文自带欠费特征，或本地余额已知为 0）
+      //          ⇒ 直接落气泡，不闪烁；也不必回源（网关投影只会给出同一句）。
+      //   猜测 = 其余**可重试**类错误：网关可能把它投影成「积分不足，请前往充值页面充值」
+      //          ⇒ **先不落**，保着「思考中」并立刻回源，拿到网关文案后**一次落位**。
+      //          （用户截图那次闪烁就是：先落了本地那句「模型提供方拒绝了请求结构…」，
+      //           回源再被换成「积分不足，请前往充值页面充值」—— 错误文案只该落一次，
+      //           且落的就是**最终**那一句。）
+      //   猜测但**不可重试**（该智能体已不可用 / 模型密钥未配置 / 锁竞争…）：本地的中文
+      //          比网关那条英文兜底更有用，直接落、不推迟。
+      const noticeIsAuthoritative = notice === BUDGET_EXCEEDED_FALLBACK_TEXT;
+      const holdForAuthority =
+        !duplicated && !!notice && !noticeIsAuthoritative && friendly.retryable;
+      if (notice && !duplicated) {
+        roundHasLocalFailureNotice = true;
+        if (holdForAuthority) {
+          // 推迟落文案：先把气泡留成「思考中」（`isThinking` 只看 `sending`），
+          // 由 `settleAuthoritativeReload` 决定落网关文案还是落本地这句。
+          deferredFailureNotice = { text: notice, sessionKey: resolvedSessionKey() };
+          sending.value = true;
+          void scrollToBottom();
+        } else {
+          pushLocalCommandNote(notice, { kind: "failure" });
+        }
+      }
+      // ⚠️ 本地这次只是**猜测**：实时 `error` 帧只有 `errorMessage`，没有网关投影所用的
+      // `errorType/errorCode/errorBody` ⇒ 余额为 0 时上游回的间接错误
+      // （`provider rejected the request schema or tool payload.`）在本地判不出 budget。
+      // 「积分不足，请前往充值页面充值」的**权威来源**是 `chat.history` 的投影
+      //（`chat-display-projection.ts` 的 `BUDGET_EXCEEDED_FALLBACK_TEXT`）——
+      // 所以再回源一趟，让网关自己说话。
+      //
+      // 本地文案**已经**是那句权威文案时不必回源（原文自带欠费特征，或余额已知为 0）：
+      // 网关投影只会给出同一句，白跑一趟。
+      if (!duplicated && !noticeIsAuthoritative) {
+        scheduleAuthoritativeReload("error-frame", {
+          holdStreaming: holdForAuthority,
+          // 推迟落文案时用更短的一档阶梯（见 `DEFERRED_NOTICE_RELOAD_DELAYS_MS`）：
+          // 界面正靠「思考中」撑着，不能按默认那档等 ~28s。
+          ...(holdForAuthority ? { delays: DEFERRED_NOTICE_RELOAD_DELAYS_MS } : {}),
+        });
+      }
       break;
     }
   }
 }
 
 let unsubscribe: (() => void) | null = null;
+
+/**
+ * **权威回源**：失败轮里「该显示什么」一律以网关的 `chat.history` 投影为准。
+ *
+ * ## 为什么不能只靠本地文案
+ * 「积分不足，请前往充值页面充值」的判据在网关侧（`src/gateway/chat-display-projection.ts`
+ * 的 `isBudgetExceededErrorLike`），它吃的是 transcript 记录里的
+ * `errorType / errorCode / errorBody / errorMessage`。而实时 `state:"error"` 帧的载荷
+ * 只有 `errorMessage`（见本文件 `ChatEventPayload`），且 `src/gateway/server-chat.ts:205`
+ * 的 `buildChatErrorMessage` **只本地化了会话接管、没有处理欠费** ⇒ 余额为 0 时上游回的
+ * 间接错误（`provider rejected the request schema or tool payload.`）在实时链路上**没有任何
+ * budget 特征**，web 层无论怎么写规则都猜不出来。刷新/二次发送之所以能看到中文文案，
+ * 恰恰是因为走了 `chat.history`。
+ *
+ * ## 为什么要**重试**（而不是回源一次就完）
+ * 失败轮的 transcript 落库**晚于**终止帧（实测滞后量级为秒）。固定单发一趟经常白跑。
+ *
+ * ## 三条硬约束（每一条都对应一次真实踩坑）
+ * ① **轮询是会话级的，绝不能被 `send()` 掐断**。用户在等待期间会再发下一条；一掐断，
+ *    上一轮的提示就永远不来了 ⇒ 现象是「**回复总是滞后一条**」。
+ * ② **收工判据必须用「锚点之外出现新的助手消息」**，不能用「最后一条 user 之后有没有助手
+ *    消息」：回源整体替换 `messages`，若网关还没把刚发的 user 消息落库，视图里
+ *    「最后一条 user」会退回上一轮，于是上一轮的回复把判据**在第一趟就点亮** ⇒ 轮询提前
+ *    收工，现象仍是「第一次发送没反应」。
+ * ③ 空 `final` 期间**保留「思考中」**（`holdStreaming`）：那几秒里界面不该是全空的。
+ *
+ * 触发路径：
+ *   ① `state:"error"` 且本地文案**不是**那句权威文案（是猜测 ⇒ 需要网关纠正）；
+ *   ② 空 `final`（有帧但没有可见产出）—— 带 `holdStreaming`；
+ *   ③ 发送后 15s 一条本会话的 chat/agent 帧都没收到（`armFirstFrameWatchdog`）。
+ */
+const AUTHORITATIVE_RELOAD_DELAYS_MS = [500, 900, 1400, 2000, 3000, 4500, 6500, 9000];
+/**
+ * **推迟失败提示**时专用的一档阶梯（§第十四轮）。
+ *
+ * 默认那档是按「空 final / 发送后毫无回音」设计的（最坏累计 ~28s），期间界面靠「思考中」
+ * 撑着 —— 对「已经明确失败、只是在等网关把投影文案写回 `chat.history`」这一种情形，
+ * 让用户盯着转圈近半分钟不可接受。这里收紧到 ~4.6s（4 次探测）：
+ * 拿到权威文案就落它；拿不到就把本地猜测落下来。**一旦放弃就不再回源**，
+ * 所以不会出现「落完本地那句、过一会儿又被换掉」的闪烁。
+ */
+const DEFERRED_NOTICE_RELOAD_DELAYS_MS = [0, 400, 1200, 3000];
+const FIRST_FRAME_WATCHDOG_MS = 15_000;
+let authoritativeReloadToken = 0;
+let authoritativeReloadTimer: number | null = null;
+/** 开始轮询时「已有的网关侧助手消息 id」；此后出现锚点之外的就是新产出。 */
+let authoritativeReloadAnchor: Set<string> | null = null;
+/** 本轮轮询是否替用户保着「思考中」气泡（结算时必须收尾）。 */
+let authoritativeReloadHoldsStreaming = false;
+let firstFrameWatchdog: number | null = null;
+
+/**
+ * 本轮（`send()` 之后）网关侧**是否已经产出过助手内容**。
+ *
+ * 只服务于 `case "error"` 的判重 ——「网关可能在同一轮里既广播助手消息、又发 error 事件」。
+ * `send()` 清零，`commitStreamingMessage()` / `case "final"` 落库时置位。
+ */
+let roundHasGatewayOutput = false;
+
+/** 本轮是否已经落过一条本地失败提示（同轮重复的 error 帧不该叠第二条）。 */
+let roundHasLocalFailureNotice = false;
+
+/**
+ * 被**推迟**的本地失败提示（见 `case "error"`）。
+ *
+ * 本地文案只是猜测（`!== BUDGET_EXCEEDED_FALLBACK_TEXT`）时**先不落气泡**：网关可能把它
+ * 投影成「积分不足，请前往充值页面充值」，先落本地那句就会看到「先闪一下『模型提供方拒绝了
+ * 请求结构』、再变成『积分不足，请前往充值页面充值』」—— 这正是用户报的闪烁。
+ * 所以先保着「思考中」气泡、立刻回源，等网关给出权威文案；阶梯用尽才把它落下来
+ * （宁可文案不那么准，也保证「每次都有回复」）。
+ */
+let deferredFailureNotice: { text: string; sessionKey: string } | null = null;
+
+/** 视图里**网关侧**助手消息的 id 集合（本地失败气泡是猜测，不算）。 */
+function authoritativeAssistantIds(): Set<string> {
+  return new Set(
+    messages.value
+      .filter((m) => m.role === "assistant" && m.localNotice === undefined)
+      .map((m) => m.id),
+  );
+}
+
+/** 视图里**最后一条用户消息**的下标（一条都没有时 -1）。 */
+function lastUserMessageIndex(list: ChatMessage[]): number {
+  for (let i = list.length - 1; i >= 0; i -= 1) {
+    if (list[i]?.role === "user") return i;
+  }
+  return -1;
+}
+
+/**
+ * 锚点之外有没有出现新的网关侧助手消息（= 网关已经给出本轮产出）。
+ *
+ * ⚠️ **两个判据必须同时**（2026-09-28 第十三轮）：
+ *   ① 不在锚点里（`!anchor.has(id)`）—— 这是「新产出」的本义；
+ *   ② 位置在本轮用户消息**之后** —— 只有锚点判据时，**上一轮迟到的**助手消息
+ *      （开始轮询时还不存在、因此不在锚点里）会在第一趟就点亮判据 ⇒ 轮询提前收工，
+ *      现象是「回复总是滞后一轮」。只有位置判据也不行：回源把本地乐观用户气泡顶掉时
+ *      「最后一条 user」会退回上一轮，同样假命中。
+ */
+function hasAuthoritativeReply(): boolean {
+  const anchor = authoritativeReloadAnchor;
+  if (!anchor) return true; // 没有锚点（未开始轮询）：视为无需等待
+  const lastUser = lastUserMessageIndex(messages.value);
+  return messages.value.some(
+    (m, index) =>
+      index > lastUser &&
+      m.role === "assistant" &&
+      m.localNotice === undefined &&
+      !anchor.has(m.id),
+  );
+}
+
+/** 把「被推迟的」失败提示落成气泡（回源没拿到权威文案时的兜底，见 `case "error"`）。 */
+function flushDeferredFailureNotice(): void {
+  const pending = deferredFailureNotice;
+  deferredFailureNotice = null;
+  if (!pending) return;
+  // 归属：推迟期间用户可能已经切走会话 —— 别把这条提示落到别的会话里。
+  if (pending.sessionKey !== resolvedSessionKey()) return;
+  pushLocalCommandNote(pending.text, { kind: "failure" });
+}
+
+/**
+ * 回源**命中**后的收尾：若本轮那条网关消息只是一句没有信息量的英文兜底，就把被推迟的
+ * 本地中文挂到它的**渲染**上（`failureTextOverrides`），否则用户会从「中文解释」直接掉到
+ * 「英文兜底」—— 命中 `GATEWAY_ASSISTANT_ERROR_FALLBACK_TEXT` 就说明网关没给出真原因
+ * （它只区分「欠费」与「其它」，其余原因本地的规则表里才有）。
+ */
+function carryDeferredNoticeOntoFallbackMessage(): void {
+  const pending = deferredFailureNotice;
+  if (!pending || pending.sessionKey !== resolvedSessionKey()) return;
+  const lastUser = lastUserMessageIndex(messages.value);
+  const target = messages.value.find(
+    (m, index) =>
+      index > lastUser &&
+      m.role === "assistant" &&
+      m.localNotice === undefined &&
+      (m.text ?? "").trim() === GATEWAY_ASSISTANT_ERROR_FALLBACK_TEXT,
+  );
+  if (!target) return;
+  failureTextOverrides.value.set(target.id, pending.text);
+  // 清掉已经不在视图里的 id，避免长时间挂机后这张表无限增长。
+  for (const id of [...failureTextOverrides.value.keys()]) {
+    if (!messages.value.some((m) => m.id === id)) failureTextOverrides.value.delete(id);
+  }
+}
+
+/**
+ * 结算：被推迟的失败提示按结局落、保着的「思考中」收掉、待执行队列排空。
+ *
+ * `outcome`：
+ *   - `"hit"` —— 网关给出了本轮产出 ⇒ 本地那条猜测**作废**（`carryLocalNotices` 的
+ *     让位规则同一口径），界面由网关消息自己说话。
+ *   - `"exhausted"` —— 阶梯用尽仍没拿到 ⇒ 把本地猜测落下来，保证「这一轮有回复」。
+ */
+function settleAuthoritativeReload(outcome: "hit" | "exhausted"): void {
+  authoritativeReloadAnchor = null;
+  if (outcome === "hit") {
+    // 网关说话了 ⇒ 本地那条猜测作废（`carryLocalNotices` 的让位规则同一口径）。
+    // ⚠️ 但网关对**非欠费**失败只给一句没有信息量的英文兜底 —— 那种情况把本地中文
+    // 保留在**渲染层**，别让用户从「中文解释」掉到「英文兜底」。
+    carryDeferredNoticeOntoFallbackMessage();
+    deferredFailureNotice = null;
+  } else {
+    flushDeferredFailureNotice();
+  }
+  if (authoritativeReloadHoldsStreaming) {
+    authoritativeReloadHoldsStreaming = false;
+    // skipCommit=true：内容来自服务端回源，不该再拿空流式正文去 commit 一条手搓消息。
+    finalizeStreaming(true);
+  }
+  // ⚠️ 排空待执行队列必须在 `finalizeStreaming`（把 `sending` 置 false）**之后**：
+  // `consumeNextPendingTask` 头一行是 `if (sending.value …) return`，先排等于没排。
+  //
+  // 为什么这条路径必须补排空：阶梯是带 `holdStreaming` 起跑的，期间 `sending` 一直 true
+  // ⇒ 用户这几秒敲的下一条走的是 `submitComposer` 的**入队**分支；而正常的排空点
+  // （`case "final"` 尾部）在这条路径上根本走不到 ⇒ 那条消息永远卡在「待执行任务(1)」。
+  scheduleNextPendingTask();
+}
+
+/**
+ * 让在途的回源轮询失效（**只用于「本轮已有网关侧产出」**；不要在新回合开始时调用）。
+ *
+ * ⚠️ 这里**不**做 `settleAuthoritativeReload()`：调用方（`case "final"` 落库分支）自己就会
+ * 复位 `sending` / 提升引导消息，再多一次 `finalizeStreaming()` 会与它打架
+ * （典型表现：带引导的轮次里 `sending` 被提前置 false，气泡消失）。
+ * 保着「思考中」的收尾只发生在阶梯自己结算的两处。
+ */
+function cancelAuthoritativeReload(): void {
+  authoritativeReloadToken += 1;
+  if (authoritativeReloadTimer !== null) {
+    window.clearTimeout(authoritativeReloadTimer);
+    authoritativeReloadTimer = null;
+  }
+  authoritativeReloadAnchor = null;
+  authoritativeReloadHoldsStreaming = false;
+  // 网关说话了（调用方就是「本轮落了助手消息」那条路径）⇒ 被推迟的本地猜测作废。
+  deferredFailureNotice = null;
+}
+
+function scheduleAuthoritativeReload(
+  reason: string,
+  opts?: { holdStreaming?: boolean; delays?: readonly number[] },
+): void {
+  // 重排阶梯（旧的在途定时器作废），但**不动**已经保着的「思考中」。
+  authoritativeReloadToken += 1;
+  if (authoritativeReloadTimer !== null) {
+    window.clearTimeout(authoritativeReloadTimer);
+    authoritativeReloadTimer = null;
+  }
+  const delays = opts?.delays ?? AUTHORITATIVE_RELOAD_DELAYS_MS;
+  authoritativeReloadAnchor = authoritativeAssistantIds();
+  authoritativeReloadHoldsStreaming = authoritativeReloadHoldsStreaming || opts?.holdStreaming === true;
+  const token = authoritativeReloadToken;
+  let step = 0;
+  const tick = async (): Promise<void> => {
+    authoritativeReloadTimer = null;
+    if (token !== authoritativeReloadToken) return;
+    await loadHistory({ skipCache: true });
+    if (token !== authoritativeReloadToken) return;
+    if (hasAuthoritativeReply()) {
+      // 网关说话了：收尾（把保着的「思考中」换成刚落库的助手消息）。
+      console.warn("[chat-pane] 权威回源命中：本轮助手消息已落库", {
+        sessionKey: resolvedSessionKey(),
+        reason,
+      });
+      settleAuthoritativeReload("hit");
+      return;
+    }
+    step += 1;
+    if (step >= delays.length) {
+      // 用尽仍没拿到：收尾（别把气泡永远挂在「思考中」），本地那条猜测留着，并留痕。
+      console.warn("[chat-pane] 权威回源已用尽重试，仍未拿到本轮的助手消息", {
+        sessionKey: resolvedSessionKey(),
+        reason,
+      });
+      settleAuthoritativeReload("exhausted");
+      return;
+    }
+    authoritativeReloadTimer = window.setTimeout(
+      () => void tick(),
+      delays[step],
+    );
+  };
+  authoritativeReloadTimer = window.setTimeout(
+    () => void tick(),
+    delays[0],
+  );
+}
+
+/** 发送成功后起表：15s 内一条本会话的 chat/agent 帧都没收到，就按「没有回音」处理。 */
+function armFirstFrameWatchdog(): void {
+  clearFirstFrameWatchdog();
+  firstFrameWatchdog = window.setTimeout(() => {
+    firstFrameWatchdog = null;
+    console.warn("[chat-pane] 发送后 15s 未收到任何 chat 帧 → 主动回源历史", {
+      sessionKey: resolvedSessionKey(),
+    });
+    scheduleAuthoritativeReload("no-frame");
+  }, FIRST_FRAME_WATCHDOG_MS);
+}
+
+function clearFirstFrameWatchdog(): void {
+  if (firstFrameWatchdog === null) return;
+  window.clearTimeout(firstFrameWatchdog);
+  firstFrameWatchdog = null;
+}
 
 // 网关连接状态变化（首次握手完成 / 断线重连）→ 给恢复出来的待执行队列一次机会。
 // 挂载那一刻 WS 往往还没握手完，`gateway.request` 会等最多 30s 才超时，
@@ -4333,11 +4769,10 @@ function onKeydown(event: KeyboardEvent): void {
  *
  * 以前只把文案写进输入框并聚焦，用户还得再点一次「发送」—— 两下点击才能问出一句话。
  *
- * ⚠️ 走 `submitComposer()` 而不是 `send()`：斜杠指令拦截、积分不足提示、流式中入队
- * 这三条闸门必须与「手打文字再回车」完全同一条路径；绕过它会在余额为 0 时静默失败，
- * 也会让 `blocked` 档的指令漏给网关。
- * 被闸门拦下时（例如积分为 0）文案会**留在输入框里**，用户可以改完再发 —— 这是刻意的，
- * 不能先清空再发。
+ * ⚠️ 走 `submitComposer()` 而不是 `send()`：斜杠指令拦截、流式中入队这两条闸门
+ * 必须与「手打文字再回车」完全同一条路径；绕过它会让 `blocked` 档的指令漏给网关。
+ * 余额为 0 时**已经没有本地闸门**（提示由助手给出，见 `submitComposer` 里的注释），
+ * 所以「文案留在输入框里」这句不再适用：现在照常发出去，由网关回一条提示。
  */
 function useSuggestion(text: string): void {
   input.value = text;
@@ -4486,17 +4921,6 @@ function formatBalance(value: number | null | undefined): string {
         <RefreshButton class="chat-refresh" :loading="loading" @refresh="loadHistory({ skipCache: true })" />
       </div>
     </header>
-
-    <!-- 积分不足横幅：网关返回的 balance 为 0 时常驻提示，充值后带回正余额会自动消失 -->
-    <!-- <el-alert
-      v-if="insufficientCredits"
-      class="credits-alert"
-      type="warning"
-      :closable="false"
-      show-icon
-    >
-      <template #title>积分不足，请前往充值页面充值</template>
-    </el-alert> -->
 
     <div ref="threadRef" class="chat-thread" @scroll.passive="onThreadScroll">
       <div class="chat-inner">

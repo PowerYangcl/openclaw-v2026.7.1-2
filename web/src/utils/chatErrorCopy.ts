@@ -37,6 +37,34 @@ type ErrorRule = { re: RegExp; title: string; detail: string; retryable: boolean
 const AGENT_FAILED_PREFIX_RE = /Agent failed before reply[:：]/i;
 
 /**
+ * 网关侧「欠费 / 积分不足」的兜底文案，**逐字**对齐
+ * `src/gateway/chat-display-projection.ts` 的 `BUDGET_EXCEEDED_FALLBACK_TEXT`。
+ * web 层复用同一句，保证「实时落的气泡」与「刷新后网关投影回来的消息」文案一致。
+ */
+export const BUDGET_EXCEEDED_FALLBACK_TEXT = "积分不足，请前往充值页面充值";
+
+/**
+ * 网关侧**非 budget** 类失败的兜底文案，**逐字**对齐
+ * `src/gateway/chat-display-projection.ts:1651` 的 `GATEWAY_ASSISTANT_ERROR_FALLBACK_TEXT`。
+ *
+ * 为什么 web 层要知道它：失败轮走 `chat.history` 时，网关对「没有可见正文的助手错误消息」
+ * 只会投影成两种文案之一 —— 欠费那句，或这句英文。也就是说**任何非欠费失败一旦回源，
+ * 中文解释都会被换成这句英文**。`ChatPane.vue` 用它做判据：命中它说明网关只是给了个
+ * 没有信息量的兜底，此时保留本地那条中文映射（见 `failureTextOverrides`）。
+ */
+export const GATEWAY_ASSISTANT_ERROR_FALLBACK_TEXT =
+  "The agent run failed before producing a reply.";
+
+/**
+ * 网关 `isBudgetExceededErrorLike()` 的同款判据。
+ *
+ * ⚠️ 比网关多一个「积分不足」：网关给出的文案用的就是「积分」，而它的判据只写到
+ * 「余额不足」—— 上游照文案回「积分不足」时会漏判。web 层按**文案口径**补齐。
+ */
+const BUDGET_EXCEEDED_RE =
+  /budget_exceeded|budget has been exceeded|max budget|insufficient (?:credit|funds|balance)|欠费|余额不足|积分不足|充值/i;
+
+/**
  * 会话被别的 run 接管 / 嵌入提示锁竞争 —— `AttemptSessionTakeoverError`
  * （`src/agents/embedded-agent-runner/run/attempt.session-lock.ts:1149`）。
  *
@@ -248,10 +276,16 @@ function stripFailureWrapper(raw: string): string {
  * 匹配顺序：①已知的中文原文（上游已本地化的）→ ②规则表打原文 → ③剥壳后再打一遍
  * → ④兜底（带包装前缀才算「回复前失败」，否则中性文案）。
  *
- * ⚠️ 调用方口径（2026-09-23 用户要求「气泡消息不显示生成失败的消息」）：
- * `ChatPane.vue` 的 `case "error"` 现在是**完全静默** —— 本函数的产出**只进
- * `console.warn`**，既不弹窗、也不落助手消息气泡。恢复展示要改 `ChatPane.vue` 那一段
- * （注释里写了「弹窗 / 落消息」两种复原法），**别在本文件里加展示逻辑**。
+ * 调用方口径（2026-09-28 第十轮更新）：`ChatPane.vue` 的 `case "error"` **会**用本函数的
+ * 产出落一条本地助手气泡（`pushLocalCommandNote(formatFriendlyError(friendly))`），
+ * 同时保留 `console.warn` 留痕。
+ *
+ * 历史：2026-09-23 曾改为**完全静默**（产出只进 console.warn），理由是未分类的英文原文
+ * （`Agent run failed` 之类）落进气泡会被当成「模型在说话」；2026-09-28 用户要求「积分为 0
+ * 时由助手显示提示」后恢复展示 —— 靠本文件把网关已本地化的整句中文**原样**返回
+ * （见 `localizedNotice` 那条），避免给「积分不足…」扣上「生成失败」标题。
+ *
+ * **别在本文件里加展示逻辑**（落气泡 / 弹窗都在 `ChatPane.vue`）。
  */
 export function localizeChatError(raw: string): FriendlyError {
   if (!raw) return { title: "生成失败", detail: "", retryable: true };
@@ -259,6 +293,21 @@ export function localizeChatError(raw: string): FriendlyError {
   // 上游已经本地化的锁竞争提示（见 server-chat.ts:220 buildChatErrorMessage）
   if (/当前会话正在处理中/.test(raw)) {
     return { title: "当前会话正在处理中，请稍后", detail: "", retryable: false };
+  }
+
+  // 欠费 / 积分不足（budget 类）—— **判据对齐网关侧现有逻辑**，文案统一成网关那一句。
+  //
+  // 网关侧 `src/gateway/chat-display-projection.ts` 的 `isBudgetExceededErrorLike()` 会把
+  // budget 类失败的助手消息投影成 `BUDGET_EXCEEDED_FALLBACK_TEXT`
+  // =「积分不足，请前往充值页面充值」，但那条投影**只在「助手消息没有可见正文」时生效**
+  // —— 一旦 agent-runner 产出了可见正文（例如 compaction 恢复文案），投影就失效，
+  // 用户看到的是那句英文提示。所以 web 层按**同一组判据**再兜一次，直接落中文文案。
+  //
+  // ⚠️ 词表比网关多一个「积分不足」：网关给出的文案用的就是「积分」，而它的判据只写到
+  // 「余额不足」（`chat-display-projection.ts` 的 `isBudgetExceededErrorLike`）——
+  // 上游按文案回「积分不足」时会漏判。web 层按**文案口径**补齐，不依赖网关改判据。
+  if (BUDGET_EXCEEDED_RE.test(raw)) {
+    return { title: BUDGET_EXCEEDED_FALLBACK_TEXT, detail: "", retryable: false };
   }
 
   // 会话接管 / 提示锁竞争：裸文案与 ⚠️ 包装两种形态都要能命中（见文件头实测记录）
@@ -302,4 +351,40 @@ export function localizeChatError(raw: string): FriendlyError {
 /** 把 FriendlyError 拍平成单行 toast 文案：title 在前，detail 换行接在后。 */
 export function formatFriendlyError(e: FriendlyError): string {
   return e.detail ? `${e.title}\n${e.detail}` : e.title;
+}
+
+/**
+ * 失败提示的**最终文案**（落气泡 / 弹窗都走这里）。
+ *
+ * `balanceZero`：web 层**本地已知**的余额 ≤ 0（`ChatPane` 的 `insufficientCredits`）。
+ *
+ * 为什么需要这个参数（2026-09-28 实测）：
+ * 实时 `state: "error"` 事件的载荷**只有 `errorMessage`**（见 `ChatPane.vue` 的
+ * `ChatEventPayload`），没有网关投影所用的 `errorBody / errorCode / errorType`
+ * ⇒ 上游在余额为 0 时回的**间接错误**（例：`provider rejected the request schema or
+ * tool payload.`，原文不含任何「积分 / 余额 / 欠费」字样）靠规则表**永远**映射不出
+ * 「积分不足」；而刷新后走 `chat.history` 时，网关会按它自己的判据
+ * （`src/gateway/chat-display-projection.ts` 的 `isBudgetExceededErrorLike`，吃的是
+ * errorBody 等字段）把它投影成「积分不足，请前往充值页面充值」——
+ * 这就是「实时一种文案、刷新后才变成积分不足」的成因。
+ *
+ * 所以用本地余额补一次校验，让实时文案与网关投影对齐到同一句，不必等刷新。
+ *
+ * ⚠️ 只覆盖 `retryable === true` 的可重试类错误：`retryable === false` 的明确提示
+ * （「该智能体已不可用」「模型密钥未配置」「当前会话正在处理中（锁竞争）」…）一律原样露出，
+ * 否则真问题会被「积分不足」掩盖。
+ *
+ * 权衡：余额为 0 时，「会话接管」「请求超时」「限流」这类**可重试**提示也会被统一成
+ * 「积分不足」—— 它们此刻同样不可行动，而用户真正要做的是先去充值。
+ */
+export function resolveFailureNotice(
+  raw: string,
+  options?: { balanceZero?: boolean },
+): { friendly: FriendlyError; notice: string } {
+  const friendly = localizeChatError(raw);
+  const notice =
+    options?.balanceZero === true && friendly.retryable
+      ? BUDGET_EXCEEDED_FALLBACK_TEXT
+      : formatFriendlyError(friendly);
+  return { friendly, notice };
 }

@@ -96,4 +96,27 @@ export type ChatMessage = {
   toolName?: string;
   /** 工具调用 / 工具结果的状态（如 running / success / error）。 */
   status?: string;
+  /**
+   * 这条消息**只存在于本地**（网关 transcript 里没有），但必须跨「静默回源」存活。
+   *
+   * 目前只有一种：`"failure"` —— `ChatPane` 的 `case "error"` 落的失败提示气泡。
+   *
+   * 为什么必须显式标记（2026-09-28 第十一轮）：失败轮要么落在 `state:"error"`
+   * （落一条本地气泡），要么落在**空 `final`**（什么都不落，见 `ChatPane` 同名分支）。
+   * 两条路都要靠回源 `chat.history` 去拿网关的**权威**文案
+   * （`积分不足，请前往充值页面充值` —— 只有网关的 display projection 判得出来，
+   * 实时 `error` 帧的载荷里没有 budget 特征）。而回源是整体替换 `messages`
+   * ⇒ 本地气泡若不显式带过去就会**凭空消失**，用户表现为「第一次发送后助手没回应」。
+   *
+   * 一旦回源拿到了网关自己投影出来的助手消息，本地这条**猜测**就要丢掉
+   * （否则同一轮会出现「本地猜测 + 网关权威」两条）。见 `carryLocalNotices`。
+   */
+  localNotice?: "failure";
+  /**
+   * `localNotice` 属于哪个会话（`resolvedSessionKey()` 的快照）。
+   *
+   * ⚠️ 必须有这个字段：`loadHistory` 在**切会话**时也会跑，若不带会话归属地搬运，
+   * 上个会话的「积分不足」气泡会被搬到无关的新会话里。
+   */
+  localNoticeKey?: string;
 };
