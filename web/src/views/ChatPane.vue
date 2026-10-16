@@ -315,7 +315,7 @@ const emit = defineEmits<{
   (e: "paneDragStart", paneId: string): void;
   (e: "paneDragEnd"): void;
   /** 请求在右侧详情面板展开某条消息的完整内容（由布局层持有面板）。 */
-  (e: "openDetail", message: ChatMessage): void;
+  (e: "openDetail", message: ChatMessage, agentId: string): void;
 }>();
 
 const gateway = useGatewayStore();
@@ -2315,7 +2315,7 @@ function canOpenRunDetailOf(msg: ChatMessage): boolean {
 /** 打开「详情」：合成一条含组内助手正文 / 媒体（**不含思考、不含工具过程输出**）的虚拟消息。 */
 function openRunDetail(msg: ChatMessage): void {
   const detail = runDetailMessage(turnRunOf(msg), turnRunKey(msg));
-  if (detail) emit("openDetail", detail);
+  if (detail) emit("openDetail", detail, paneAgentId.value);
 }
 
 /**

@@ -52,14 +52,23 @@ const props = withDefaults(
     message: ChatMessage | null;
     /** 该消息所属 agent 的展示名（头像/标题用）。 */
     agentName?: string;
-    /** 该消息所属 agent 的头像。 */
+    /** 该消息所属 agent 的头像（原始值：图片路径 / URL / emoji / 文字）。 */
     agentAvatar?: string;
+    /**
+     * 该消息所属 agent id。仅用于头像值为**服务器本地文件路径**时，
+     * 由 `ChatAvatar` 回退到网关的 `/avatar/<agentId>` 路由。
+     */
+    agentId?: string | null;
+    /** 网关 `agent.identity.get` 的 `avatarStatus`（`local` = 网关托管本地文件）。 */
+    agentAvatarStatus?: string | null;
     /** 用户展示名（user 消息用）。 */
     userName?: string;
   }>(),
   {
     agentName: "",
     agentAvatar: "",
+    agentId: null,
+    agentAvatarStatus: null,
     userName: "",
   },
 );
@@ -169,6 +178,8 @@ async function copyFullMessage(): Promise<void> {
             :role="message?.role === 'user' ? 'user' : 'assistant'"
             :name="title"
             :avatar="message?.role === 'assistant' ? agentAvatar : undefined"
+            :avatar-status="message?.role === 'assistant' ? agentAvatarStatus : undefined"
+            :agent-id="message?.role === 'assistant' ? agentId : undefined"
             :size="28"
           />
           <div class="detail-drawer__title-block">

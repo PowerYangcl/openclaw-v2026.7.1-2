@@ -606,21 +606,38 @@ function handleClosePane(paneId: string): void {
  */
 const detailMessage = ref<ChatMessage | null>(null);
 
-/** 详情面板展示的消息所属 agent 的展示名（点开时按活动窗格的会话推导）。 */
+/** 详情面板展示的消息所属 agent 的展示名（与 `detailAgentId` 同源）。 */
 const detailAgentName = ref<string>("");
+
+/**
+ * 详情面板展示的消息所属 agent id（点开时按**触发窗格**的会话推导）。
+ *
+ * ⚠️ 必须由窗格自己带上来（`ChatPane` 的 `paneAgentId`），不能改用
+ * `currentSessionKey`：后者只代表**活动窗格**，拆分视图里点非活动窗格的
+ * 「详情」会张冠李戴（标题和头像都变成另一个 agent）。展示名 / 头像 /
+ * avatarStatus 三者都从它派生，保证与侧栏、气泡同源。
+ */
+const detailAgentId = ref<string>("");
 
 /** 文件预览弹窗是否打开。 */
 const filePreviewOpen = ref(false);
 /** 文件预览弹窗的初始选中文件。 */
 const filePreviewActivePath = ref("");
 
-/** 点「详情」按钮：在右侧面板展开该消息的完整内容，并记录其 agent 展示名。 */
-function handleOpenDetail(message: ChatMessage): void {
+/**
+ * 点「详情」按钮：在右侧面板展开该消息的完整内容，并记录其归属 agent。
+ *
+ * `agentId` 由触发窗格传入（不是全局活动窗格），见 `detailAgentId` 的说明。
+ */
+function handleOpenDetail(message: ChatMessage, agentId: string): void {
   detailMessage.value = message;
-  // 助手消息按当前会话对应的 agent 取展示名；非助手消息面板回落「我 / 助手」。
-  if (message.role === "assistant") {
-    detailAgentName.value = agents.nameForAgent(agents.agentIdForSession(currentSessionKey.value));
+  const id = agentId.trim();
+  // 助手消息按归属 agent 取展示名 / 头像；非助手消息面板回落「我 / 助手」。
+  if (message.role === "assistant" && id) {
+    detailAgentId.value = id;
+    detailAgentName.value = agents.nameForAgent(id);
   } else {
+    detailAgentId.value = "";
     detailAgentName.value = "";
   }
 }
@@ -838,6 +855,9 @@ onBeforeUnmount(() => {
     <ChatDetailSidebar
       :message="detailMessage"
       :agent-name="detailAgentName"
+      :agent-id="detailAgentId"
+      :agent-avatar="detailAgentId ? agents.avatarForAgent(detailAgentId) : ''"
+      :agent-avatar-status="detailAgentId ? agents.avatarStatusForAgent(detailAgentId) : null"
       @close="closeDetail"
       @open-file-preview="openFilePreview"
     />
