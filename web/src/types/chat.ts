@@ -47,6 +47,16 @@ export type ChatMessage = {
   ts?: number;
   provider?: string;
   model?: string;
+  /**
+   * `provider`/`model` 是**本地按网关行为推断**的临时值（不是网关给的真值）。
+   *
+   * 只有「老网关的 final 帧不带 provider/model」这一中间态才会置 true：
+   * 先按 `utils/roundModelEstimate.ts` 的规律把模型名占上，等 `chat.history`
+   * 拿回本轮落库的助手消息（历史投影每条都带当轮真值）再校正并清掉此标记。
+   * UI 上必须对此有可见区分（见积分行的 `~` 前缀），
+   * 否则又回到「替后端发言」的老问题。
+   */
+  modelEstimated?: boolean;
   completionId?: string;
   /** 本轮思考过程（如果服务端推送了 thinking 块） */
   thinking?: string;

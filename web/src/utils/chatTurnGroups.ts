@@ -166,13 +166,22 @@ export function runSpendLoading(run: readonly ChatMessage[]): boolean {
   return run.some((msg) => msg.spendLoading === true);
 }
 
-/** 底行「生成模型」口径：取组内最后一条同时带 provider + model 的消息。 */
+/**
+ * 底行「生成模型」口径：取组内最后一条同时带 provider + model 的消息。
+ *
+ * `estimated` 透传 `modelEstimated`：老网关的 final 帧不带模型名时，前端会先按
+ * 网关行为规律填一个估算值，等 `sessions.list` 校正。UI 必须能区分「真值 / 估算」，
+ * 否则又变成替后端发言。
+ */
 export function runModelOf(
   run: readonly ChatMessage[],
-): { provider: string; model: string } | null {
+): { provider: string; model: string; estimated?: boolean } | null {
   for (let i = run.length - 1; i >= 0; i -= 1) {
     const msg = run[i];
-    if (msg?.provider && msg.model) return { provider: msg.provider, model: msg.model };
+    if (!msg?.provider || !msg.model) continue;
+    return msg.modelEstimated
+      ? { provider: msg.provider, model: msg.model, estimated: true }
+      : { provider: msg.provider, model: msg.model };
   }
   return null;
 }
@@ -300,7 +309,13 @@ export function runDetailMessage(
     role: "assistant",
     text: texts.join("\n\n"),
     ts: first.ts,
-    ...(model ? { provider: model.provider, model: model.model } : {}),
+    ...(model
+      ? {
+          provider: model.provider,
+          model: model.model,
+          ...(model.estimated ? { modelEstimated: true } : {}),
+        }
+      : {}),
     ...(spendResult ? { spendResult } : {}),
     ...(usage ? { usage } : {}),
     ...(mergedImages.length > 0 ? { contentImages: mergedImages } : {}),

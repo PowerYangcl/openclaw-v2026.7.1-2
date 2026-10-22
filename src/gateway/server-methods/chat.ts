@@ -76,6 +76,7 @@ import {
   type TranscriptEvent,
 } from "../../config/sessions/session-accessor.js";
 import { resolveMirroredTranscriptText } from "../../config/sessions/transcript-mirror.js";
+import type { SessionEntry } from "../../config/sessions/types.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import {
   claimAgentRunContext,
@@ -3997,6 +3998,46 @@ export const chatHandlers: GatewayRequestHandlers = {
       }
     }
 
+    /**
+     * 本轮**解析模型**时使用的 entry。
+     *
+     * 为什么不能直接用 `mutableEntry`：覆盖值要落库，只有「会话行已存在」时才
+     * patch 得上去（上面那段 `entry && storePath`）。于是全新会话的**第一条**
+     * `chat.send` 会把用户在选择器里选的模型整段跳过 —— 本轮仍按 agent 默认模型
+     * 跑，用户看到「选了 Kimi、实际 DeepSeek」。
+     *
+     * 这里给本轮补一个**只存在于内存**的合成 entry（不写库）：
+     *   - 不创建空会话行：合成 `sessionId: ""` 的行会让 run 收尾时的合并守卫
+     *     （`session-store.ts` 的 `existingEntry.sessionId !== entry.sessionId ⇒ null`）
+     *     把整轮元数据丢掉；
+     *   - 落库不需要靠覆盖字段：run 结束会把自己**实际使用**的模型写回
+     *     `entry.model/modelProvider`（`session-store.ts` 的 `setSessionRuntimeModel`），
+     *     后续消息按 runtime 模型继续命中同一个模型。
+     *
+     * 显式选「默认模型」（两个空串）时，合成 entry 里清掉覆盖，回归 agent 默认。
+     */
+    let modelEntry: typeof entry = entry;
+    if (modelOverrideRequested) {
+      const explicitProvider = requestedModelProvider ?? "";
+      const explicitModel = requestedModel ?? "";
+      const wantDefaultModel = explicitProvider.length === 0 && explicitModel.length === 0;
+      const synthetic: SessionEntry = {
+        sessionId: "",
+        updatedAt: Date.now(),
+        ...entry,
+      };
+      applyModelOverrideToSessionEntry({
+        entry: synthetic,
+        selection: wantDefaultModel
+          ? { provider: "", model: "", isDefault: true }
+          : { provider: explicitProvider, model: explicitModel },
+      });
+      // 没有会话行又选「默认模型」⇒ 本来就走 agent 默认，不必合成。
+      if (entry || !wantDefaultModel) {
+        modelEntry = synthetic;
+      }
+    }
+
     const deletedAgentId = resolveDeletedAgentIdFromSessionKey(cfg, sessionKey, mutableEntry, {
       acpMetadataSessionKey: legacyKey ?? sessionKey,
     });
@@ -4021,7 +4062,7 @@ export const chatHandlers: GatewayRequestHandlers = {
       agentId: selectedAgent.agentId,
       mainKey: cfg.session?.mainKey,
     });
-    const resolvedSessionModel = resolveSessionModelRef(cfg, mutableEntry, agentId);
+    const resolvedSessionModel = resolveSessionModelRef(cfg, modelEntry, agentId);
     const resolvedSessionAuthProvider = resolveProviderIdForAuth(resolvedSessionModel.provider, {
       config: cfg,
     });
@@ -4529,6 +4570,9 @@ export const chatHandlers: GatewayRequestHandlers = {
         sessionKey,
         agentId: selectedAgent.agentId,
         clientRunId,
+        // 本轮实际生效模型：收尾 final 帧要带出去，前端才不用「猜」模型
+        ...(resolvedSessionModel.provider ? { provider: resolvedSessionModel.provider } : {}),
+        ...(resolvedSessionModel.model ? { model: resolvedSessionModel.model } : {}),
         ...(chatSendTiming ? { chatSendTiming } : {}),
       });
       const ackPayload = {
