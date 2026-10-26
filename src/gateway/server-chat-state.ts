@@ -14,13 +14,6 @@ export type ChatRunRegistration = {
   sessionKey: string;
   agentId?: string;
   clientRunId: string;
-  /**
-   * 本轮解析出来的**实际生效模型**（`chat.send` 用 `resolveSessionModelRef` 算好后带进来）。
-   * 收尾的 final 帧用它给 `message` 补 `provider`/`model` —— 否则 web 只能拿「用户选择」
-   * 去猜本轮是哪个模型回答的，出现「界面 Kimi、实跑 DeepSeek」这种假象。
-   */
-  provider?: string;
-  model?: string;
   chatSendTiming?: ChatRunTiming;
 };
 

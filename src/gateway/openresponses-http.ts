@@ -473,13 +473,9 @@ export async function fetchJdSpendOnce(
   spend: number | null;
   balance: number | null;
   /**
-   * 账户累计消费（上游 `key.spend`），换算到与 `spend` **同一量纲**（×1000）。
-   *
-   * ⚠️ 必须换算：`spend` 走的是 `Math.round(raw * 1e5) / 100`（= raw×1000），
-   * 而 `key.spend` 原先直接用原始值，两个数字量纲差 1000 倍 ⇒ 任何增量比较
-   * 都永远不成立，`pollJdSpendForChat` 会逐轮落进兜底分支。
-   *
-   * `null` 表示记录未就绪或上游没返回 `key` 对象。
+   * Raw upstream cumulative spend (`key.spend`), used by `pollJdSpendForChat`
+   * to detect when the post-turn balance has been written. `null` when the
+   * record is not yet ready or the upstream did not return a `key` object.
    */
   keySpend: number | null;
 }> {
@@ -523,8 +519,7 @@ export async function fetchJdSpendOnce(
     status: res.status,
     spend: rawSpend !== null ? Math.round(rawSpend * 1e5) / 100 : null,
     balance: rawBalance !== null ? Math.round(rawBalance * 1e5) / 100 : null,
-    // 与 `spend`/`balance` 统一到 ×1000 口径；不取整，保留原始精度用于增量比较。
-    keySpend: rawKeySpend !== null ? rawKeySpend * 1e3 : null,
+    keySpend: rawKeySpend,
   };
 }
 
@@ -559,97 +554,7 @@ export async function fetchAndPollJdSpend(
 
 const JD_SPEND_CHAT_POLL_DEADLINE_MS = 15_000;
 const JD_SPEND_CHAT_POLL_RETRY_DELAY_MS = 2_000;
-/**
- * 金额比较容差。`spend` 被四舍五入到两位小数（`Math.round(raw * 1e5) / 100`），
- * 而累计值保留上游原始精度，两者比较必须容忍半个最小单位，否则「已入账」
- * 会被判成「没入账」。
- */
-const JD_SPEND_AMOUNT_EPSILON = 1e-2;
-/** 账户级快照的条数上限与过期时间（充值 / 换 key 后自然老化）。 */
-const JD_SPEND_KEY_STATE_LIMIT = 32;
-const JD_SPEND_KEY_STATE_TTL_MS = 15 * 60_000;
-
-/**
- * 账户级状态：最近一次**已确认入账**的（累计消费, 余额）。
- *
- * 为什么需要它：上游的 `spend` 记录和 `key.balance` 不是同一个事务写出来的，
- * 只看一次响应无法判断「这个 balance 是否已经扣掉本轮」。把上一条已确认消息
- * 观测到的 `key.spend` 当基线，用「累计增量 ≈ 本轮 spend」即可判定 —— 全程
- * 只比较上游给的数字，不做任何加减推算。
- */
-type JdSpendKeyState = { keySpend: number; balance: number; at: number };
-
-const jdSpendKeyStates = new Map<string, JdSpendKeyState>();
-
-function jdSpendKeyStateId(apiKey: string): string {
-  return createHash("sha256").update(apiKey).digest("hex").slice(0, 16);
-}
-
-function readJdSpendKeyState(apiKey: string): JdSpendKeyState | null {
-  const id = jdSpendKeyStateId(apiKey);
-  const state = jdSpendKeyStates.get(id);
-  if (!state) {
-    return null;
-  }
-  if (Date.now() - state.at > JD_SPEND_KEY_STATE_TTL_MS) {
-    jdSpendKeyStates.delete(id);
-    return null;
-  }
-  return state;
-}
-
-/**
- * 记录一次**已确认**的账户观测。
- *
- * 只在 `key.spend` 前进时覆盖：累计消费单调不减，值越大越新。
- * `chat.spend.getBatch` 会 4 路并发回填历史，乱序返回的旧观测不能把基线写回去。
- */
-function rememberJdSpendKeyState(
-  apiKey: string,
-  keySpend: number | null,
-  balance: number | null,
-): void {
-  if (typeof keySpend !== "number" || typeof balance !== "number") {
-    return;
-  }
-  const id = jdSpendKeyStateId(apiKey);
-  const prev = jdSpendKeyStates.get(id);
-  if (prev) {
-    if (keySpend < prev.keySpend - JD_SPEND_AMOUNT_EPSILON) {
-      // 累计值回退 ⇒ 充值重置 / 换了 key，旧基线失效，落到下面重建。
-      jdSpendKeyStates.delete(id);
-    } else if (keySpend <= prev.keySpend + JD_SPEND_AMOUNT_EPSILON) {
-      // 没有更新的观测（历史回填乱序返回等）⇒ 只续期，不覆盖。
-      prev.at = Date.now();
-      return;
-    }
-  }
-  if (jdSpendKeyStates.size >= JD_SPEND_KEY_STATE_LIMIT) {
-    const oldest = jdSpendKeyStates.keys().next();
-    if (!oldest.done) {
-      jdSpendKeyStates.delete(oldest.value);
-    }
-  }
-  jdSpendKeyStates.set(id, { keySpend, balance, at: Date.now() });
-}
-
-/**
- * 累计消费自 `baseKeySpend` 起是否已经吃进本轮 `spend`。
- *
- * 两个字段都换算到同一量纲（`key.spend` 与 `spend` 都 ×1000）后再比。
- * 缺任一数字 ⇒ 无法判定，返回 false（不猜）。
- */
-function hasSettledSpend(
-  baseKeySpend: number | null,
-  keySpend: number | null,
-  spend: number,
-): boolean {
-  if (typeof baseKeySpend !== "number" || typeof keySpend !== "number") {
-    return false;
-  }
-  return keySpend - baseKeySpend + JD_SPEND_AMOUNT_EPSILON >= spend;
-}
-
+const JD_SPEND_BALANCE_CONVERGENCE_EPSILON = 1e-6;
 /**
  * Clamp a numeric balance at zero. `null` (unknown) is preserved so callers
  * can distinguish "upstream not yet known" from "depleted to zero". `spend`
@@ -660,36 +565,29 @@ function clampBalanceFloor(balance: number | null): number | null {
 }
 
 /**
- * Polls the JD spend endpoint and reports **上游原值**：
- *  - `spend`：本轮消耗（上游 `spend` 字段，×1000 保留两位）；
- *  - `balance`：上游 `key.balance`，**原样透出，绝不加减推算**。
+ * Polls the JD spend endpoint in two phases:
+ *  1. Wait for `spend` to resolve (this turn's cost). `spend === 0` short-
+ *     circuits the poll — there is no balance change to wait for.
+ *  2. Once `spend > 0`, keep polling until either a transition is observed
+ *     (`key.spend` advanced by ≈ this turn's cost) or the deadline passes.
+ *     The post-turn balance is the balance reported alongside the LARGEST
+ *     `key.spend` we ever observed, because `key.spend` is monotonically
+ *     non-decreasing (the upstream's per-record cumulative moves from
+ *     pre-turn to post-turn and never back). When the deadline expires
+ *     WITHOUT any transition, return the observed balance as-is (see `mode`).
  *
- * 两阶段：
- *  1. 等 `spend` 出数；
- *  2. 确认「本轮消费已入账」就返回那一刻的 `key.balance`。窗口内确认不了，
- *     回退到**最后一次观测到的上游原值** —— 它可能还没扣掉本轮（偏大），
- *     但仍是上游给的真数字，且保证「剩余积分永远有数」。
+ * The returned balance is never allowed to increase relative to the balance
+ * observed at the start of the poll: the UI renders it as a monotonically
+ * decreasing credit counter, and a derived `firstBalance - spend` value would
+ * interleave with the next turn's real observation and make it bounce back up.
  *
- * 入账判据只有一条：账户累计消费 `key.spend` 相对基线（上一条已确认消息的
- * 观测值）增长了 ≈ 本轮 `spend`。
+ * Rules:
+ *  - R3: `spend === 0` → stop polling, return immediately (balance unchanged).
+ *  - R4: while EITHER `spend` or `balance` is `null`, keep polling.
+ *  - R5: a numeric balance ≤ 0 is clamped to 0 on return; `null` is preserved.
  *
- * ⚠️ 这里**不能**用 `firstBalance - spend` 兜底。上游常常在 final 帧到达之前
- * 就已完成入账，此时 `firstBalance` 已经是扣过的值，再减一次就等于把本轮
- * 花费扣第二遍（实测：真实 4911.87 / spend 0.78 被算成 4911.09）。用户看到
- * 的「后面的消息剩余积分反而变多」，就是这个偏差与相邻轮次正确值混排的结果。
- *
- * 规则：
- *  - history：历史轮次早已入账，直接用首探 `key.balance`，不等待、不推算；
- *  - spend === 0：本轮没有消费，同样直接透出原值；
- *  - final 未确认入账：返回窗口内最后一次观测到的原值（偏大但绝不偏小）；
- *  - 上游连 `key` 对象都没给：`balance: null`（没有数字可用，不编造）。
- *
- * 为什么判不准时宁可给偏大的旧值、也不给 `null`：产品要求「剩余积分行一直有数」。
- * 偏大值的相邻轮次表现是「持平 → 下一轮递减」，不会出现「余额变多」的错觉
- * （余额单调不增，旧值一定 ≥ 后续真值）；而 `null` 会让整行消失。
- *
- * Never throws. Returns `{ spend, balance }`；只有连 `spend` 都拿不到时才
- * 两个字段都为 `null`。
+ * Never throws. Returns `{ spend, balance }`; both fields may be `null` only
+ * when even the spend phase failed entirely.
  */
 export async function pollJdSpendForChat(
   completionId: string,
@@ -698,9 +596,11 @@ export async function pollJdSpendForChat(
     retryDelayMs?: number;
     deadlineMs?: number;
     /**
-     * Caller context:
-     *  - "final"（默认）：刚结束的轮次，需要等上游把本轮消费入账；
-     *  - "history"：历史轮次，记录已是终态，直接用观测值。
+     * Caller context, kept for call-site clarity. Both modes resolve a stable,
+     * never-transitioned record the same way: return the observed balance
+     * as-is (never a derived `firstBalance - spend`).
+     *  - "final" (default): the chat just finished.
+     *  - "history": the record is from a past turn.
      */
     mode?: "final" | "history";
   },
@@ -740,55 +640,59 @@ export async function pollJdSpendForChat(
     return { spend: null, balance: null };
   }
   const spend = result.spend;
+  const firstBalance = result.balance;
+  const firstKeySpend = result.keySpend;
 
-  // history — 历史轮次的消费早已入账，上游给的 `key.balance` 就是终值：
-  // 直接透出，既不等待也不推算。同时用它的累计值维护账户基线（只在前进时覆盖）。
-  if (mode === "history") {
-    rememberJdSpendKeyState(cfg.apiKey, result.keySpend, result.balance);
-    return { spend, balance: clampBalanceFloor(result.balance) };
-  }
-
-  // spend === 0 — 本轮没有消费，余额不会变，原值直接透出。
+  // R3 — spend === 0 means no balance change; return current state.
   if (spend === 0) {
-    rememberJdSpendKeyState(cfg.apiKey, result.keySpend, result.balance);
-    return { spend: 0, balance: clampBalanceFloor(result.balance) };
+    return { spend: 0, balance: clampBalanceFloor(firstBalance) };
   }
 
-  // Phase 2 — 只等「入账」这一个事实，等到了就用上游原值。
-  const baseline = readJdSpendKeyState(cfg.apiKey);
-  // 没有基线（进程刚起 / 新 key）时退化为「首探 → 后续」的增量观察：
-  // 这样仍能覆盖「首探未入账、窗口内入账」的常规路径；而首探就已入账且
-  // 全程无变化的情况无法判定，会在超时后返回 null（交给历史回填），
-  // 而不是靠减法去猜。
-  const baseKeySpend = baseline ? baseline.keySpend : result.keySpend;
-
-  // 首探就可能已经是入账后的终值（final 帧晚于上游出账，最常见）。
-  if (baseline && hasSettledSpend(baseline.keySpend, result.keySpend, spend)) {
-    rememberJdSpendKeyState(cfg.apiKey, result.keySpend, result.balance);
-    return { spend, balance: clampBalanceFloor(result.balance) };
-  }
-
-  // 兜底值：窗口内**最后一次看到的上游余额**。它只会被更小的值替换（余额单调
-  // 不增），所以「判不准」时给出的是「最接近真值但仍可能偏大」的原值。
-  let latestBalance: number | null = result.balance;
+  // Phase 2 — track the best (largest key.spend) observation. We need at
+  // least one more fetch to detect a transition or confirm stability.
+  let bestKeySpend = firstKeySpend ?? -Infinity;
+  let bestBalance: number | null = firstBalance;
+  let sawTransition = firstKeySpend === null; // null keySpend ⇒ treat as already converged
   while (!isAborted() && Date.now() < deadline) {
     await sleep(retryDelay);
     if (isAborted() || Date.now() >= deadline) {
       break;
     }
     const refined = await fetchJdSpendOnce(base, cfg.apiKey, completionId, opts?.signal);
-    if (!refined.ok || refined.balance === null) {
+    if (!refined.ok) {
       continue;
     }
-    latestBalance = refined.balance;
-    if (hasSettledSpend(baseKeySpend, refined.keySpend, spend)) {
-      rememberJdSpendKeyState(cfg.apiKey, refined.keySpend, refined.balance);
-      return { spend, balance: clampBalanceFloor(refined.balance) };
+    if (typeof refined.keySpend === "number") {
+      if (refined.keySpend > bestKeySpend) {
+        bestKeySpend = refined.keySpend;
+        bestBalance = refined.balance;
+        // A jump ≥ spend means the record has accumulated this turn's cost.
+        if (
+          typeof firstKeySpend === "number" &&
+          refined.keySpend + JD_SPEND_BALANCE_CONVERGENCE_EPSILON >= firstKeySpend + spend
+        ) {
+          sawTransition = true;
+        }
+      }
+    } else if (typeof refined.balance === "number" && bestBalance === null) {
+      bestBalance = refined.balance;
+    }
+    if (sawTransition && typeof bestBalance === "number") {
+      return { spend, balance: clampBalanceFloor(bestBalance) };
     }
   }
 
-  // 判不准入账 ⇒ 仍然给数：用最近一次观测到的上游原值，绝不加减推算。
-  return { spend, balance: clampBalanceFloor(latestBalance) };
+  // Deadline / abort resolution.
+  if (sawTransition && typeof bestBalance === "number") {
+    return { spend, balance: clampBalanceFloor(bestBalance) };
+  }
+  // No transition observed: the record is still in its pre-turn state, so the
+  // only trustworthy balance is the one we actually observed. Deriving
+  // `firstBalance - spend` here would emit a value that the next turn's real
+  // observation overwrites with a LARGER number, which surfaces as a credit
+  // counter that drops and then bounces back up. Both modes therefore return
+  // the observed balance as-is; `spend` still reports this turn's cost.
+  return { spend, balance: clampBalanceFloor(bestBalance ?? firstBalance) };
 }
 
 export interface PollSpendBatchOptions {

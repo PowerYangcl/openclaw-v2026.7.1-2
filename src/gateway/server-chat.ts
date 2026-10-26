@@ -976,9 +976,9 @@ export function createAgentEventHandler({
     responseId: string,
   ): Promise<Record<string, unknown>> => {
     // 6s ceiling — enough for the upstream to accumulate the post-turn
-    // `key.spend` in the common case; the poll falls back to a deterministic
-    // `oldBalance - spend` computation when the deadline hits, so the new
-    // balance is still reported.
+    // `key.spend` in the common case. When the deadline hits without a
+    // transition, the poll reports the last observed balance as-is (never a
+    // derived `oldBalance - spend`, which would make the UI counter bounce).
     const spendResult = await pollJdSpendForChat(responseId, { deadlineMs: 6_000 });
     return {
       ...message,
@@ -1015,27 +1015,12 @@ export function createAgentEventHandler({
     chatRunState.clearRun(clientRunId);
     const spawnedBy = resolveSpawnedBy(sessionKey);
     if (jobState !== "error") {
-      /**
-       * 本轮**实际使用**的模型（注册 run 时由 `chat.send` 从
-       * `resolveSessionModelRef` 带过来）。
-       *
-       * 为什么必须随 final 帧下发：这条 final 是 web 首屏之后唯一能拿到的
-       * 「本轮谁回答的」真值。以前不带，前端只能拿**用户选择**去猜并写进消息里
-       * ⇒ 用户切了 Kimi、网关因为别的原因仍跑 DeepSeek 时，界面显示 Kimi、
-       * 实际是 DeepSeek，刷新（走 `chat.history` 的投影）才露出真相。
-       * 宁可不显示，也不能显示错的。
-       */
-      const runModelIdentity = opts?.firstAssistantTimingEntry;
-      const runProvider = runModelIdentity?.provider?.trim() || undefined;
-      const runModel = runModelIdentity?.model?.trim() || undefined;
       const baseMessage =
         text && !shouldSuppressSilent
           ? {
               role: "assistant",
               content: [{ type: "text", text }],
               timestamp: Date.now(),
-              ...(runProvider ? { provider: runProvider } : {}),
-              ...(runModel ? { model: runModel } : {}),
             }
           : undefined;
       // Decorate with the upstream completion id (chatcmpl-xxx) and the per-turn

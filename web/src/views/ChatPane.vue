@@ -151,11 +151,6 @@ import {
   type TurnRunPlan,
 } from "@/utils/chatTurnGroups";
 import type { SessionsListResult } from "@/api/types";
-import { estimateRoundModel } from "@/utils/roundModelEstimate";
-import {
-  isDuplicateFinal,
-  type CommittedFinalSignature,
-} from "@/utils/finalDedup";
 import { GatewayRequestError } from "@/api/gateway";
 import MarkdownView from "@/components/MarkdownView.vue";
 import ModelSelector, { type ModelOption } from "@/components/ModelSelector.vue";
@@ -822,7 +817,7 @@ function runSpendResultOf(msg: ChatMessage): JdSpendResult | undefined {
 function runSpendLoadingOf(msg: ChatMessage): boolean {
   return runSpendLoading(turnRunOf(msg));
 }
-function runModelPartsOf(msg: ChatMessage): ReturnType<typeof pickRunModel> {
+function runModelPartsOf(msg: ChatMessage): { provider: string; model: string } | null {
   return pickRunModel(turnRunOf(msg));
 }
 
@@ -1528,135 +1523,6 @@ const defaultModelKey = computed<string>(() =>
     ? `${effectiveDefaultModel.value.provider}/${effectiveDefaultModel.value.model}`
     : "",
 );
-
-/**
- * 本轮「生成模型」的兜底估算（`null` = 没有可用依据）。
- *
- * 只服务一个场景：**老网关**的 `final` 帧不带 `provider`/`model`，实时落地的那条
- * 回复底行会空着模型名（刷新走 `chat.history` 才出现真值）。这里按网关对模型覆盖的
- * **真实处理规律**先占位（见 `utils/roundModelEstimate.ts`），final 落地后由
- * `reconcileRoundMeta()` 用 `chat.history` 的真值校正。
- *
- * ⚠️ 估算值必须带 `modelEstimated: true` 落到消息上 —— 界面据此显示 `~`。
- * 不带标记就等于「替后端发言」，正是「显示 Kimi、实跑 DeepSeek」的老问题。
- */
-let roundEstimatedModel: { provider: string; model: string } | null = null;
-
-/**
- * 本轮发送时刻（ms）。`reconcileRoundMeta` 用它排除**上一轮**落库的助手消息 ——
- * 没有这个下界，回源可能拿上一轮的模型 / usage 来「校正」本轮，把对的改成错的。
- */
-let roundStartedAtMs = 0;
-
-/**
- * 该会话行是否**已存在**（语义 = 老网关会不会应用本次模型覆盖）。
- *
- * 判据优先用 `sessions.list` 的 `sessionId`：一条只有失败用户消息的会话同样已经有
- * entry，覆盖照样生效，所以不能用「有没有助手回复」单独判。
- */
-function sessionRowExists(): boolean {
-  const key = resolvedSessionKey();
-  const row = sessionRows.value.find((item) => sessionKeysMatch(item.key, key, paneAgentId.value));
-  if (row?.sessionId) return true;
-  // `sessions.list` 可能还没回来（首屏 race），或刚跑完一轮尚未回源 ——
-  // 本地已有助手消息同样说明 entry 已存在（run 收尾会落 sessionId）。
-  return messages.value.some((message) => message.role === "assistant");
-}
-
-/**
- * 网关没给 `provider`/`model` 时，用本轮估算值顶上并打上 `modelEstimated`。
- *
- * 有真值（新版网关的 final 帧）就原样返回，**绝不覆盖**网关给的值 —— 那是唯一可信来源。
- */
-function modelPartsForCommitted(
-  normalized: ChatMessage,
-): { provider?: string; model?: string; modelEstimated?: boolean } {
-  if (normalized.provider && normalized.model) {
-    return { provider: normalized.provider, model: normalized.model };
-  }
-  const estimate = roundEstimatedModel;
-  if (!estimate) return {};
-  return { provider: estimate.provider, model: estimate.model, modelEstimated: true };
-}
-
-/**
- * 每轮收尾后回源一次 `chat.history`，把**本轮的真值**补到刚落地的消息上。
- *
- * 为什么每轮都要请求：底部「上下文占用」只能来自 transcript 投影里的 `usage`
- * 字段（`gateway/chat-display-projection.ts` 的 usage 分支），而实时 final 帧
- * **不带** `usage`。以前只在「模型是估算值」时才回源，于是上下文占用要等刷新 /
- * 切会话才更新。产品口径：**每轮对话结束都刷新**。
- *
- * 同一趟顺带校正模型：老网关的 final 不带 `provider`/`model`，历史投影每条都带
- * 当轮真值 —— 拿「用户本地选择」补是错的（那正是「界面 Kimi、实跑 DeepSeek」的
- * 来源），所以只能回源。`sessions.list` 的会话行也不行：它走
- * `selectedModel ?? runtime`，实测会落后于最后一条消息。
- *
- * ⚠️ `startedAt` 是必须的时间下界：final 落地后 transcript 可能还没写完，此刻列表
- *    尾部是**上一轮**的助手消息，没有下界会把上一轮的 usage / 模型安到本轮头上。
- * ⚠️ 必须用 `gateway.request` 而不是 `requestShared`：后者有 TTL 缓存，可能命中旧数据。
- */
-async function reconcileRoundMeta(message: ChatMessage): Promise<void> {
-  // await 之后 `resolvedSessionKey()` 可能已经变了（用户切了会话）⇒ 先快照。
-  const key = resolvedSessionKey();
-  const startedAt = roundStartedAtMs;
-  for (const delay of [700, 1800]) {
-    await new Promise<void>((resolve) => window.setTimeout(resolve, delay));
-    // 等待期间消息可能已被清空 / 整表替换 —— 目标消失就收工。
-    if (!messages.value.some((item) => item.id === message.id)) return;
-    let resolved: ChatMessage | null = null;
-    try {
-      const res = await gateway.request<{ messages?: unknown[] }>("chat.history", {
-        sessionKey: key,
-        limit: 4,
-      });
-      resolved = pickRoundMetaFromHistory(res?.messages ?? [], startedAt);
-    } catch {
-      // 网关不支持 / 请求失败 ⇒ 保留现状（模型估算值仍带 `~` 标记），别重试。
-      return;
-    }
-    if (!resolved) continue;
-    const target = messages.value.find((item) => item.id === message.id);
-    if (!target) return;
-    if (resolved.provider && resolved.model) {
-      target.provider = resolved.provider;
-      target.model = resolved.model;
-      target.modelEstimated = false;
-    }
-    if (resolved.usage) target.usage = resolved.usage;
-    if (resolved.completionId && !target.completionId) target.completionId = resolved.completionId;
-    // usage 到手即达标；模型若仍是估算值（老网关），留到下一阶梯再试一次。
-    if (resolved.usage && !target.modelEstimated) return;
-  }
-}
-
-/**
- * 从 `chat.history` 的原始记录里挑出**本轮**那条助手消息（已 normalize）。
- *
- * 复用 `normalizeMessage` 而不是自己抠字段：usage 有多种别名写法
- * （`input` / `inputTokens` / `prompt_tokens` …），解析规则只应有一处。
- *
- * 返回 `null` = 本轮还没落库，调用方等下一阶梯重试，**不要**退化成别的来源。
- */
-function pickRoundMetaFromHistory(
-  records: readonly unknown[],
-  startedAt: number,
-  toleranceMs = 1500,
-): ChatMessage | null {
-  const parsed = records
-    .map((item, index) => normalizeMessage(item, index))
-    .filter((item): item is ChatMessage => item !== null);
-  for (let i = parsed.length - 1; i >= 0; i -= 1) {
-    const item = parsed[i]!;
-    if (item.role !== "assistant") continue;
-    const ts = item.ts ?? 0;
-    if (startedAt > 0 && ts > 0 && ts < startedAt - toleranceMs) return null;
-    // 同一轮的工具中间段可能既无 usage 也无模型 ⇒ 继续往前找。
-    if (!item.usage && !(item.provider && item.model)) continue;
-    return item;
-  }
-  return null;
-}
 
 
 // 切换模型时，模型的 contextWindow 可能不同（200k ↔ 16k），重拉一次
@@ -3237,88 +3103,6 @@ async function backfillAssistantMedia(target: ChatMessage): Promise<void> {
   }
 }
 
-/** 每轮收尾后，等上游记账完成再校正一次的延迟。 */
-const SPEND_BACKFILL_DELAY_MS = 4_000;
-let spendBackfillTimer: number | null = null;
-
-/**
- * 请求 `chat.spend.getBatch` 并把结果写回对应消息。
- *
- * @param ids 要查询的 completionId
- * @param opts.overwrite 已带 `spendResult` 的消息是否覆盖（默认只补空缺）。
- *   覆盖用于「final 给的是偏大的近似值」这一情形：几秒后上游已入账，
- *   `mode:"history"` 返回的是终值，写回去即为真值。
- */
-async function requestSpendResults(
-  ids: readonly string[],
-  opts?: { overwrite?: boolean },
-): Promise<void> {
-  const wanted = new Set(ids.filter((id) => typeof id === "string" && id));
-  if (wanted.size === 0) return;
-  const targets = messages.value.filter(
-    (msg) =>
-      msg.completionId && wanted.has(msg.completionId) && (opts?.overwrite || !msg.spendResult),
-  );
-  if (targets.length === 0) return;
-  const requestIds = Array.from(
-    new Set(targets.map((msg) => msg.completionId).filter((id): id is string => Boolean(id))),
-  );
-  for (const msg of targets) {
-    // 已有数值时静默校正，避免整行闪一下「积分计算中」。
-    if (!msg.spendResult) msg.spendLoading = true;
-  }
-  try {
-    const res = await gateway.request<{
-      results?: Record<string, { spend: number | null; balance: number | null }>;
-    }>("chat.spend.getBatch", { responseIds: requestIds });
-    const results = res?.results ?? {};
-    for (const msg of targets) {
-      const result = msg.completionId ? results[msg.completionId] : undefined;
-      if (result && typeof result.spend === "number" && typeof result.balance === "number") {
-        msg.spendResult = { spend: result.spend, balance: result.balance };
-      }
-      msg.spendLoading = false;
-    }
-  } catch {
-    // 静默失败：清掉 loading 标志，不弹错误提示，避免影响主聊天流。
-    for (const msg of targets) {
-      msg.spendLoading = false;
-    }
-  }
-}
-
-/**
- * 每轮收尾后延迟校正一次积分（**无条件**排一次）。
- *
- * 为什么无条件：网关判不准「本轮是否已入账」时会回退到最近观测到的**上游原值**
- * （可能还没扣本轮 ⇒ 偏大）。几秒后上游记账完成，`chat.spend.getBatch`
- * （mode:"history"）返回的就是终值 —— 覆盖回去，数值收敛到真值；而在这之前
- * 这一行始终有数，不会消失。
- *
- * ⚠️ 单例定时器 + 会话守卫：连续几轮只排一次，切换会话后不再写旧会话。
- */
-function scheduleSpendBackfill(completionId: string | null): void {
-  const key = resolvedSessionKey();
-  if (spendBackfillTimer !== null) {
-    window.clearTimeout(spendBackfillTimer);
-  }
-  spendBackfillTimer = window.setTimeout(() => {
-    spendBackfillTimer = null;
-    if (resolvedSessionKey() !== key) return;
-    if (completionId) {
-      // ⚠️ 只在它仍是最后一条助手消息时覆盖：期间若已有新轮落地，上游的
-      // `key.balance` 已经包含后续消费，覆盖会把下一轮的扣费算到这一轮头上，
-      // 反而制造出「上一轮偏小、这一轮偏大」的锯齿。
-      const lastAssistant = [...messages.value].reverse().find((m) => m.role === "assistant");
-      if (lastAssistant?.completionId === completionId) {
-        void requestSpendResults([completionId], { overwrite: true });
-      }
-      return;
-    }
-    void fetchMissingSpendResults();
-  }, SPEND_BACKFILL_DELAY_MS);
-}
-
 /**
  * 收集尚未拿到 spendResult 的历史消息 completionId，调用 gateway 的
  * `chat.spend.getBatch` 批量补全。失败/单条 null 不影响其他消息。
@@ -3326,11 +3110,30 @@ function scheduleSpendBackfill(completionId: string | null): void {
  * 请求结束后（成功或失败）清掉该标志。
  */
 async function fetchMissingSpendResults(): Promise<void> {
-  await requestSpendResults(
-    messages.value
-      .filter((msg) => !msg.spendResult && msg.completionId)
-      .map((msg) => msg.completionId as string),
-  );
+  const pending = messages.value.filter((m) => !m.spendResult && m.completionId);
+  if (pending.length === 0) return;
+  const ids = pending.map((m) => m.completionId as string);
+  for (const msg of pending) {
+    msg.spendLoading = true;
+  }
+  try {
+    const res = await gateway.request<{
+      results?: Record<string, { spend: number | null; balance: number | null }>;
+    }>("chat.spend.getBatch", { responseIds: ids });
+    const results = res?.results ?? {};
+    for (const msg of pending) {
+      const r = msg.completionId ? results[msg.completionId] : undefined;
+      if (r && typeof r.spend === "number" && typeof r.balance === "number") {
+        msg.spendResult = { spend: r.spend, balance: r.balance };
+      }
+      msg.spendLoading = false;
+    }
+  } catch {
+    // 静默失败：清掉 loading 标志，不弹错误提示，避免影响主聊天流
+    for (const msg of pending) {
+      msg.spendLoading = false;
+    }
+  }
 }
 
 /** 本轮生成内被引导的次数（流式气泡顶部「已引导 N 次」徽标用）。
@@ -3448,13 +3251,6 @@ async function send(
   // 它们是**轮次级**的，不清零会让下一轮的失败提示被上一轮的状态吞掉（见 `case "error"`）。
   roundHasGatewayOutput = false;
   roundHasLocalFailureNotice = false;
-  // 本轮的模型兜底估算也清零：只允许由本轮自己的发送写入（见下方 `estimateRoundModel`）。
-  roundEstimatedModel = null;
-  roundStartedAtMs = Date.now();
-  // 轮次级：上一轮落地的内容签名不带进新一轮 —— 否则「3 秒内连问同一个问题、
-  // 模型回了同样的话」会被内容级判重误吞。
-  lastCommittedFinal = null;
-  lastCommittedFinalKey = "";
   // 新一轮开始：清掉上一轮可能残留的「积分计算中」（正常路径下 final 已经清过，
   // 但「final 缺失 + 引导排队」这类异常收尾可能没走到）
   spendPending.value = false;
@@ -3472,18 +3268,6 @@ async function send(
   const modelParts = selectedModelParts.value;
   const modelProvider = modelParts?.provider ?? "";
   const modelId = modelParts?.model ?? "";
-
-  // 老网关的 final 帧不带 provider/model，底行模型名只能由本地先占位。
-  // ⚠️ 必须按「网关会不会应用这次覆盖」来推断，而不是照抄用户选择：
-  // 全新会话首条消息在老网关上会**丢弃**覆盖、落到 agent 默认（实测），
-  // 照抄用户选择就是「界面显示 Kimi、后台跑 DeepSeek」。推断结果只作占位，
-  // final 落地后 `reconcileRoundMeta()` 会用 `chat.history` 的真值校正并清掉估算标记。
-  const estimated = estimateRoundModel({
-    selected: modelParts,
-    defaultModel: effectiveDefaultModel.value,
-    sessionExists: sessionRowExists(),
-  });
-  roundEstimatedModel = estimated;
 
   try {
     await gateway.request("chat.send", {
@@ -3994,13 +3778,10 @@ async function exportConversation(): Promise<void> {
  * 但已经产出的内容必须落到历史里，不能因为换方向而丢掉。
  */
 function commitStreamingMessage(): void {
-  // ⚠️ 这里**不能**用本地 `effectiveModelParts`（用户选择 ?? 网关默认）直接给消息补
-  // provider/model。补了就等于替后端发言：用户切了 Kimi、网关本轮其实跑 DeepSeek 时，
-  // 界面会把「Kimi」写进这条消息的底行，刷新（走 `chat.history` 的真值）才露馅。
-  // 口径是**宁可不显示，也不显示错的**：真值只来自网关 final 帧
-  //（`server-chat.ts` 已随 final 下发本轮实际生效的 provider/model）或历史投影。
-  // 老网关的 final 不带模型名时，用 `roundEstimatedModel`（按网关行为规律推断）占位，
-  // 并**必须**带 `modelEstimated` 标记 —— 界面显示 `~`，表示这是推断值。
+  // 用落地时刻实际生效的模型回填，保证积分行能显示「生成模型」——
+  // 即使服务端 final 帧没带 provider/model，本地客户端也能补上。
+  // 注意用 effectiveModelParts（显式选择 ?? 网关默认），否则「使用默认模型」时会是空白。
+  const parts = effectiveModelParts.value;
   const text = streamingText.value;
   const thinking = streamingThinking.value || undefined;
   if (!text.trim() && !thinking?.trim()) return;
@@ -4015,6 +3796,8 @@ function commitStreamingMessage(): void {
       content: text,
       ...(thinking ? { thinking } : {}),
       timestamp: Date.now(),
+      ...(parts?.provider ? { provider: parts.provider } : {}),
+      ...(parts?.model ? { model: parts.model } : {}),
       ...(streamingSpend.value ? { spendResult: streamingSpend.value } : {}),
     },
     messages.value.length,
@@ -4022,38 +3805,23 @@ function commitStreamingMessage(): void {
   if (normalized) {
     messages.value.push({
       ...normalized,
-      ...modelPartsForCommitted(normalized),
+      provider: parts?.provider ?? normalized.provider,
+      model: parts?.model ?? normalized.model,
       text: resolveCommittedText(normalized, text),
       thinking: normalized.thinking || thinking,
       spendResult: normalized.spendResult ?? streamingSpend.value ?? undefined,
     });
   } else {
     messages.value.push({
-      ...(roundEstimatedModel
-        ? {
-            provider: roundEstimatedModel.provider,
-            model: roundEstimatedModel.model,
-            modelEstimated: true,
-          }
-        : {}),
       id: `assistant-${Date.now()}`,
       role: "assistant",
       text,
       thinking,
       ts: Date.now(),
+      provider: parts?.provider,
+      model: parts?.model,
       spendResult: streamingSpend.value ?? undefined,
     });
-  }
-  // 记录这次落地的内容，供 final 路径做内容级判重（同一段正文被「流式落地 + final」
-  // 各落一次时，final 那条会被拦掉，而不是叠成两条）。
-  const committedTail = messages.value[messages.value.length - 1];
-  if (committedTail?.role === "assistant") {
-    lastCommittedFinal = {
-      text: (committedTail.text ?? "").trim(),
-      thinking: (committedTail.thinking ?? "").trim(),
-      at: Date.now(),
-    };
-    lastCommittedFinalKey = resolvedSessionKey();
   }
   // 本轮已经有网关侧的助手产出（流式正文落了库）⇒ 后续 error 帧不再落重复的失败提示。
   roundHasGatewayOutput = true;
@@ -4199,14 +3967,8 @@ function handleEvent(evt: { event: string; payload?: unknown }): void {
     if (typeof data.delta === "string" && data.delta.length > 0) {
       delta = data.delta;
     } else if (typeof data.text === "string" && data.text.length > 0) {
-      // 没有 delta 时，按 text 整体替换（避免重复累加；上游没给 delta 就认整段）。
-      //
-      // ⚠️ 但**不允许把已积累的思考截短**：上游对思考流做节流时，快照可能滞后于
-      // 已经通过 delta 送到的内容，直接替换会让「思考过程」忽长忽短 —— 用户看到
-      // 的就是频闪。显式 `replace: true` 的快照仍然照换（那是上游在纠正整段内容）。
-      if (data.replace === true || data.text.length >= streamingThinking.value.length) {
-        streamingThinking.value = data.text;
-      }
+      // 没有 delta 时，按 text 整体替换（避免重复累加；上游没给 delta 就认整段）
+      streamingThinking.value = data.text;
       void scrollToBottom();
       return;
     }
@@ -4243,25 +4005,10 @@ function handleEvent(evt: { event: string; payload?: unknown }): void {
       break;
     }
     case "final": {
-      /**
-       * 同一个 run 的**重复 terminal**：这一轮的消息已经落过了，直接忽略。
-       *
-       * 不做这一步的后果（实测）：同一条回复被 push 两次，用户看到「回复了两次」，
-       * 而且思考块会跟着重挂一次，看起来像频闪。
-       * 只拦「已经落过消息」的 run —— 空 final 不记（见 committedFinalRuns 注释）。
-       *
-       * ⚠️ 这里**什么都不清**：第一条 final 的收尾已经跑完了；此刻 `sending` 若为 true，
-       * 说明排队/引导已经起了**新的 run**，在这条迟到的重复帧里清 `sending`
-       * 会把新气泡的转圈掐掉。
-       */
-      if (isFinalRunAlreadyCommitted(payload.runId)) {
-        break;
-      }
       const normalized = normalizeMessage(payload.message, messages.value.length);
-      // ⚠️ 模型名**只认网关给的值**：final 帧现在由网关带上本轮实际生效的
-      // `provider`/`model`（见 `server-chat.ts` 的 emitChatTerminal）。以前这里是
-      // `normalized.provider ?? effectiveModelParts`，用「用户选择」兜底 ——
-      // 于是「界面显示 Kimi、后台跑 DeepSeek」的假象永远看不出来。缺值就不显示。
+      // 当服务端 final 帧未带 provider/model（很多代理实现就是这样），
+      // 用本地实际生效的模型回填，确保积分行的「生成模型」始终可见。
+      const fallbackParts = effectiveModelParts.value;
       // final 帧可能没带 message（异常兜底路径），但前端已经累积了流式正文 / 思考。
       // 这种情况下走「落地流式内容」分支，避免用户看到「思考中」永远不消失。
       const streamedText = streamingText.value;
@@ -4328,64 +4075,23 @@ function handleEvent(evt: { event: string; payload?: unknown }): void {
             : normalized;
           const pushed: ChatMessage = {
             ...committed,
-            // 真值优先：网关 final 帧带来的 provider/model 是唯一可信来源。
-            // 老网关不带这两个字段 ⇒ 用本轮推断值占位并标 `modelEstimated`，
-            // 落地后由 `reconcileRoundMeta()` 用 `chat.history` 的真值校正（见该函数注释）。
-            ...modelPartsForCommitted(normalized),
+            provider: normalized.provider ?? fallbackParts?.provider,
+            model: normalized.model ?? fallbackParts?.model,
             // 不能再写 `normalized.text || streamedText`：纯媒体回复的 streamedText
             // 里是被剥走之前的那行 `MEDIA:/…mp3`，回落它等于把脏文本又贴回正文。
             text: resolveCommittedText(normalized, streamedText),
             thinking: normalized.thinking || streamedThinking || undefined,
             spendResult: normalized.spendResult ?? streamingSpend.value ?? undefined,
           };
-          // 内容级兜底判重：同一条回复可能被**两个不同 runId** 的 terminal 各落地一次
-          // （见 `lastCommittedFinal` 注释），按 runId 的那层拦不住。
-          const signatureText = pushed.text.trim();
-          const signatureThinking = (pushed.thinking ?? "").trim();
-          const signatureSessionKey = resolvedSessionKey();
-          if (
-            isDuplicateFinal(
-              lastCommittedFinalKey === signatureSessionKey ? lastCommittedFinal : null,
-              { text: signatureText, thinking: signatureThinking },
-              Date.now(),
-            )
-          ) {
-            // 迟到的第二条可能带着更完整的积分结果 ⇒ 补到已落地那条上，不新增气泡。
-            if (pushed.spendResult) {
-              for (let i = messages.value.length - 1; i >= 0; i -= 1) {
-                const prev = messages.value[i];
-                if (prev?.role !== "assistant") continue;
-                prev.spendResult = pushed.spendResult;
-                break;
-              }
-            }
-            markFinalRunCommitted(payload.runId);
-            cancelAuthoritativeReload();
-            break;
-          }
           messages.value.push(pushed);
-          lastCommittedFinal = {
-            text: signatureText,
-            thinking: signatureThinking,
-            at: Date.now(),
-          };
-          lastCommittedFinalKey = signatureSessionKey;
           // 本轮已经有网关侧的助手产出 ⇒ 失败回源的轮询收工（见 `scheduleAuthoritativeReload`）。
           roundHasGatewayOutput = true;
-          // 记住这个 run 已经落过消息：再收到同 run 的 final 一律不落（防「回复两次」）。
-          markFinalRunCommitted(payload.runId);
           cancelAuthoritativeReload();
           // final 推送可能带 model/provider，刷新选择器
           void loadModelList();
           // live final 帧天生不带媒体字段 —— 这一轮的附件/播放器只能回源补齐（见
           // `backfillAssistantMedia` 注释）。只在本条一个媒体位都没有时才发请求。
           void backfillAssistantMedia(pushed);
-          // 老网关的 final 不带模型名 ⇒ 底行此刻显示的是本轮推断值（带 `~`）。
-          // 用 `chat.history` 里本轮落库助手消息的真值校正（新网关 final 自带真值，这里立即 return）。
-          void reconcileRoundMeta(pushed);
-          // 每轮都排一次积分校正：网关判不准入账时会回退到「最近观测到的原值」
-          // （偏大），几秒后上游记账完成，用历史模式的终值覆盖回去。
-          scheduleSpendBackfill(pushed.completionId ?? null);
         }
       } else if (hasStreamedContent) {
         // final 帧无效（缺 message），但前端已经流到了文本 / 思考 —— 必须把已产出
@@ -4395,8 +4101,6 @@ function handleEvent(evt: { event: string; payload?: unknown }): void {
           awaitingSteeredRun.value = false;
         }
         commitStreamingMessage();
-        // 这个 run 的正文已经落进历史了，同样登记下来（重复 final 不再落第二遍）。
-        markFinalRunCommitted(payload.runId);
         // 落库后必须走 finalizeStreaming 清掉 sending/streaming 态；传入 skipCommit=true
         // 避免 commitStreamingMessage 被二次调用导致重复消息。
         finalizeStreaming(true);
@@ -4432,10 +4136,8 @@ function handleEvent(evt: { event: string; payload?: unknown }): void {
       streamingThinking.value = "";
       streamingSpend.value = null;
       // 积分已经随 final 帧落到消息上了（`pushed.spendResult`）——加载态到此结束，
-      // 数值由消息自己的 `.content-credits` 渲染。
-      // ⚠️ final 没带**可信余额**（上游尚未入账 ⇒ `balance` 为 null，网关按「不推算」
-      // 留空）时，这里依然收掉加载态，改由 `scheduleSpendBackfill()` 过几秒补一次：
-      // 既不能让「积分计算中」无限挂着，也不能在收尾路径上同步等上游。
+      // 数值由消息自己的 `.content-credits` 渲染。final 没带数值时一并结束，
+      // 不做无谓的二次查询（见 `utils/agentLifecycle.ts` 的口径说明）。
       spendPending.value = false;
       if (steeredMessages.value.length > 0) {
         // 未完成的引导还在排队：保持「进行中 = 思考中」，别让气泡消失
@@ -4612,47 +4314,6 @@ let firstFrameWatchdog: number | null = null;
  * `send()` 清零，`commitStreamingMessage()` / `case "final"` 落库时置位。
  */
 let roundHasGatewayOutput = false;
-
-/**
- * 已经**落过消息**的 final `runId`（有界，超出丢最旧的）。
- *
- * 为什么需要：网关在「lifecycle 与 chat 帧乱序 / 断线重连补发」时会对同一个 run
- * 广播两次 terminal，前端此前不判重 ⇒ 同一个回复被 push 两遍，用户看到
- * 「回复了两次」，还会连带把思考块重挂一次（观感上就是频闪）。
- *
- * 只记**真的落了消息**的 run：空 final（没有 message，走回源历史那条路）不记，
- * 否则会把随后带正文的 final 也挡掉。
- */
-const committedFinalRuns = new Map<string, true>();
-const COMMITTED_FINAL_RUNS_LIMIT = 64;
-
-/**
- * 上一次**真正落地**的助手回复签名（正文 + 思考 + 时刻）。
- *
- * 只按 `runId` 判重挡不住一种情况：网关对同一个 run 有两条收尾路径，第二条拿不到
- * registry 里的注册项，`runId` 退化成 agent 内部的 `evt.runId`
- *（`server-chat.ts:669` 的 `finished?.clientRunId ?? eventRunId`）⇒ 两个 final 的
- * `runId` 不同，判重失效 ⇒ 同一条回复 push 两遍（用户看到「回复了两次」）。
- * 这里用「内容一字不差 + 3 秒窗口」做兜底，判据与边界见 `utils/finalDedup.ts`。
- */
-let lastCommittedFinal: CommittedFinalSignature | null = null;
-/** `lastCommittedFinal` 属于哪个会话 —— 跨会话不参与判重（切换窗格/会话时不会误吞）。 */
-let lastCommittedFinalKey = "";
-
-function isFinalRunAlreadyCommitted(runId: string | undefined): boolean {
-  if (!runId) return false;
-  return committedFinalRuns.has(runId);
-}
-
-function markFinalRunCommitted(runId: string | undefined): void {
-  if (!runId) return;
-  committedFinalRuns.set(runId, true);
-  while (committedFinalRuns.size > COMMITTED_FINAL_RUNS_LIMIT) {
-    const oldest = committedFinalRuns.keys().next().value;
-    if (oldest === undefined) break;
-    committedFinalRuns.delete(oldest);
-  }
-}
 
 /** 本轮是否已经落过一条本地失败提示（同轮重复的 error 帧不该叠第二条）。 */
 let roundHasLocalFailureNotice = false;
@@ -5733,17 +5394,8 @@ function formatBalance(value: number | null | undefined): string {
                   <span
                     v-if="runModelPartsOf(msg)"
                     class="credits-item credits-item-model"
-                    :class="{ 'is-estimated': runModelPartsOf(msg)?.estimated }"
-                    :title="
-                      runModelPartsOf(msg)?.estimated
-                        ? `${runModelPartsOf(msg)?.provider}/${runModelPartsOf(msg)?.model}（本地推断，正在与网关核对）`
-                        : `${runModelPartsOf(msg)?.provider}/${runModelPartsOf(msg)?.model}`
-                    "
+                    :title="`${runModelPartsOf(msg)?.provider}/${runModelPartsOf(msg)?.model}`"
                   >
-                    <!-- 「约」= 网关没给模型名，本值是前端按网关行为推断的占位值，
-                         落地后会被 chat.history 真值校正（见 reconcileRoundMeta）。
-                         用中文「约」而不是 `~`：`~` 在中文字体里细得像减号，会被误读。 -->
-                    <span v-if="runModelPartsOf(msg)?.estimated" class="credits-model-estimated">约</span>
                     <span class="credits-value model">{{ runModelPartsOf(msg)?.model }}</span>
                   </span>
                 </template>
@@ -7356,20 +7008,6 @@ html.dark .credits-alert :deep(.el-alert__title) {
 .credits-item-model .credits-value.model {
   flex-shrink: 0;
   white-space: nowrap;
-}
-
-/* 估算态的模型名（老网关 final 帧没带模型名，前端按网关行为推断的占位值）：
-   虚线底边 + 略降透明度 + `~` 前缀，与真值一眼可区分；回源校正后这些样式自动消失。 */
-.credits-item-model.is-estimated .credits-value.model {
-  opacity: 0.78;
-  border-bottom: 1px dashed color-mix(in srgb, currentColor 45%, transparent);
-}
-
-.credits-model-estimated {
-  flex-shrink: 0;
-  margin-right: 3px;
-  font-size: 11px;
-  opacity: 0.72;
 }
 
 .credits-divider {
