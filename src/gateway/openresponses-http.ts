@@ -473,9 +473,8 @@ export async function fetchJdSpendOnce(
   spend: number | null;
   balance: number | null;
   /**
-   * Raw upstream cumulative spend (`key.spend`), used by `pollJdSpendForChat`
-   * to detect when the post-turn balance has been written. `null` when the
-   * record is not yet ready or the upstream did not return a `key` object.
+   * Raw upstream cumulative spend (`key.spend`), retained for callers that
+   * inspect accounting metadata. It does not determine the returned balance.
    */
   keySpend: number | null;
 }> {
@@ -554,40 +553,10 @@ export async function fetchAndPollJdSpend(
 
 const JD_SPEND_CHAT_POLL_DEADLINE_MS = 15_000;
 const JD_SPEND_CHAT_POLL_RETRY_DELAY_MS = 2_000;
-const JD_SPEND_BALANCE_CONVERGENCE_EPSILON = 1e-6;
 /**
- * Clamp a numeric balance at zero. `null` (unknown) is preserved so callers
- * can distinguish "upstream not yet known" from "depleted to zero". `spend`
- * is left untouched — zero-spend completions are valid and must surface as 0.
- */
-function clampBalanceFloor(balance: number | null): number | null {
-  return typeof balance === "number" ? Math.max(0, balance) : balance;
-}
-
-/**
- * Polls the JD spend endpoint in two phases:
- *  1. Wait for `spend` to resolve (this turn's cost). `spend === 0` short-
- *     circuits the poll — there is no balance change to wait for.
- *  2. Once `spend > 0`, keep polling until either a transition is observed
- *     (`key.spend` advanced by ≈ this turn's cost) or the deadline passes.
- *     The post-turn balance is the balance reported alongside the LARGEST
- *     `key.spend` we ever observed, because `key.spend` is monotonically
- *     non-decreasing (the upstream's per-record cumulative moves from
- *     pre-turn to post-turn and never back). When the deadline expires
- *     WITHOUT any transition, return the observed balance as-is (see `mode`).
- *
- * The returned balance is never allowed to increase relative to the balance
- * observed at the start of the poll: the UI renders it as a monotonically
- * decreasing credit counter, and a derived `firstBalance - spend` value would
- * interleave with the next turn's real observation and make it bounce back up.
- *
- * Rules:
- *  - R3: `spend === 0` → stop polling, return immediately (balance unchanged).
- *  - R4: while EITHER `spend` or `balance` is `null`, keep polling.
- *  - R5: a numeric balance ≤ 0 is clamped to 0 on return; `null` is preserved.
- *
- * Never throws. Returns `{ spend, balance }`; both fields may be `null` only
- * when even the spend phase failed entirely.
+ * Wait for the upstream turn spend and account balance to become available.
+ * Return the reported balance as-is: cumulative spend is not a settlement
+ * signal, and neither local subtraction nor monotonic balance rules apply.
  */
 export async function pollJdSpendForChat(
   completionId: string,
@@ -596,9 +565,8 @@ export async function pollJdSpendForChat(
     retryDelayMs?: number;
     deadlineMs?: number;
     /**
-     * Caller context, kept for call-site clarity. Both modes resolve a stable,
-     * never-transitioned record the same way: return the observed balance
-     * as-is (never a derived `firstBalance - spend`).
+     * Caller context, kept for compatibility. Both modes return the upstream
+     * balance as-is once spend and balance are available.
      *  - "final" (default): the chat just finished.
      *  - "history": the record is from a past turn.
      */
@@ -612,7 +580,6 @@ export async function pollJdSpendForChat(
   const base = cfg.spendBaseUrl.replace(/\/+$/, "").replace(/\/v1$/, "");
   const deadline = Date.now() + (opts?.deadlineMs ?? JD_SPEND_CHAT_POLL_DEADLINE_MS);
   const retryDelay = opts?.retryDelayMs ?? JD_SPEND_CHAT_POLL_RETRY_DELAY_MS;
-  const mode = opts?.mode ?? "final";
   const isAborted = () => opts?.signal?.aborted === true;
 
   const sleep = (ms: number) =>
@@ -627,84 +594,32 @@ export async function pollJdSpendForChat(
       }
     });
 
-  // Phase 1 — wait for `spend` to resolve.
   let result = await fetchJdSpendOnce(base, cfg.apiKey, completionId, opts?.signal);
-  while ((!result.ok || result.spend === null) && !isAborted() && Date.now() < deadline) {
+  while (
+    (!result.ok || result.spend === null || result.balance === null) &&
+    !isAborted() &&
+    Date.now() < deadline
+  ) {
     await sleep(retryDelay);
     if (isAborted() || Date.now() >= deadline) {
       break;
     }
     result = await fetchJdSpendOnce(base, cfg.apiKey, completionId, opts?.signal);
   }
-  if (!result.ok || result.spend === null) {
-    return { spend: null, balance: null };
-  }
-  const spend = result.spend;
-  const firstBalance = result.balance;
-  const firstKeySpend = result.keySpend;
-
-  // R3 — spend === 0 means no balance change; return current state.
-  if (spend === 0) {
-    return { spend: 0, balance: clampBalanceFloor(firstBalance) };
-  }
-
-  // Phase 2 — track the best (largest key.spend) observation. We need at
-  // least one more fetch to detect a transition or confirm stability.
-  let bestKeySpend = firstKeySpend ?? -Infinity;
-  let bestBalance: number | null = firstBalance;
-  let sawTransition = firstKeySpend === null; // null keySpend ⇒ treat as already converged
-  while (!isAborted() && Date.now() < deadline) {
-    await sleep(retryDelay);
-    if (isAborted() || Date.now() >= deadline) {
-      break;
-    }
-    const refined = await fetchJdSpendOnce(base, cfg.apiKey, completionId, opts?.signal);
-    if (!refined.ok) {
-      continue;
-    }
-    if (typeof refined.keySpend === "number") {
-      if (refined.keySpend > bestKeySpend) {
-        bestKeySpend = refined.keySpend;
-        bestBalance = refined.balance;
-        // A jump ≥ spend means the record has accumulated this turn's cost.
-        if (
-          typeof firstKeySpend === "number" &&
-          refined.keySpend + JD_SPEND_BALANCE_CONVERGENCE_EPSILON >= firstKeySpend + spend
-        ) {
-          sawTransition = true;
-        }
-      }
-    } else if (typeof refined.balance === "number" && bestBalance === null) {
-      bestBalance = refined.balance;
-    }
-    if (sawTransition && typeof bestBalance === "number") {
-      return { spend, balance: clampBalanceFloor(bestBalance) };
-    }
-  }
-
-  // Deadline / abort resolution.
-  if (sawTransition && typeof bestBalance === "number") {
-    return { spend, balance: clampBalanceFloor(bestBalance) };
-  }
-  // No transition observed: the record is still in its pre-turn state, so the
-  // only trustworthy balance is the one we actually observed. Deriving
-  // `firstBalance - spend` here would emit a value that the next turn's real
-  // observation overwrites with a LARGER number, which surfaces as a credit
-  // counter that drops and then bounces back up. Both modes therefore return
-  // the observed balance as-is; `spend` still reports this turn's cost.
-  return { spend, balance: clampBalanceFloor(bestBalance ?? firstBalance) };
+  return result.ok
+    ? { spend: result.spend, balance: result.balance }
+    : { spend: null, balance: null };
 }
 
 export interface PollSpendBatchOptions {
   /** Maximum number of concurrent polls (default 4). */
   concurrency?: number;
   /** Per-message wall-clock budget; once exceeded, the poll is aborted and
-   *  the best-known `spend`/`balance` (or computed fallback) is returned. */
+   *  returns the last response's fields without computing a fallback. */
   perMessageTimeoutMs?: number;
   /** Override the inter-retry delay (default 2000ms). */
   retryDelayMs?: number;
-  /** Context passed through to each per-message poll. History backfill uses
-   *  "history" so a never-transitioned record is trusted as-is. */
+  /** Caller context passed through to each per-message poll. */
   mode?: "final" | "history";
 }
 

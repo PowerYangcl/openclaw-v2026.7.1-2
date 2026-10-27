@@ -50,10 +50,12 @@ export type ChatMessage = {
   completionId?: string;
   /** 本轮思考过程（如果服务端推送了 thinking 块） */
   thinking?: string;
-  /** 本轮消耗积分与剩余积分（来自服务端消息） */
+  /** 服务端消耗与查询时的真实账户余额，不代表逐轮结算快照。 */
   spendResult?: JdSpendResult;
-  /** 历史消息正在异步查询积分时为 true（前端 UI 展示「积分计算中」） */
+  /** 实时/历史余额待刷新；超时仍保留「积分计算中」。 */
   spendLoading?: boolean;
+  /** 页内刷新基准及固定截止时间，回源替换消息时保留。 */
+  spendRefresh?: { baseline: number | null; deadline: number };
   /** 本轮 token 用量（用于算上下文占用百分比） */
   usage?: TokenUsage;
   /**

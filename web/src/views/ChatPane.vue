@@ -150,6 +150,7 @@ import {
   turnRunKeyOf,
   type TurnRunPlan,
 } from "@/utils/chatTurnGroups";
+import { createChatSpendRefresh } from "@/utils/chatSpendRefresh";
 import type { SessionsListResult } from "@/api/types";
 import { GatewayRequestError } from "@/api/gateway";
 import MarkdownView from "@/components/MarkdownView.vue";
@@ -2940,7 +2941,7 @@ async function loadHistoryInner(seq: number, options?: { skipCache?: boolean }):
       noticesBeforeLoad,
       mergeBackgroundAssistantMessages(
         cacheKey,
-        cached.filter((item) => !deleted.has(item.id)),
+        spendRefresh.preserve(cached.filter((item) => !deleted.has(item.id))),
       ),
       requestKey,
     );
@@ -2998,7 +2999,7 @@ async function loadHistoryInner(seq: number, options?: { skipCache?: boolean }):
       noticesBeforeLoad,
       mergeBackgroundAssistantMessages(
         cacheKey,
-        preserveLocalTailMessages(serverMessages, snapshot),
+        spendRefresh.preserve(preserveLocalTailMessages(serverMessages, snapshot)),
       ),
       requestKey,
     );
@@ -3103,36 +3104,21 @@ async function backfillAssistantMedia(target: ChatMessage): Promise<void> {
   }
 }
 
-/**
- * 收集尚未拿到 spendResult 的历史消息 completionId，调用 gateway 的
- * `chat.spend.getBatch` 批量补全。失败/单条 null 不影响其他消息。
- * 期间为涉及的消息设置 `spendLoading = true`，UI 会展示「积分计算中」；
- * 请求结束后（成功或失败）清掉该标志。
- */
-async function fetchMissingSpendResults(): Promise<void> {
-  const pending = messages.value.filter((m) => !m.spendResult && m.completionId);
-  if (pending.length === 0) return;
-  const ids = pending.map((m) => m.completionId as string);
-  for (const msg of pending) {
-    msg.spendLoading = true;
-  }
-  try {
+const spendRefresh = createChatSpendRefresh({
+  session: () => qualifiedSessionKey.value,
+  messages: () => messages.value,
+  query: async (responseIds) => {
     const res = await gateway.request<{
       results?: Record<string, { spend: number | null; balance: number | null }>;
-    }>("chat.spend.getBatch", { responseIds: ids });
-    const results = res?.results ?? {};
-    for (const msg of pending) {
-      const r = msg.completionId ? results[msg.completionId] : undefined;
-      if (r && typeof r.spend === "number" && typeof r.balance === "number") {
-        msg.spendResult = { spend: r.spend, balance: r.balance };
-      }
-      msg.spendLoading = false;
-    }
-  } catch {
-    // 静默失败：清掉 loading 标志，不弹错误提示，避免影响主聊天流
-    for (const msg of pending) {
-      msg.spendLoading = false;
-    }
+    }>("chat.spend.getBatch", { responseIds });
+    return res?.results ?? {};
+  },
+});
+
+/** 补缺失余额或恢复页内刷新；已知历史余额不重查、不改写。 */
+function fetchMissingSpendResults(): void {
+  for (const message of messages.value) {
+    if (message.completionId || message.spendRefresh) spendRefresh.start(message);
   }
 }
 
@@ -3437,6 +3423,7 @@ function applyModelCommand(args: string): void {
  */
 async function clearConversation(): Promise<void> {
   const key = resolvedSessionKey();
+  spendRefresh.stop();
   await gateway.request("sessions.reset", { key, reason: "reset" });
   // 与「切换会话」同一套本地清理（见 `watch(() => sessionKey.value)`），
   // 差别只是 key 没变、得自己动手。
@@ -3823,6 +3810,7 @@ function commitStreamingMessage(): void {
       spendResult: streamingSpend.value ?? undefined,
     });
   }
+  spendRefresh.start(messages.value[messages.value.length - 1]!, true);
   // 本轮已经有网关侧的助手产出（流式正文落了库）⇒ 后续 error 帧不再落重复的失败提示。
   roundHasGatewayOutput = true;
   // 新增的 assistant 消息可能携带 model/provider，重新聚合模型列表
@@ -4084,6 +4072,7 @@ function handleEvent(evt: { event: string; payload?: unknown }): void {
             spendResult: normalized.spendResult ?? streamingSpend.value ?? undefined,
           };
           messages.value.push(pushed);
+          spendRefresh.start(messages.value[messages.value.length - 1]!, true);
           // 本轮已经有网关侧的助手产出 ⇒ 失败回源的轮询收工（见 `scheduleAuthoritativeReload`）。
           roundHasGatewayOutput = true;
           cancelAuthoritativeReload();
@@ -4135,9 +4124,7 @@ function handleEvent(evt: { event: string; payload?: unknown }): void {
       streamingText.value = "";
       streamingThinking.value = "";
       streamingSpend.value = null;
-      // 积分已经随 final 帧落到消息上了（`pushed.spendResult`）——加载态到此结束，
-      // 数值由消息自己的 `.content-credits` 渲染。final 没带数值时一并结束，
-      // 不做无谓的二次查询（见 `utils/agentLifecycle.ts` 的口径说明）。
+      // final 后由消息刷新路径接管：重复/缺失余额继续查真实值，超时保留计算中。
       spendPending.value = false;
       if (steeredMessages.value.length > 0) {
         // 未完成的引导还在排队：保持「进行中 = 思考中」，别让气泡消失
@@ -4564,6 +4551,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  spendRefresh.stop();
   unsubscribe?.();
   historyTopObserver?.disconnect();
   historyTopObserver = null;
@@ -4604,6 +4592,7 @@ const qualifiedSessionKey = computed<string>(
 watch(
   qualifiedSessionKey,
   (next, previous) => {
+    if (next !== previous) spendRefresh.stop();
     if (!next || next === previous) return;
     // 切走的那个会话的附件 payload 必须释放：objectURL 不释放会一路泄漏，
     // 而且下次切回来时预览会指到旧 blob。

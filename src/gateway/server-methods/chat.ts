@@ -3978,8 +3978,9 @@ export const chatHandlers: GatewayRequestHandlers = {
                 sessionKey,
                 ...(requestedAgentId ? { agentId: requestedAgentId } : {}),
               },
-              // Guard on sessionId to avoid clobbering a different session row
-              // when the loaded entry has no sessionId yet.
+              // Guard against a concurrently replaced/created session row. For a
+              // first send, inspect existingEntry: current includes fallbackEntry's
+              // sessionId even when no row has been persisted yet.
               entrySessionId
                 ? (current) =>
                     current.sessionId === entrySessionId
@@ -4001,8 +4002,8 @@ export const chatHandlers: GatewayRequestHandlers = {
                           fallbackNoticeReason: cloned.fallbackNoticeReason,
                         }
                       : null
-                : (current) =>
-                    current.sessionId
+                : (_current, { existingEntry }) =>
+                    existingEntry?.sessionId
                       ? null
                       : {
                           providerOverride: cloned.providerOverride,

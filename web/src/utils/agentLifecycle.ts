@@ -26,7 +26,7 @@
  * `finalizeLifecycleEvent` 之外，同一条 agent 事件在 `server-chat.ts:1448-1464`
  * 就已经被 `sendAgentPayload` 广播给 control-ui 了，**早于** 1542 行的
  * `finalizeLifecycleEvent`（后者才去 await 积分轮询）。所以前端能稳定地先收到
- * lifecycle `end`、后收到带积分的 `final`，**不需要自己再发一次查询**。
+ * lifecycle `end`、后收到 `final`。final 的余额可能尚未扣费，重复/缺失值由消息刷新接管。
  *
  * 事件形态（`src/auto-reply/reply/agent-lifecycle-terminal.ts:76-120`）：
  * ```jsonc

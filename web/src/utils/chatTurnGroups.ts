@@ -151,9 +151,10 @@ export function canCopyRun(run: readonly ChatMessage[]): boolean {
  *
  * 为什么不是「组内最后一条消息」：组尾常常是 `toolResult` 段（它没有 `responseId`、
  * 也就永远没有积分），严格按「末条」取会让整组的积分凭空消失。往前找第一条有值的
- * 消息，语义仍是「这一轮结束时的剩余积分」，与实时 `final` 帧的口径一致，且**不求和**。
+ * 消息，仅代表查询时的真实账户余额，且**不求和**；待刷新时不透出旧值。
  */
 export function runSpendResult(run: readonly ChatMessage[]): JdSpendResult | undefined {
+  if (runSpendLoading(run)) return undefined;
   for (let i = run.length - 1; i >= 0; i -= 1) {
     const spend = run[i]?.spendResult;
     if (spend) return spend;
